@@ -94,6 +94,8 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-test-"));
   const client = new FakeClient();
   const config = await options(directory);
+  const liveMatches: string[] = [];
+  config.onMatch = (comment) => liveMatches.push(comment.commentId);
 
   const report = await runCommentFinder(client, governor(20), config);
 
@@ -112,6 +114,7 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(lines.length, 2);
   const records = lines.map((line) => JSON.parse(line));
   assert.deepEqual(records.map((record) => record.commentId), ["c1", "c2"]);
+  assert.deepEqual(liveMatches, ["c1", "c2"]);
   assert.deepEqual(records[0].sources, ["record"]);
 
   const state = JSON.parse(await readFile(config.statePath, "utf8"));

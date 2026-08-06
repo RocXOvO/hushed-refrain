@@ -113,6 +113,8 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-"));
   const client = new ParallelFakeClient();
   const config = await options(directory);
+  const liveMatches: string[] = [];
+  config.onMatch = (comment) => liveMatches.push(comment.commentId);
   const report = await runParallelSongScan([{
     name: "lane-1",
     client,
@@ -127,6 +129,7 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   const result = JSON.parse((await readFile(config.outputPath, "utf8")).trim());
   assert.equal(result.userId, "42");
   assert.equal(result.songId, "186016");
+  assert.deepEqual(liveMatches, ["comment-75"]);
 });
 
 test("stops after one match while concurrent pages are in flight", async () => {

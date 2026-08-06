@@ -40,7 +40,7 @@ export async function runParallelSongScan(
   const state = loaded ?? createParallelState(options);
   const initialRequests = state.requestCount;
   const seenCommentIds = new Set(state.seenCommentIds);
-  const writer = new JsonlResultWriter(options.outputPath);
+  const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
   await writer.initialize();
 
   let checkpointTail = Promise.resolve();

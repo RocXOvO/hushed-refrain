@@ -7,7 +7,10 @@ export class JsonlResultWriter {
   private initialized = false;
   private appendTail: Promise<void> = Promise.resolve();
 
-  constructor(private readonly path: string) {}
+  constructor(
+    private readonly path: string,
+    private readonly onAppend?: (record: FoundComment) => void,
+  ) {}
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
@@ -38,12 +41,22 @@ export class JsonlResultWriter {
     let added = false;
     const write = this.appendTail.then(async () => {
       if (this.existingIds.has(record.commentId)) return;
-      await appendFile(this.path, `${JSON.stringify(record)}\n`, "utf8");
+      const stored = {
+        ...record,
+        commentUrl: record.commentUrl ?? neteaseCommentUrl(record.songId, record.commentId),
+      };
+      await appendFile(this.path, `${JSON.stringify(stored)}\n`, "utf8");
       this.existingIds.add(record.commentId);
       added = true;
+      try { this.onAppend?.(stored); } catch { /* UI delivery must not interrupt persistence. */ }
     });
     this.appendTail = write.catch(() => {});
     await write;
     return added;
   }
+}
+
+export function neteaseCommentUrl(songId: string | undefined, commentId: string): string | undefined {
+  if (!songId || !/^\d+$/.test(songId) || !/^\d+$/.test(commentId)) return undefined;
+  return `https://music.163.com/#/song?id=${encodeURIComponent(songId)}&commentId=${encodeURIComponent(commentId)}`;
 }

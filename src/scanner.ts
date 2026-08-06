@@ -58,7 +58,7 @@ export async function runCommentFinder(
     delete state.blockedUntil;
   }
 
-  const writer = new JsonlResultWriter(options.outputPath);
+  const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
   await writer.initialize();
 
   const checkpoint = async (): Promise<void> => {
@@ -123,7 +123,7 @@ export async function runPooledCommentFinder(
   const state = loadedState ?? createState(options, "scan");
   const initialRequests = state.requestCount;
   const seenCommentIds = new Set(state.seenCommentIds);
-  const writer = new JsonlResultWriter(options.outputPath);
+  const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
   await writer.initialize();
 
   if (state.blockedUntil) {

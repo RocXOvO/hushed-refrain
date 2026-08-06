@@ -162,9 +162,12 @@ interface PoolSnapshot {
   source?: ProxyPoolSource;
   pid?: number;
   generatedAt?: string;
+  sourceConfigPath?: string;
   entries: ProxyPoolEntry[];
   discovery: ReturnType<typeof discoverClashVerge>;
 }
+
+type MatchSubscriber = (comment: FoundComment) => void;
 
 const projectRoot = resolve(__dirname, "..");
 const webRoot = join(projectRoot, "web");
@@ -175,6 +178,7 @@ class JobManager {
   private lanes: SourceScanLane[] = [];
   private statePath?: string;
   private outputPath?: string;
+  private readonly matchSubscribers = new Set<MatchSubscriber>();
 
   constructor(private readonly paths: RuntimePaths) {}
 
@@ -185,7 +189,7 @@ class JobManager {
     const uid = numericId(input.uid, "UID");
     const source = selection(input.source, ["record", "likes", "both"] as const, "source");
     const recordScope = selection(input.recordScope ?? "all", ["all", "week"] as const, "recordScope");
-    const requestBudget = integer(input.requestBudget ?? 250, "requestBudget", 1, 100_000);
+    const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const minDelayMs = integer(input.minDelayMs ?? 2_500, "minDelayMs", 0, 600_000);
     const jitterMs = integer(input.jitterMs ?? 800, "jitterMs", 0, 600_000);
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
@@ -203,7 +207,7 @@ class JobManager {
       name: poolEntries[index]?.name ?? (endpoint ? "static-proxy" : "direct"),
       client: new EnhancedNcmClient({ proxy: endpoint }),
       governor: new RequestGovernor({
-        requestBudget: Math.max(1_000, requestBudget * 2),
+        requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2),
         minDelayMs,
         jitterMs,
         maxRetries: 3,
@@ -222,9 +226,10 @@ class JobManager {
       historyPageSize: 50,
       maxCommentPagesPerSong,
       maxSongs,
-      stopAfterFirst: bool(input.stopAfterFirst),
+      stopAfterFirst: false,
       fresh: bool(input.fresh),
       dryRun: bool(input.dryRun),
+      onMatch: (comment) => this.publishMatch(comment),
     };
     this.snapshotValue = {
       ...emptySnapshot(), id: randomUUID(), status: "running", uid, source, recordScope,
@@ -280,6 +285,17 @@ class JobManager {
 
   results(limit: number): Promise<FoundComment[]> { return readJsonl(this.outputPath, limit); }
 
+  subscribeMatches(subscriber: MatchSubscriber): () => void {
+    this.matchSubscribers.add(subscriber);
+    return () => this.matchSubscribers.delete(subscriber);
+  }
+
+  private publishMatch(comment: FoundComment): void {
+    for (const subscriber of this.matchSubscribers) {
+      try { subscriber(comment); } catch { /* One disconnected UI must not block other subscribers. */ }
+    }
+  }
+
   private fail(activeId: string | undefined, error: unknown): void {
     if (this.snapshotValue.id !== activeId) return;
     this.snapshotValue = { ...this.snapshotValue, status: "error", finishedAt: new Date().toISOString(), error: message(error) };
@@ -291,6 +307,7 @@ class ParallelJobManager {
   private lanes: ParallelCommentLane[] = [];
   private statePath?: string;
   private outputPath?: string;
+  private readonly matchSubscribers = new Set<MatchSubscriber>();
 
   constructor(private readonly paths: RuntimePaths) {}
 
@@ -303,7 +320,7 @@ class ParallelJobManager {
     const workersPerLane = integer(input.workersPerProxy ?? 3, "workersPerProxy", 1, 16);
     const shardCount = integer(input.shards ?? 96, "shards", 1, 512);
     const pageSize = integer(input.pageSize ?? 1_000, "pageSize", 1, 2_000);
-    const requestBudget = integer(input.requestBudget ?? 5_000, "requestBudget", 1, 100_000);
+    const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const maxPages = integer(input.maxPages ?? 0, "maxPages", 0, 1_000_000);
     const minDelayMs = integer(input.minDelayMs ?? 333, "minDelayMs", 0, 600_000);
     const jitterMs = integer(input.jitterMs ?? 100, "jitterMs", 0, 600_000);
@@ -315,7 +332,7 @@ class ParallelJobManager {
       name: `proxy-${index + 1}`,
       client: new EnhancedNcmClient({ proxy: entry.endpoint }),
       governor: new RequestGovernor({
-        requestBudget: Math.max(1_000, requestBudget * 2), minDelayMs, jitterMs,
+        requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2), minDelayMs, jitterMs,
         maxRetries: 2, forbiddenCooldownMs,
       }),
     }));
@@ -333,8 +350,9 @@ class ParallelJobManager {
     void runParallelSongScan(this.lanes, {
       uid, songId, songName: song.name, startTime: previous?.startTime ?? song.publishTime ?? Date.UTC(2000, 0, 1),
       endTime: previous?.endTime ?? Date.now(), shardCount, pageSize, workersPerLane,
-      requestBudget, maxPages, stopAfterFirst: input.stopAfterFirst === undefined ? true : bool(input.stopAfterFirst),
+      requestBudget, maxPages, stopAfterFirst: false,
       fresh: bool(input.fresh), statePath: this.statePath, outputPath: this.outputPath,
+      onMatch: (comment) => this.publishMatch(comment),
     }).then((report) => {
       if (this.snapshotValue.id !== activeId) return;
       this.snapshotValue = {
@@ -372,6 +390,17 @@ class ParallelJobManager {
   }
 
   results(limit: number): Promise<FoundComment[]> { return readJsonl(this.outputPath, limit); }
+
+  subscribeMatches(subscriber: MatchSubscriber): () => void {
+    this.matchSubscribers.add(subscriber);
+    return () => this.matchSubscribers.delete(subscriber);
+  }
+
+  private publishMatch(comment: FoundComment): void {
+    for (const subscriber of this.matchSubscribers) {
+      try { subscriber(comment); } catch { /* One disconnected UI must not block other subscribers. */ }
+    }
+  }
 }
 
 class PoolManager {
@@ -386,6 +415,7 @@ class PoolManager {
       source: pool?.source,
       pid: pool?.pid,
       generatedAt: pool?.generatedAt,
+      sourceConfigPath: pool?.sourceConfigPath,
       entries: publicPoolEntries(pool?.entries ?? []),
       discovery: discoverClashVerge(),
     };
@@ -398,7 +428,7 @@ class PoolManager {
       const defaults = defaultMihomoPoolOptions(this.paths.root);
       await startMihomoPool({
         ...defaults,
-        sourceConfigPath: optionalPath(input.sourceConfigPath) ?? defaults.sourceConfigPath,
+        sourceConfigPath: selectedClashConfigPath(input.sourceConfigPath) ?? defaults.sourceConfigPath,
         mihomoPath: optionalPath(input.mihomoPath) ?? defaults.mihomoPath,
         workDirectory: this.paths.poolWork,
         poolPath: this.paths.pool,
@@ -490,10 +520,12 @@ async function route(
   if (method === "GET" && url.pathname === "/api/job") return json(response, 200, await jobs.status());
   if (method === "POST" && url.pathname === "/api/job") return json(response, 202, await jobs.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/job/stop") return json(response, 200, await jobs.stop());
+  if (method === "GET" && url.pathname === "/api/results/stream") return streamMatches(request, response, (subscriber) => jobs.subscribeMatches(subscriber));
   if (method === "GET" && url.pathname === "/api/results") return json(response, 200, { results: await jobs.results(limit(url)) });
   if (method === "GET" && url.pathname === "/api/parallel/job") return json(response, 200, await parallel.status());
   if (method === "POST" && url.pathname === "/api/parallel/job") return json(response, 202, await parallel.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/parallel/job/stop") return json(response, 200, await parallel.stop());
+  if (method === "GET" && url.pathname === "/api/parallel/results/stream") return streamMatches(request, response, (subscriber) => parallel.subscribeMatches(subscriber));
   if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, { results: await parallel.results(limit(url)) });
   if (method === "GET" && url.pathname === "/api/pool") return json(response, 200, await pool.status());
   if (method === "POST" && url.pathname === "/api/pool/start") return json(response, 202, await pool.start(await body(request)));
@@ -568,6 +600,38 @@ async function file(response: ServerResponse, path: string, contentType: string,
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" });
   response.end(`${JSON.stringify(value)}\n`);
+}
+
+function streamMatches(
+  request: IncomingMessage,
+  response: ServerResponse,
+  subscribe: (subscriber: MatchSubscriber) => () => void,
+): void {
+  response.writeHead(200, {
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.write(": connected\n\n");
+  const unsubscribe = subscribe((comment) => {
+    if (!response.destroyed) response.write(`event: match\ndata: ${JSON.stringify(comment)}\n\n`);
+  });
+  const heartbeat = setInterval(() => {
+    if (!response.destroyed) response.write(": keep-alive\n\n");
+  }, 15_000);
+  heartbeat.unref();
+  let closed = false;
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    unsubscribe();
+    if (!response.destroyed) response.end();
+  };
+  request.once("aborted", close);
+  response.once("close", close);
 }
 
 async function readCookie(path: string): Promise<string | undefined> {
@@ -655,6 +719,17 @@ function optionalPath(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new HttpError(400, "路径格式错误。");
   return resolve(value.trim());
+}
+function selectedClashConfigPath(value: unknown): string | undefined {
+  const path = optionalPath(value);
+  if (!path) return undefined;
+  const discovery = discoverClashVerge();
+  const allowed = new Set([
+    ...discovery.configCandidates,
+    ...discovery.profiles.map((profile) => profile.path),
+  ].map((candidate) => resolve(candidate)));
+  if (!allowed.has(path)) throw new HttpError(400, "请选择 Clash Verge 已发现的代理配置。");
+  return path;
 }
 function publicPoolEntries(entries: ProxyPoolEntry[]): ProxyPoolEntry[] {
   return entries.map((entry) => ({ ...entry, endpoint: maskProxyCredentials(entry.endpoint) }));

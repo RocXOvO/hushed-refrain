@@ -14,7 +14,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
 
   const page = await fetch(`${base}/`);
   assert.equal(page.status, 200);
-  assert.match(await page.text(), /云评检索台/);
+  const pageText = await page.text();
+  assert.match(pageText, /云评检索台/);
+  assert.match(pageText, /持续扫描并实时输出/);
+  assert.doesNotMatch(pageText, /首条命中后/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
@@ -31,6 +34,30 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const pooledValue = await pooledEstimate.json() as { expectedSeconds: number; totalWorkers: number };
   assert.equal(pooledValue.expectedSeconds, 725);
   assert.equal(pooledValue.totalWorkers, 4);
+});
+
+test("dashboard opens a live result event stream", async (context) => {
+  const server = await startDashboard({ host: "127.0.0.1", port: 0 });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const controller = new AbortController();
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/results/stream`, {
+    signal: controller.signal,
+  });
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /text\/event-stream/);
+  const reader = response.body!.getReader();
+  const first = await reader.read();
+  assert.match(new TextDecoder().decode(first.value), /connected/);
+  const pending = reader.read();
+  const state = await Promise.race([
+    pending.then((value) => value.done ? "closed" : "data", () => "aborted"),
+    new Promise<"open">((done) => setTimeout(() => done("open"), 30)),
+  ]);
+  assert.equal(state, "open");
+  controller.abort();
+  await pending.catch(() => undefined);
 });
 
 test("dashboard exposes the startup update check", async (context) => {
@@ -102,4 +129,19 @@ test("dashboard validates an external proxy pool before importing it", async (co
   });
   assert.equal(response.status, 400);
   assert.match(await response.text(), /代理地址/);
+});
+
+test("dashboard rejects an arbitrary Clash Verge config path", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-config-"));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/pool/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ sourceConfigPath: join(runtimeRoot, "not-a-discovered-profile.yaml") }),
+  });
+
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /已发现的代理配置/);
 });

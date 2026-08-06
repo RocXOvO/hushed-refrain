@@ -133,6 +133,7 @@ export interface ParallelSongScanOptions {
   fresh: boolean;
   statePath: string;
   outputPath: string;
+  onMatch?: (comment: FoundComment) => void;
 }
 
 export interface ParallelSongScanReport {
@@ -164,6 +165,7 @@ export interface FoundComment extends CommentRecord {
   playCount?: number;
   route: "song-comments" | "user-history";
   capturedAt: string;
+  commentUrl?: string;
 }
 
 export interface SongScanProgress {
@@ -216,6 +218,7 @@ export interface ScanOptions {
   stopAfterFirst: boolean;
   fresh: boolean;
   dryRun: boolean;
+  onMatch?: (comment: FoundComment) => void;
 }
 
 export interface RunReport {

@@ -1,10 +1,10 @@
-import { closeSync, existsSync, openSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
@@ -54,6 +54,15 @@ export interface ClashVergeDiscovery {
   mihomoPath?: string;
   configCandidates: string[];
   mihomoCandidates: string[];
+  profiles: ClashVergeProfile[];
+}
+
+export interface ClashVergeProfile {
+  uid: string;
+  name: string;
+  path: string;
+  type: "remote" | "local";
+  active: boolean;
 }
 
 export async function startMihomoPool(
@@ -489,19 +498,19 @@ export function defaultMihomoPoolOptions(projectRoot: string): MihomoPoolOptions
 
 export function discoverClashVerge(): ClashVergeDiscovery {
   const userHome = homedir();
-  const configCandidates = process.platform === "darwin"
-    ? [
-      join(userHome, "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
-      join(userHome, "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge-check.yaml"),
-    ]
+  const roots = process.platform === "darwin"
+    ? [join(userHome, "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev")]
     : process.platform === "win32"
-    ? [
-      join(process.env.APPDATA ?? join(userHome, "AppData", "Roaming"), "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
-    ]
+    ? [join(process.env.APPDATA ?? join(userHome, "AppData", "Roaming"), "io.github.clash-verge-rev.clash-verge-rev")]
     : [
-      join(process.env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
-      join(userHome, ".local", "share", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
+      join(process.env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "io.github.clash-verge-rev.clash-verge-rev"),
+      join(userHome, ".local", "share", "io.github.clash-verge-rev.clash-verge-rev"),
     ];
+  const configCandidates = roots.flatMap((root) => [
+    join(root, "clash-verge.yaml"),
+    join(root, "clash-verge-check.yaml"),
+  ]);
+  const profiles = uniqueProfiles(roots.flatMap((root) => readClashVergeProfiles(join(root, "profiles.yaml"))));
   const mihomoCandidates = process.platform === "darwin"
     ? [
       "/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo",
@@ -517,7 +526,9 @@ export function discoverClashVerge(): ClashVergeDiscovery {
   const configuredMihomo = process.env.NCM_MIHOMO_PATH?.trim();
   if (configuredConfig) configCandidates.unshift(resolve(configuredConfig));
   if (configuredMihomo) mihomoCandidates.unshift(resolve(configuredMihomo));
-  const configPath = configCandidates.find(existsSync);
+  const configPath = configCandidates.find(existsSync)
+    ?? profiles.find((profile) => profile.active)?.path
+    ?? profiles[0]?.path;
   const mihomoPath = mihomoCandidates.find(existsSync);
   return {
     platform: process.platform,
@@ -526,5 +537,44 @@ export function discoverClashVerge(): ClashVergeDiscovery {
     mihomoPath,
     configCandidates: [...new Set(configCandidates)],
     mihomoCandidates: [...new Set(mihomoCandidates)],
+    profiles,
   };
+}
+
+export function readClashVergeProfiles(indexPath: string): ClashVergeProfile[] {
+  if (!existsSync(indexPath)) return [];
+  try {
+    const document = parse(readFileSync(indexPath, "utf8")) as YamlObject;
+    const current = typeof document.current === "string" ? document.current : undefined;
+    const items = Array.isArray(document.items) ? document.items : [];
+    const profileRoot = resolve(dirname(indexPath), "profiles");
+    return items.flatMap((value) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+      const item = value as YamlObject;
+      if (item.type !== "remote" && item.type !== "local") return [];
+      if (typeof item.uid !== "string" || typeof item.file !== "string") return [];
+      if (!/\.ya?ml$/i.test(item.file)) return [];
+      const path = resolve(profileRoot, item.file);
+      if (path !== profileRoot && !path.startsWith(`${profileRoot}${sep}`)) return [];
+      if (!existsSync(path)) return [];
+      return [{
+        uid: item.uid,
+        name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : item.file,
+        path,
+        type: item.type,
+        active: item.uid === current,
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+function uniqueProfiles(profiles: ClashVergeProfile[]): ClashVergeProfile[] {
+  const seen = new Set<string>();
+  return profiles.filter((profile) => {
+    if (seen.has(profile.path)) return false;
+    seen.add(profile.path);
+    return true;
+  });
 }
