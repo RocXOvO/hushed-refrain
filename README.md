@@ -18,7 +18,7 @@
 Windows 用户可直接运行：
 
 ```text
-release/NCM-Comment-Finder-Setup-0.3.0.exe
+release/NCM-Comment-Finder-Setup-0.3.1.exe
 ```
 
 安装器支持选择目录，并使用应用的多尺寸 Windows 图标创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
@@ -27,7 +27,7 @@ Windows 桌面版使用与应用顶栏融合的无边框窗口，最小化、最
 
 桌面客户端每次启动会后台检查 GitHub 最新正式 Release。Windows 安装版发现更高版本后，可直接在客户端内下载并查看进度；安装包通过 `latest.yml` 中的 SHA-512 摘要校验，下载完成后点击“重启并安装”即可静默升级并重新打开。浏览器模式和 macOS 继续匹配对应安装包并打开下载页面。也可点击顶部版本按钮手动复查。公开仓库可匿名检查，检查失败不会影响扫描功能。
 
-Windows 自动更新从 `v0.3.0` 开始提供。更早的客户端需要先手动安装一次 `v0.3.0` 或更高版本；此后的版本只要随 GitHub Release 同时上传 `.exe`、`.exe.blockmap` 和 `latest.yml`，即可使用应用内更新。
+Windows 自动更新从 `v0.3.1` 开始提供。更早的客户端需要先手动安装一次 `v0.3.1` 或更高版本；此后的版本只要随 GitHub Release 同时上传 `.exe`、`.exe.blockmap` 和 `latest.yml`，即可使用应用内更新。
 
 macOS Apple Silicon 用户可打开：
 

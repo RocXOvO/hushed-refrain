@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, shell } from "electron";
-import electronUpdater from "electron-updater";
+import * as electronUpdater from "electron-updater";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { join } from "node:path";
@@ -97,6 +97,9 @@ async function createWindow(): Promise<void> {
   });
   await window.loadURL(url);
   if (smokeTest) {
+    if (typeof electronUpdater.NsisUpdater !== "function") {
+      throw new Error("Electron updater module exports are unavailable.");
+    }
     const bridge = await window.webContents.executeJavaScript(`(async () => ({
       platform: window.ncmDesktop?.platform,
       maximized: await window.ncmDesktop?.isMaximized?.(),
