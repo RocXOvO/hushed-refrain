@@ -1,6 +1,6 @@
 {
   "name": "ncm-comment-finder",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music comment finder",
@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "4.39.0",
+    "electron-updater": "6.8.9",
     "lucide-static": "1.28.0",
     "yaml": "^2.9.0"
   },
@@ -45,6 +46,14 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "RocXOvO",
+        "repo": "ncm-comment-finder",
+        "releaseType": "release"
+      }
+    ],
     "files": [
       "dist/**/*",
       "web/**/*",
@@ -53,6 +62,7 @@
     ],
     "win": {
       "icon": "build/icon.ico",
+      "electronUpdaterCompatibility": ">=2.16",
       "target": [
         {
           "target": "nsis",

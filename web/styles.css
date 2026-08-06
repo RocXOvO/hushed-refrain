@@ -1287,6 +1287,45 @@ dialog::backdrop {
   font-size: 0.78rem;
 }
 
+.update-progress {
+  margin-top: 16px;
+}
+
+.update-progress > div {
+  margin-bottom: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.update-progress > div strong {
+  color: var(--text);
+}
+
+.update-progress-track {
+  height: 7px;
+  display: block;
+  overflow: hidden;
+  background: #e8eaec;
+  border-radius: 999px;
+}
+
+.update-progress-track i {
+  width: 0;
+  height: 100%;
+  display: block;
+  background: linear-gradient(90deg, var(--accent), #f26c73);
+  border-radius: inherit;
+  transition: width 180ms ease-out;
+}
+
+#downloadUpdateButton.is-disabled {
+  pointer-events: none;
+  opacity: 0.58;
+}
+
 .dialog-actions {
   margin-top: 20px;
   display: flex;

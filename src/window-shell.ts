@@ -8,6 +8,14 @@ export const DESKTOP_WINDOW_CHANNELS = {
   toggleMaximize: "desktop-window:toggle-maximize",
 } as const;
 
+export const DESKTOP_UPDATE_CHANNELS = {
+  check: "desktop-update:check",
+  download: "desktop-update:download",
+  getState: "desktop-update:get-state",
+  install: "desktop-update:install",
+  stateChanged: "desktop-update:state-changed",
+} as const;
+
 export function desktopWindowChrome(platform: NodeJS.Platform): Pick<BrowserWindowConstructorOptions, "frame"> {
   return platform === "win32" ? { frame: false } : {};
 }

@@ -18,14 +18,16 @@
 Windows 用户可直接运行：
 
 ```text
-release/NCM-Comment-Finder-Setup-0.2.0.exe
+release/NCM-Comment-Finder-Setup-0.3.0.exe
 ```
 
 安装器支持选择目录，并使用应用的多尺寸 Windows 图标创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
 
 Windows 桌面版使用与应用顶栏融合的无边框窗口，最小化、最大化/还原和关闭按钮位于右上角；深色顶栏的空白区域可拖动窗口。Windows 下顶栏在页面滚动时固定在窗口顶部。启动时会显示一段简短的轨道式动画，参数折叠区、模式切换、页签和弹窗也带过渡效果；所有动画都遵循系统的“减少动态效果”设置。
 
-桌面客户端每次启动会后台检查 GitHub 最新正式 Release。发现更高版本时会显示更新说明，并自动匹配当前系统和 CPU 架构的安装包；也可点击顶部版本按钮手动复查。公开仓库可匿名检查，私有仓库需通过 `NCM_GITHUB_TOKEN` 提供具有仓库只读权限的 GitHub Token。检查失败不会影响扫描功能。
+桌面客户端每次启动会后台检查 GitHub 最新正式 Release。Windows 安装版发现更高版本后，可直接在客户端内下载并查看进度；安装包通过 `latest.yml` 中的 SHA-512 摘要校验，下载完成后点击“重启并安装”即可静默升级并重新打开。浏览器模式和 macOS 继续匹配对应安装包并打开下载页面。也可点击顶部版本按钮手动复查。公开仓库可匿名检查，检查失败不会影响扫描功能。
+
+Windows 自动更新从 `v0.3.0` 开始提供。更早的客户端需要先手动安装一次 `v0.3.0` 或更高版本；此后的版本只要随 GitHub Release 同时上传 `.exe`、`.exe.blockmap` 和 `latest.yml`，即可使用应用内更新。
 
 macOS Apple Silicon 用户可打开：
 
@@ -162,6 +164,7 @@ npm run start -- scan-song `
 | `src/electron-main.ts` | 桌面窗口、内置服务生命周期和进程安全边界 |
 | `src/electron-preload.ts` | Windows 窗口控制的隔离桥接层 |
 | `src/window-shell.ts` | Windows 无边框窗口策略与桌面 URL 标记 |
+| `src/windows-updater.ts` | Windows Release 检查、下载进度、完整性校验与重启安装状态机 |
 | `web/` | 响应式操作界面 |
 
 项目不使用数据库。扫描过程只在内存中保留分片状态和目标命中，检查点使用 JSON，结果使用逐行 JSONL。

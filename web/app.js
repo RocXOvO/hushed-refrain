@@ -14,6 +14,7 @@ const el = {
   connection: $("#connectionBadge"), login: $("#loginButton"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
+  updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
   estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
   windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
   appSplash: $("#appSplash"),
@@ -35,6 +36,7 @@ let poolRotationTimer;
 let poolRotationIndex = -1;
 let resultStream;
 let resultMode = mode;
+let nativeUpdateState;
 const visibleResults = new Map();
 const disclosureAnimations = new WeakMap();
 
@@ -398,7 +400,18 @@ async function checkUpdates(notifyWhenCurrent) {
   el.updateButton.disabled = true;
   el.updateButton.classList.add("checking");
   try {
+    const desktop = window.ncmDesktop;
+    if (desktop?.platform === "win32" && typeof desktop.checkForUpdates === "function") {
+      const state = await desktop.checkForUpdates();
+      if (state?.supported) {
+        renderWindowsUpdate(state);
+        if (state.phase === "up-to-date" && notifyWhenCurrent) toast(`当前 v${state.currentVersion} 已是最新版本`);
+        if (state.phase === "error" && notifyWhenCurrent) toast(`检查更新失败：${state.error || "未知错误"}`);
+        return;
+      }
+    }
     const update = await api("/api/update");
+    nativeUpdateState = undefined;
     el.updateButtonLabel.textContent = `v${update.currentVersion}`;
     el.updateButton.classList.toggle("available", update.updateAvailable);
     el.updateIndicator.hidden = !update.updateAvailable;
@@ -411,8 +424,9 @@ async function checkUpdates(notifyWhenCurrent) {
   } catch (error) {
     if (notifyWhenCurrent) toast(`检查更新失败：${error.message}`);
   } finally {
-    el.updateButton.disabled = false;
-    el.updateButton.classList.remove("checking");
+    const busy = nativeUpdateState?.phase === "checking" || nativeUpdateState?.phase === "downloading";
+    el.updateButton.disabled = busy;
+    el.updateButton.classList.toggle("checking", busy);
   }
 }
 
@@ -425,8 +439,109 @@ function renderUpdate(update) {
   el.updateAsset.textContent = update.assetName
     ? `已匹配当前设备：${update.assetName}${update.assetSize ? ` · ${fileSize(update.assetSize)}` : ""}`
     : "当前设备暂无专用安装包，将打开版本发布页面。";
+  renderUpdateProgress();
   el.updateDownload.href = update.downloadUrl || update.releaseUrl;
+  el.updateDownload.classList.remove("is-disabled");
+  el.updateDownload.removeAttribute("aria-disabled");
   el.updateDownload.querySelector("span").textContent = update.downloadUrl ? "下载更新" : "查看版本";
+}
+
+function renderWindowsUpdate(state) {
+  nativeUpdateState = state;
+  const hasUpdate = ["available", "downloading", "downloaded"].includes(state.phase);
+  const busy = state.phase === "checking" || state.phase === "downloading";
+  el.updateButtonLabel.textContent = `v${state.currentVersion}`;
+  el.updateButton.classList.toggle("available", hasUpdate);
+  el.updateButton.classList.toggle("checking", busy);
+  el.updateButton.disabled = busy;
+  el.updateIndicator.hidden = !hasUpdate;
+
+  if (state.latestVersion) {
+    el.updateReleaseName.textContent = state.releaseName || `云评检索台 v${state.latestVersion}`;
+    el.updatePublishedAt.textContent = state.releaseDate ? `发布于 ${dateOnly(state.releaseDate)}` : "已有新版本可安装";
+    el.currentVersion.textContent = `v${state.currentVersion}`;
+    el.latestVersion.textContent = `v${state.latestVersion}`;
+    el.updateNotes.textContent = state.releaseNotes || "本次更新将通过 GitHub Release 安全下载。";
+  }
+
+  if (state.phase === "available") {
+    el.updateAsset.textContent = "Windows 安装包可在应用内下载，下载完成后将验证完整性。";
+    renderUpdateProgress();
+    setNativeUpdateAction("下载并更新");
+    if (!el.updateDialog.open) el.updateDialog.showModal();
+  } else if (state.phase === "downloading") {
+    const detail = [
+      state.transferred !== undefined && state.total ? `${fileSize(state.transferred)} / ${fileSize(state.total)}` : null,
+      state.bytesPerSecond ? `${fileSize(state.bytesPerSecond)}/秒` : null,
+    ].filter(Boolean).join(" · ");
+    el.updateAsset.textContent = detail || "正在安全下载 Windows 安装包…";
+    renderUpdateProgress(state);
+    setNativeUpdateAction("正在下载…", true);
+    if (!el.updateDialog.open) el.updateDialog.showModal();
+  } else if (state.phase === "downloaded") {
+    el.updateAsset.textContent = "安装包下载并校验完成。重启客户端后将静默安装并自动打开新版。";
+    renderUpdateProgress(state);
+    setNativeUpdateAction("重启并安装");
+    if (!el.updateDialog.open) el.updateDialog.showModal();
+  } else if (state.phase === "error") {
+    el.updateAsset.textContent = `更新失败：${state.error || "未知错误"}`;
+    renderUpdateProgress();
+    setNativeUpdateAction("重新检查");
+  } else if (state.phase === "checking") {
+    el.updateAsset.textContent = "正在检查 GitHub Release…";
+    renderUpdateProgress();
+    setNativeUpdateAction("正在检查…", true);
+  }
+}
+
+function renderUpdateProgress(state) {
+  const visible = state?.phase === "downloading" || state?.phase === "downloaded";
+  el.updateProgress.hidden = !visible;
+  if (!visible) {
+    el.updateProgressBar.style.width = "0%";
+    return;
+  }
+  const percent = Math.max(0, Math.min(100, Number(state.percent || 0)));
+  el.updateProgressLabel.textContent = state.phase === "downloaded" ? "下载完成" : "正在下载安装包";
+  el.updateProgressPercent.textContent = `${percent.toFixed(percent >= 10 ? 0 : 1)}%`;
+  el.updateProgressBar.style.width = `${percent}%`;
+}
+
+function setNativeUpdateAction(label, disabled = false) {
+  el.updateDownload.href = "#";
+  el.updateDownload.querySelector("span").textContent = label;
+  el.updateDownload.classList.toggle("is-disabled", disabled);
+  el.updateDownload.setAttribute("aria-disabled", String(disabled));
+}
+
+async function activateUpdate(event) {
+  if (!nativeUpdateState?.supported) {
+    el.updateDialog.close();
+    return;
+  }
+  event.preventDefault();
+  if (el.updateDownload.classList.contains("is-disabled")) return;
+  try {
+    if (nativeUpdateState.phase === "available") {
+      renderWindowsUpdate(await window.ncmDesktop.downloadUpdate());
+    } else if (nativeUpdateState.phase === "downloaded") {
+      setNativeUpdateAction("正在重启…", true);
+      await window.ncmDesktop.installUpdate();
+    } else {
+      renderWindowsUpdate(await window.ncmDesktop.checkForUpdates());
+    }
+  } catch (error) {
+    toast(`更新失败：${error.message}`);
+  }
+}
+
+async function setupDesktopUpdates() {
+  const desktop = window.ncmDesktop;
+  if (desktop?.platform !== "win32" || typeof desktop.getUpdateState !== "function") return;
+  const state = await desktop.getUpdateState();
+  if (!state?.supported) return;
+  renderWindowsUpdate(state);
+  desktop.onUpdateState((next) => renderWindowsUpdate(next));
 }
 
 async function switchMode(value) {
@@ -563,8 +678,10 @@ function dismissSplash() {
 
 async function boot() {
   connectResultStream();
+  await setupDesktopUpdates();
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
   dismissSplash();
+  void checkUpdates(false);
 }
 
 el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); void startParallel(); });
@@ -578,11 +695,11 @@ el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").
 el.updateButton.addEventListener("click", () => void checkUpdates(true));
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
 $("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
-el.updateDownload.addEventListener("click", () => el.updateDialog.close());
+el.updateDownload.addEventListener("click", (event) => void activateUpdate(event));
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
 $$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) return; const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); }));
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
-void boot(); void checkUpdates(false); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);
+void boot(); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);
 addEventListener("pagehide", () => { resultStream?.close(); stopPoolRotation(); });

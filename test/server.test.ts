@@ -17,6 +17,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const pageText = await page.text();
   assert.match(pageText, /云评检索台/);
   assert.match(pageText, /持续扫描并实时输出/);
+  assert.match(pageText, /updateProgress/);
+  assert.match(pageText, /重启并安装|下载更新/);
   assert.doesNotMatch(pageText, /首条命中后/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
