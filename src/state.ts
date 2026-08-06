@@ -16,6 +16,7 @@ export function createState(
     recordScope: options.recordScope,
     sourcesLoaded: strategy === "history",
     songs: [],
+    songProgress: [],
     sourceSongCount: 0,
     sourceTruncated: false,
     sourceErrors: [],
@@ -26,6 +27,7 @@ export function createState(
     seenCommentIds: [],
     matchCount: 0,
     requestCount: 0,
+    pagesProcessed: 0,
     truncatedSongIds: [],
     finished: false,
     coverageComplete: false,
@@ -41,6 +43,12 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
     parsed.strategyResolved ??= true;
     parsed.sourcesLoaded ??= parsed.songs.length > 0 || parsed.sourceSongCount > 0 || parsed.finished;
     parsed.sourceErrors ??= [];
+    parsed.songProgress ??= parsed.songs.map((_, index) => ({
+      commentOffset: index === parsed.songIndex ? parsed.commentOffset : 0,
+      pageInSong: index === parsed.songIndex ? parsed.pageInSong : 0,
+      done: index < parsed.songIndex || parsed.finished,
+    }));
+    parsed.pagesProcessed ??= parsed.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
     return parsed;
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;

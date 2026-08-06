@@ -4,14 +4,24 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>云评检索台</title>
-  <link rel="stylesheet" href="/styles.css?v=4">
+  <link rel="stylesheet" href="/styles.css?v=8">
 </head>
 <body>
   <header class="topbar">
     <div class="brand"><span class="brand-mark"><img src="/icons/disc-3.svg" alt=""></span><span>云评检索台</span></div>
-    <div class="top-actions">
-      <span id="connectionBadge" class="status-badge neutral"><span class="status-dot"></span>本地服务</span>
-      <button id="loginButton" class="button ghost" type="button"><img src="/icons/qr-code.svg" alt=""><span>二维码登录</span></button>
+    <div class="topbar-end">
+      <div class="top-actions">
+        <span id="connectionBadge" class="status-badge neutral"><span class="status-dot"></span>本地服务</span>
+        <button id="updateButton" class="button ghost update-trigger" type="button" title="检查新版本">
+          <img src="/icons/refresh-cw.svg" alt=""><span id="updateButtonLabel">检查更新</span><i id="updateIndicator" aria-label="有新版本" hidden></i>
+        </button>
+        <button id="loginButton" class="button ghost" type="button"><img src="/icons/qr-code.svg" alt=""><span>二维码登录</span></button>
+      </div>
+      <div class="window-controls" aria-label="窗口控制">
+        <button id="windowMinimizeButton" class="window-control" type="button" title="最小化" aria-label="最小化"><span class="window-control-icon minimize-icon"></span></button>
+        <button id="windowMaximizeButton" class="window-control" type="button" title="最大化" aria-label="最大化"><span class="window-control-icon maximize-icon"></span></button>
+        <button id="windowCloseButton" class="window-control close-control" type="button" title="关闭" aria-label="关闭"><span class="window-control-icon close-icon"></span></button>
+      </div>
     </div>
   </header>
 
@@ -27,37 +37,39 @@
         <label><input type="radio" name="mode" value="source"><span><img src="/icons/list-music.svg" alt="">用户来源</span></label>
       </div>
 
+      <section class="pool-section shared-pool-section">
+        <div class="pool-heading"><div><span class="field-label">多 IP 池</span><strong id="poolStatus">未运行</strong></div><button id="poolToggleButton" class="button secondary compact-button" type="button"><img src="/icons/network.svg" alt=""><span>构建</span></button></div>
+        <div class="pool-source-switch segmented two sliding-segment" aria-label="代理池来源">
+          <label><input type="radio" name="poolSource" value="clash-verge" checked><span>Clash Verge</span></label>
+          <label><input type="radio" name="poolSource" value="external"><span>其他代理池</span></label>
+        </div>
+        <div id="clashPoolPane" class="proxy-source-pane">
+          <p id="poolDiscovery" class="pool-discovery">正在检测 Clash Verge…</p>
+        </div>
+        <div id="externalPoolPane" class="proxy-source-pane" hidden>
+          <label class="field compact"><span>代理地址（每行一个）</span><textarea id="externalProxies" rows="4" placeholder="http://127.0.0.1:17891&#10;http://user:pass@proxy.example:8080"></textarea></label>
+          <p class="pool-discovery">支持 HTTP/HTTPS 代理；会先验证出口 IP 和网易云连通性，凭据不会显示在界面中。</p>
+        </div>
+        <div id="poolEntries" class="pool-entries"><div class="pool-empty">等待代理节点</div></div>
+      </section>
+
       <form id="parallelForm" class="control-form mode-panel" aria-hidden="false">
         <label class="field"><span>用户 UID</span><input id="parallelUid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="2044521815" required></label>
         <div class="field"><label for="songId">歌曲 ID</label><div class="input-action"><input id="songId" name="songId" inputmode="numeric" pattern="[0-9]+" placeholder="186016" required><button id="songLookupButton" class="icon-button dark" type="button" title="查询歌曲" aria-label="查询歌曲"><img src="/icons/search.svg" alt=""></button></div><span id="songPreview" class="field-hint" hidden></span></div>
 
-        <section class="pool-section">
-          <div class="pool-heading"><div><span class="field-label">多 IP 池</span><strong id="poolStatus">未运行</strong></div><button id="poolToggleButton" class="button secondary compact-button" type="button"><img src="/icons/network.svg" alt=""><span>构建</span></button></div>
-          <div class="pool-source-switch segmented two sliding-segment" aria-label="代理池来源">
-            <label><input type="radio" name="poolSource" value="clash-verge" checked><span>Clash Verge</span></label>
-            <label><input type="radio" name="poolSource" value="external"><span>其他代理池</span></label>
+        <details class="advanced animated-disclosure" open>
+          <summary aria-expanded="true"><img src="/icons/sliders-horizontal.svg" alt="">并行参数</summary>
+          <div class="advanced-content">
+            <div class="settings-grid">
+              <label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="16" value="3"></label>
+              <label class="field compact"><span>时间分片</span><input name="shards" type="number" min="1" max="512" value="96"></label>
+              <label class="field compact"><span>每页评论</span><input name="pageSize" type="number" min="1" max="2000" value="1000"></label>
+              <label class="field compact"><span>请求预算</span><input name="requestBudget" type="number" min="1" value="5000"></label>
+              <label class="field compact"><span>单 IP 间隔 ms</span><input name="minDelayMs" type="number" min="0" value="333"></label>
+              <label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="100"></label>
+            </div>
+            <div class="check-row"><label><input id="parallelStopFirst" type="checkbox" checked>首条命中后停止</label><label><input id="parallelFresh" type="checkbox">新建状态</label></div>
           </div>
-          <div id="clashPoolPane" class="proxy-source-pane">
-            <p id="poolDiscovery" class="pool-discovery">正在检测 Clash Verge…</p>
-          </div>
-          <div id="externalPoolPane" class="proxy-source-pane" hidden>
-            <label class="field compact"><span>代理地址（每行一个）</span><textarea id="externalProxies" rows="4" placeholder="http://127.0.0.1:17891&#10;http://user:pass@proxy.example:8080"></textarea></label>
-            <p class="pool-discovery">支持 HTTP/HTTPS 代理；会先验证出口 IP 和网易云连通性，凭据不会显示在界面中。</p>
-          </div>
-          <div id="poolEntries" class="pool-entries"><div class="pool-empty">等待代理节点</div></div>
-        </section>
-
-        <details class="advanced" open>
-          <summary><img src="/icons/sliders-horizontal.svg" alt="">并行参数</summary>
-          <div class="settings-grid">
-            <label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="16" value="3"></label>
-            <label class="field compact"><span>时间分片</span><input name="shards" type="number" min="1" max="512" value="96"></label>
-            <label class="field compact"><span>每页评论</span><input name="pageSize" type="number" min="1" max="2000" value="1000"></label>
-            <label class="field compact"><span>请求预算</span><input name="requestBudget" type="number" min="1" value="5000"></label>
-            <label class="field compact"><span>单 IP 间隔 ms</span><input name="minDelayMs" type="number" min="0" value="333"></label>
-            <label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="100"></label>
-          </div>
-          <div class="check-row"><label><input id="parallelStopFirst" type="checkbox" checked>首条命中后停止</label><label><input id="parallelFresh" type="checkbox">新建状态</label></div>
         </details>
         <button id="parallelStartButton" class="button primary full" type="submit"><img src="/icons/play.svg" alt="">开始并行扫描</button>
       </form>
@@ -67,7 +79,13 @@
         <div id="userPreview" class="user-preview" hidden><div><strong id="userNickname">-</strong><span id="userMeta">-</span></div><div class="source-probes"><span id="recordProbe">听歌排行</span><span id="likesProbe">喜欢歌曲</span></div></div>
         <fieldset class="field-group"><legend>歌曲来源</legend><div class="segmented three"><label><input type="radio" name="source" value="record" checked><span><img src="/icons/history.svg" alt="">听歌排行</span></label><label><input type="radio" name="source" value="likes"><span><img src="/icons/heart.svg" alt="">喜欢歌曲</span></label><label><input type="radio" name="source" value="both"><span><img src="/icons/layers-2.svg" alt="">两者</span></label></div></fieldset>
         <fieldset id="recordScopeField" class="field-group"><legend>排行范围</legend><div class="segmented two"><label><input type="radio" name="recordScope" value="all" checked><span>全部时间</span></label><label><input type="radio" name="recordScope" value="week"><span>最近一周</span></label></div></fieldset>
-        <details class="advanced"><summary><img src="/icons/settings-2.svg" alt="">运行参数</summary><div class="settings-grid"><label class="field compact"><span>请求间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算</span><input name="requestBudget" type="number" min="1" value="250"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>HTTP 代理</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div><div class="check-row"><label><input id="stopAfterFirst" type="checkbox">首条命中后暂停</label><label><input id="fresh" type="checkbox">新建状态</label></div></details>
+        <details class="advanced animated-disclosure">
+          <summary aria-expanded="false"><img src="/icons/settings-2.svg" alt="">运行参数</summary>
+          <div class="advanced-content">
+            <div class="settings-grid"><label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="8" value="1"></label><label class="field compact"><span>请求间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算</span><input name="requestBudget" type="number" min="1" value="250"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>单代理（代理池未运行时）</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div>
+            <div class="check-row"><label><input id="stopAfterFirst" type="checkbox">首条命中后暂停</label><label><input id="fresh" type="checkbox">新建状态</label></div>
+          </div>
+        </details>
         <div class="form-actions"><button id="sourceStartButton" class="button primary" type="submit"><img src="/icons/play.svg" alt="">开始扫描</button><button id="dryRunButton" class="button secondary" type="button"><img src="/icons/list-music.svg" alt="">仅获取歌曲</button></div>
       </form>
     </aside>
@@ -92,7 +110,7 @@
             <div class="preset-group" aria-label="常用规模"><button type="button" data-comments="100000">10 万</button><button type="button" data-comments="300000">30 万</button><button type="button" data-comments="500000">50 万</button><button type="button" data-comments="1000000">100 万</button></div>
             <button id="estimateButton" class="button secondary" type="button"><img src="/icons/calculator.svg" alt="">重新计算</button>
           </div>
-          <p id="estimateContext" class="estimate-context">按用户来源扫描的当前请求间隔估算。</p>
+          <p id="estimateContext" class="estimate-context">按用户来源扫描的出口数、并发、网络延迟和请求间隔估算。</p>
           <div class="estimate-results"><div><span>需求页数</span><strong id="estimatePages">1,000</strong></div><div><span>理想耗时</span><strong id="estimateOptimistic">-</strong></div><div><span>预期耗时</span><strong id="estimateExpected">-</strong></div><div><span>保守耗时</span><strong id="estimateConservative">-</strong></div></div>
         </div>
       </section>
@@ -100,7 +118,17 @@
   </main>
 
   <dialog id="qrDialog"><div class="dialog-heading"><h2>二维码登录</h2><button id="closeQrButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="qr-stage"><img id="qrImage" alt="登录二维码"></div><p id="qrStatus">正在生成</p></dialog>
+  <dialog id="updateDialog" class="update-dialog">
+    <div class="dialog-heading update-dialog-heading"><div><p class="eyebrow">UPDATE AVAILABLE</p><h2>发现新版本</h2></div><button id="closeUpdateButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div>
+    <div class="update-content">
+      <div class="update-summary"><span class="update-icon"><img src="/icons/package-open.svg" alt=""></span><div><strong id="updateReleaseName">云评检索台</strong><p id="updatePublishedAt">已有新版本可下载</p></div></div>
+      <div class="update-version-route"><span id="currentVersionLabel">v0.0.0</span><img src="/icons/arrow-right.svg" alt="升级到"><strong id="latestVersionLabel">v0.0.0</strong></div>
+      <div id="updateNotes" class="update-notes">查看 GitHub Release 获取更新内容。</div>
+      <p id="updateAsset" class="update-asset"></p>
+      <div class="dialog-actions"><button id="laterUpdateButton" class="button secondary" type="button">稍后提醒</button><a id="downloadUpdateButton" class="button primary" href="#" target="_blank" rel="noreferrer"><img src="/icons/download.svg" alt=""><span>下载更新</span></a></div>
+    </div>
+  </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/app.js?v=4" defer></script>
+  <script src="/app.js?v=8" defer></script>
 </body>
 </html>

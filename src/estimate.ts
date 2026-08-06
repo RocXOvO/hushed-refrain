@@ -4,6 +4,8 @@ export interface EstimateInput {
   minDelayMs: number;
   jitterMs: number;
   networkMs?: number;
+  lanes?: number;
+  workersPerLane?: number;
 }
 
 export interface ScanEstimate {
@@ -13,6 +15,9 @@ export interface ScanEstimate {
   expectedSeconds: number;
   conservativeSeconds: number;
   expectedCommentsPerSecond: number;
+  lanes: number;
+  workersPerLane: number;
+  totalWorkers: number;
 }
 
 export function estimateCommentScan(input: EstimateInput): ScanEstimate {
@@ -21,10 +26,15 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const minDelayMs = nonNegativeInteger(input.minDelayMs, "minDelayMs");
   const jitterMs = nonNegativeInteger(input.jitterMs, "jitterMs");
   const networkMs = nonNegativeInteger(input.networkMs ?? 400, "networkMs");
+  const lanes = positiveInteger(input.lanes ?? 1, "lanes");
+  const workersPerLane = positiveInteger(input.workersPerLane ?? 1, "workersPerLane");
   const pages = Math.ceil(comments / pageSize);
 
-  const duration = (spacingMs: number): number =>
-    Math.ceil((pages * Math.max(networkMs, spacingMs)) / 1_000);
+  const duration = (spacingMs: number): number => {
+    if (pages === 0) return 0;
+    const perLaneCycleMs = Math.max(spacingMs, networkMs / workersPerLane);
+    return Math.ceil(Math.max(networkMs, pages * perLaneCycleMs / lanes) / 1_000);
+  };
   const optimisticSeconds = duration(minDelayMs);
   const expectedSeconds = duration(minDelayMs + jitterMs / 2);
   const conservativeSeconds = duration(minDelayMs + jitterMs);
@@ -37,6 +47,9 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     conservativeSeconds,
     expectedCommentsPerSecond:
       expectedSeconds === 0 ? 0 : Number((comments / expectedSeconds).toFixed(2)),
+    lanes,
+    workersPerLane,
+    totalWorkers: lanes * workersPerLane,
   };
 }
 

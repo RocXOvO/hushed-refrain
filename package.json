@@ -18,7 +18,7 @@
     "desktop": "npm run build && electron .",
     "desktop:smoke": "npm run build && set NCM_DESKTOP_SMOKE=1&& electron .",
     "desktop:smoke:mac": "npm run build && NCM_DESKTOP_SMOKE=1 electron .",
-    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:mac": "npm run build && node scripts/build-mac.cjs arm64",
     "dist:mac:all": "npm run build && node scripts/build-mac.cjs arm64 x64"
   },

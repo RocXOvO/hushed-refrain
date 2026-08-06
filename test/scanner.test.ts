@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
-import { runCommentFinder } from "../src/scanner";
+import { runCommentFinder, runPooledCommentFinder } from "../src/scanner";
 import type {
   CommentPage,
   HistoryPage,
@@ -247,4 +247,79 @@ test("operator stop is checkpointed as a resumable state", async () => {
   const state = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(state.finished, false);
   assert.equal(state.requestCount, 0);
+});
+
+test("pooled source scan processes songs concurrently across proxy lanes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-pool-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.commentPageSize = 100;
+  const tracker = { active: 0, maxActive: 0, calls: [] as string[] };
+  const songs: SongCandidate[] = Array.from({ length: 4 }, (_, index) => ({
+    id: String(index + 1),
+    name: `song-${index + 1}`,
+    sources: ["record"],
+    sourceRank: index + 1,
+  }));
+  const makeClient = (name: string): NcmClient => ({
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async (songId) => {
+      tracker.active += 1;
+      tracker.maxActive = Math.max(tracker.maxActive, tracker.active);
+      tracker.calls.push(`${name}:${songId}`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      tracker.active -= 1;
+      return {
+        comments: songId === "3" ? [{ commentId: "pool-match", userId: "42", content: "found" }] : [],
+        hotComments: [],
+        more: false,
+      };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  });
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client: makeClient("a"), governor: governor(100) },
+    { name: "lane-b", client: makeClient("b"), governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.lanes, 2);
+  assert.equal(report.workers, 2);
+  assert.equal(report.songsProcessed, 4);
+  assert.equal(report.pagesProcessed, 4);
+  assert.equal(report.matches, 1);
+  assert.equal(tracker.maxActive, 2);
+  assert.equal(tracker.calls.length, 4);
+  assert.ok(tracker.calls.some((call) => call.startsWith("a:")));
+  assert.ok(tracker.calls.some((call) => call.startsWith("b:")));
+});
+
+test("pooled source scan checkpoints capped songs before pausing on budget", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-pool-cap-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.maxCommentPagesPerSong = 1;
+  const songs: SongCandidate[] = ["1", "2", "3"].map((id) => ({ id, sources: ["record"] }));
+  const makeClient = (): NcmClient => ({
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [{ commentId: crypto.randomUUID(), userId: "9", content: "other" }], hotComments: [], more: true }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  });
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client: makeClient(), governor: governor(100) },
+    { name: "lane-b", client: makeClient(), governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 3 });
+
+  assert.equal(report.status, "paused");
+  assert.equal(report.pagesProcessed, 2);
+  assert.equal(report.songsProcessed, 2);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songProgress.filter((item: { done: boolean }) => item.done).length, 2);
+  assert.equal(state.truncatedSongIds.length, 2);
 });

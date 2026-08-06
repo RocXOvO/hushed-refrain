@@ -24,7 +24,7 @@ import {
   runParallelSongScan,
   type ParallelCommentLane,
 } from "./parallel-scanner";
-import { runCommentFinder } from "./scanner";
+import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
 import { loadState } from "./state";
 import type {
   FoundComment,
@@ -33,11 +33,16 @@ import type {
   ScanOptions,
   SourceSelection,
 } from "./types";
+import { checkForUpdate, type UpdateSnapshot } from "./update";
 
 export interface DashboardOptions {
   host: string;
   port: number;
   runtimeRoot?: string;
+  currentVersion?: string;
+  platform?: NodeJS.Platform;
+  arch?: string;
+  updateChecker?: () => Promise<UpdateSnapshot>;
 }
 
 interface RuntimePaths {
@@ -66,6 +71,9 @@ interface JobSnapshot {
   currentSong?: { id: string; name?: string };
   matches: number;
   requestsTotal: number;
+  pagesProcessed: number;
+  lanes: number;
+  workers: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   blockedUntil?: string;
@@ -109,6 +117,7 @@ interface StartJobInput {
   fresh?: unknown;
   dryRun?: unknown;
   proxy?: unknown;
+  workersPerProxy?: unknown;
 }
 
 interface StartParallelInput {
@@ -163,7 +172,7 @@ const iconRoot = join(projectRoot, "node_modules", "lucide-static", "icons");
 
 class JobManager {
   private snapshotValue: JobSnapshot = emptySnapshot();
-  private governor?: RequestGovernor;
+  private lanes: SourceScanLane[] = [];
   private statePath?: string;
   private outputPath?: string;
 
@@ -182,11 +191,25 @@ class JobManager {
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const maxCommentPagesPerSong = integer(input.maxCommentPagesPerSong ?? 0, "maxCommentPagesPerSong", 0, 1_000_000);
     const maxSongs = integer(input.maxSongs ?? 0, "maxSongs", 0, 100_000);
+    const workersPerLane = integer(input.workersPerProxy ?? 1, "workersPerProxy", 1, 8);
     const proxy = proxyUrl(input.proxy);
     const jobKey = `${uid}-${source}`;
     this.statePath = join(this.paths.data, `web-state-${jobKey}.json`);
     this.outputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
-    this.governor = new RequestGovernor({ requestBudget, minDelayMs, jitterMs, maxRetries: 3, forbiddenCooldownMs });
+    const activePool = await readProxyPool(this.paths.pool);
+    const poolEntries = activePool && proxyPoolRunning(activePool) ? await verifyProxyPool(activePool) : [];
+    const endpoints = poolEntries.length > 0 ? poolEntries.map((entry) => entry.endpoint) : [proxy];
+    this.lanes = endpoints.map((endpoint, index) => ({
+      name: poolEntries[index]?.name ?? (endpoint ? "static-proxy" : "direct"),
+      client: new EnhancedNcmClient({ proxy: endpoint }),
+      governor: new RequestGovernor({
+        requestBudget: Math.max(1_000, requestBudget * 2),
+        minDelayMs,
+        jitterMs,
+        maxRetries: 3,
+        forbiddenCooldownMs,
+      }),
+    }));
     const options: ScanOptions = {
       uid,
       strategy: "scan",
@@ -205,28 +228,31 @@ class JobManager {
     };
     this.snapshotValue = {
       ...emptySnapshot(), id: randomUUID(), status: "running", uid, source, recordScope,
-      startedAt: new Date().toISOString(), proxyEnabled: Boolean(proxy),
+      startedAt: new Date().toISOString(), proxyEnabled: poolEntries.length > 0 || Boolean(proxy),
+      lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
     };
     const activeId = this.snapshotValue.id;
-    void runCommentFinder(new EnhancedNcmClient({ proxy }), this.governor, options)
+    void runPooledCommentFinder(this.lanes, { ...options, workersPerLane, requestBudget })
       .then((report) => {
         if (this.snapshotValue.id !== activeId) return;
         this.snapshotValue = {
           ...this.snapshotValue, status: report.status, finishedAt: new Date().toISOString(),
           songs: report.songs, songsProcessed: report.songsProcessed, matches: report.matches,
           requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
+          pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
+          workers: report.workers ?? this.snapshotValue.workers,
           sourceErrors: report.sourceErrors, blockedUntil: report.resumeAfter, note: report.note,
         };
       })
       .catch((error) => this.fail(activeId, error))
-      .finally(() => { if (this.snapshotValue.id === activeId) this.governor = undefined; });
+      .finally(() => { if (this.snapshotValue.id === activeId) this.lanes = []; });
     return this.status();
   }
 
   async stop(): Promise<JobSnapshot> {
     if (this.snapshotValue.status !== "running") return this.status();
     this.snapshotValue.status = "stopping";
-    this.governor?.cancel();
+    for (const lane of this.lanes) lane.governor.cancel();
     return this.status();
   }
 
@@ -234,12 +260,16 @@ class JobManager {
     if (this.statePath && this.snapshotValue.status !== "idle") {
       const state = await loadState(this.statePath);
       if (state && state.uid === this.snapshotValue.uid) {
-        const current = state.songs[state.songIndex];
+        const progress = state.songProgress ?? [];
+        const currentIndex = progress.length > 0 ? progress.findIndex((item) => !item.done) : state.songIndex;
+        const current = currentIndex < 0 ? undefined : state.songs[currentIndex];
         this.snapshotValue = {
-          ...this.snapshotValue, songs: state.songs.length, songsProcessed: state.songIndex,
-          commentOffset: state.commentOffset,
+          ...this.snapshotValue, songs: state.songs.length,
+          songsProcessed: progress.length > 0 ? progress.filter((item) => item.done).length : state.songIndex,
+          commentOffset: currentIndex < 0 ? 0 : progress[currentIndex]?.commentOffset ?? state.commentOffset,
           currentSong: current ? { id: current.id, name: current.name } : undefined,
           matches: state.matchCount, requestsTotal: state.requestCount,
+          pagesProcessed: state.pagesProcessed ?? 0,
           coverageComplete: state.coverageComplete, sourceErrors: state.sourceErrors,
           blockedUntil: state.blockedUntil,
         };
@@ -431,8 +461,14 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
   const parallel = new ParallelJobManager(paths);
   const pool = new PoolManager(paths);
   const auth = new AuthManager(paths);
+  const currentVersion = options.currentVersion ?? await applicationVersion();
+  const updateChecker = cachedUpdateChecker(options.updateChecker ?? (() => checkForUpdate({
+    currentVersion,
+    platform: options.platform,
+    arch: options.arch,
+  })));
   const server = createServer(async (request, response) => {
-    try { await route(request, response, paths, jobs, parallel, pool, auth); }
+    try { await route(request, response, paths, jobs, parallel, pool, auth, updateChecker); }
     catch (error) { json(response, error instanceof HttpError ? error.status : 500, { error: message(error) }); }
   });
   await new Promise<void>((done, reject) => {
@@ -445,10 +481,12 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
 async function route(
   request: IncomingMessage, response: ServerResponse, paths: RuntimePaths,
   jobs: JobManager, parallel: ParallelJobManager, pool: PoolManager, auth: AuthManager,
+  updateChecker: () => Promise<UpdateSnapshot>,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
   if (method === "GET" && url.pathname === "/api/health") return json(response, 200, { ok: true, time: new Date().toISOString() });
+  if (method === "GET" && url.pathname === "/api/update") return json(response, 200, await updateChecker());
   if (method === "GET" && url.pathname === "/api/job") return json(response, 200, await jobs.status());
   if (method === "POST" && url.pathname === "/api/job") return json(response, 202, await jobs.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/job/stop") return json(response, 200, await jobs.stop());
@@ -471,6 +509,9 @@ async function route(
       pageSize: integer(url.searchParams.get("pageSize") ?? 100, "pageSize", 1, 100),
       minDelayMs: integer(url.searchParams.get("minDelayMs") ?? 2_500, "minDelayMs", 0, 600_000),
       jitterMs: integer(url.searchParams.get("jitterMs") ?? 800, "jitterMs", 0, 600_000),
+      networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
+      lanes: integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256),
+      workersPerLane: integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16),
     }));
   }
   if (method === "GET" && url.pathname === "/api/user") {
@@ -535,6 +576,29 @@ async function readCookie(path: string): Promise<string | undefined> {
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
 }
 
+async function applicationVersion(): Promise<string> {
+  const value = JSON.parse(await readFile(join(projectRoot, "package.json"), "utf8")) as { version?: unknown };
+  if (typeof value.version !== "string" || !value.version.trim()) throw new Error("应用版本号配置缺失。");
+  return value.version.trim();
+}
+
+function cachedUpdateChecker(checker: () => Promise<UpdateSnapshot>): () => Promise<UpdateSnapshot> {
+  let cached: { value: UpdateSnapshot; expiresAt: number } | undefined;
+  let pending: Promise<UpdateSnapshot> | undefined;
+  return async () => {
+    if (cached && cached.expiresAt > Date.now()) return cached.value;
+    if (!pending) {
+      pending = checker()
+        .then((value) => {
+          cached = { value, expiresAt: Date.now() + 5 * 60_000 };
+          return value;
+        })
+        .finally(() => { pending = undefined; });
+    }
+    return pending;
+  };
+}
+
 async function probeUser(uid: string, proxy: string | undefined, cookiePath: string): Promise<UserProbe> {
   const started = Date.now();
   const cookie = await readCookie(cookiePath);
@@ -565,7 +629,7 @@ async function readJsonl(path: string | undefined, max: number): Promise<FoundCo
 
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, matches: 0, requestsTotal: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, matches: 0, requestsTotal: 0, pagesProcessed: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", lanes: 0, workers: 0, shards: 0, shardsComplete: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
 function numericId(value: unknown, name: string): string { const id = String(value ?? "").trim(); if (!/^\d+$/.test(id)) throw new HttpError(400, `${name} 应为纯数字。`); return id; }
 function selection<const T extends readonly string[]>(value: unknown, choices: T, name: string): T[number] { if (typeof value === "string" && choices.includes(value)) return value as T[number]; throw new HttpError(400, `${name} 参数错误。`); }

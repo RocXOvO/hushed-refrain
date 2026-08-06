@@ -166,6 +166,12 @@ export interface FoundComment extends CommentRecord {
   capturedAt: string;
 }
 
+export interface SongScanProgress {
+  commentOffset: number;
+  pageInSong: number;
+  done: boolean;
+}
+
 export interface ScanState {
   version: 1;
   uid: string;
@@ -175,6 +181,7 @@ export interface ScanState {
   recordScope: "all" | "week";
   sourcesLoaded: boolean;
   songs: SongCandidate[];
+  songProgress?: SongScanProgress[];
   sourceSongCount: number;
   sourceTruncated: boolean;
   sourceErrors: string[];
@@ -185,6 +192,7 @@ export interface ScanState {
   seenCommentIds: string[];
   matchCount: number;
   requestCount: number;
+  pagesProcessed?: number;
   truncatedSongIds: string[];
   blockedUntil?: string;
   finished: boolean;
@@ -219,6 +227,9 @@ export interface RunReport {
   matches: number;
   requestsThisRun: number;
   requestsTotal: number;
+  lanes?: number;
+  workers?: number;
+  pagesProcessed?: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   statePath: string;

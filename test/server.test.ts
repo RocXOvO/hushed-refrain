@@ -25,6 +25,39 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const value = await estimate.json() as { pages: number; expectedSeconds: number };
   assert.equal(value.pages, 5_000);
   assert.equal(value.expectedSeconds, 14_500);
+
+  const pooledEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=100&minDelayMs=2500&jitterMs=800&networkMs=400&lanes=4&workersPerLane=1`);
+  assert.equal(pooledEstimate.status, 200);
+  const pooledValue = await pooledEstimate.json() as { expectedSeconds: number; totalWorkers: number };
+  assert.equal(pooledValue.expectedSeconds, 725);
+  assert.equal(pooledValue.totalWorkers, 4);
+});
+
+test("dashboard exposes the startup update check", async (context) => {
+  const update = {
+    currentVersion: "0.1.0",
+    latestVersion: "0.2.0",
+    updateAvailable: true,
+    platform: "win32" as const,
+    arch: "x64",
+    releaseName: "云评检索台 v0.2.0",
+    releaseUrl: "https://example.test/releases/v0.2.0",
+    assetName: "NCM-Comment-Finder-Setup-0.2.0.exe",
+    downloadUrl: "https://example.test/download.exe",
+    checkedAt: "2026-08-06T00:00:00.000Z",
+  };
+  const server = await startDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    currentVersion: "0.1.0",
+    updateChecker: async () => update,
+  });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/update`);
+
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), update);
 });
 
 test("dashboard validates UID before starting a job", async (context) => {

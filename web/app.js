@@ -1,3 +1,5 @@
+document.documentElement.dataset.desktopPlatform = new URLSearchParams(location.search).get("desktop") || "web";
+
 const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const el = {
@@ -10,15 +12,21 @@ const el = {
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
   connection: $("#connectionBadge"), login: $("#loginButton"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
+  updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
+  updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
   estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
+  windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
 let mode = "parallel";
 let poolSource = "clash-verge";
 let poolSourceInitialized = false;
 let poolRunning = false;
+let poolLaneCount = 1;
+let poolNetworkMs = 400;
 let knownMatches = -1;
 let toastTimer;
+const disclosureAnimations = new WeakMap();
 
 async function api(path, options) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -87,6 +95,7 @@ async function togglePool() {
       ? { proxies: el.externalProxies.value, size: 0 }
       : { size: 4, candidates: 24 };
     renderPool(await api(path, { method: "POST", body: JSON.stringify(value) }));
+    if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate();
     toast(stopping ? "代理池已停止" : "已选出可用的最优出口");
   } catch (error) { toast(error.message); } finally { el.poolToggle.disabled = false; }
 }
@@ -115,10 +124,11 @@ function renderSource(job) {
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
-  el.workLabel.textContent = "当前偏移"; el.work.textContent = fmt(job.commentOffset); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
+  el.workLabel.textContent = "已扫页面"; el.work.textContent = fmt(job.pagesProcessed); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
   const percent = job.songs ? Math.min(100, Math.round(job.songsProcessed / job.songs * 100)) : 0;
   const current = job.currentSong ? `${job.currentSong.name || "未命名歌曲"} · ${job.currentSong.id}` : "尚未读取歌曲";
-  progress(percent, current, [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "));
+  const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程`;
+  progress(percent, `${current} · ${topology}`, [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "));
   el.stop.disabled = !active; el.sourceStart.disabled = active; el.dryRun.disabled = active;
 }
 
@@ -134,6 +144,9 @@ function renderPool(pool) {
     el.externalPoolPane.hidden = poolSource !== "external";
   }
   poolRunning = pool.status === "running";
+  poolLaneCount = poolRunning ? Math.max(1, pool.entries.length) : 1;
+  const latencies = poolRunning ? pool.entries.map((entry) => Number(entry.ncmLatencyMs)).filter(Number.isFinite) : [];
+  poolNetworkMs = latencies.length > 0 ? Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length) : 400;
   el.poolStatus.textContent = { running: `${pool.entries.length} 个出口在线`, starting: "正在测速与验证", "not-running": "未运行" }[pool.status] || pool.status;
   el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : poolSource === "external" ? "验证并使用" : "自动优选";
   const discovery = pool.discovery;
@@ -156,13 +169,14 @@ async function refreshEstimate() {
   try {
     const minDelayMs = Number(el.sourceForm.elements.minDelayMs.value);
     const jitterMs = Number(el.sourceForm.elements.jitterMs.value);
-    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: "100", minDelayMs: String(minDelayMs), jitterMs: String(jitterMs) });
+    const workersPerLane = Number(el.sourceForm.elements.workersPerProxy.value);
+    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: "100", minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(poolLaneCount), workersPerLane: String(workersPerLane) });
     const value = await api(`/api/estimate?${params}`);
     el.estimatePages.textContent = fmt(value.pages);
     el.estimateOptimistic.textContent = duration(value.optimisticSeconds);
     el.estimateExpected.textContent = duration(value.expectedSeconds);
     el.estimateConservative.textContent = duration(value.conservativeSeconds);
-    el.estimateContext.textContent = `每页 100 条 · 请求间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+    el.estimateContext.textContent = `${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 100 条 · 每出口间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { toast(error.message); } finally { el.estimateButton.disabled = false; }
 }
 
@@ -173,6 +187,41 @@ async function stopJob() { try { mode === "parallel" ? renderParallel(await api(
 async function refreshAuth() { try { const auth = await api("/api/auth"); el.connection.innerHTML = `<span class="status-dot"></span>${auth.cookiePresent ? "会话已登录" : "本地服务"}`; el.login.querySelector("span").textContent = auth.cookiePresent ? "更新登录" : "二维码登录"; if (el.qrDialog.open) renderAuth(auth); } catch {} }
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
+
+async function checkUpdates(notifyWhenCurrent) {
+  el.updateButton.disabled = true;
+  el.updateButton.classList.add("checking");
+  try {
+    const update = await api("/api/update");
+    el.updateButtonLabel.textContent = `v${update.currentVersion}`;
+    el.updateButton.classList.toggle("available", update.updateAvailable);
+    el.updateIndicator.hidden = !update.updateAvailable;
+    if (update.updateAvailable) {
+      renderUpdate(update);
+      if (!el.updateDialog.open) el.updateDialog.showModal();
+    } else if (notifyWhenCurrent) {
+      toast(`当前 v${update.currentVersion} 已是最新版本`);
+    }
+  } catch (error) {
+    if (notifyWhenCurrent) toast(`检查更新失败：${error.message}`);
+  } finally {
+    el.updateButton.disabled = false;
+    el.updateButton.classList.remove("checking");
+  }
+}
+
+function renderUpdate(update) {
+  el.updateReleaseName.textContent = update.releaseName || `云评检索台 v${update.latestVersion}`;
+  el.updatePublishedAt.textContent = update.publishedAt ? `发布于 ${dateOnly(update.publishedAt)}` : "已有新版本可下载";
+  el.currentVersion.textContent = `v${update.currentVersion}`;
+  el.latestVersion.textContent = `v${update.latestVersion}`;
+  el.updateNotes.textContent = update.notes || "查看 GitHub Release 获取本次更新内容。";
+  el.updateAsset.textContent = update.assetName
+    ? `已匹配当前设备：${update.assetName}${update.assetSize ? ` · ${fileSize(update.assetSize)}` : ""}`
+    : "当前设备暂无专用安装包，将打开版本发布页面。";
+  el.updateDownload.href = update.downloadUrl || update.releaseUrl;
+  el.updateDownload.querySelector("span").textContent = update.downloadUrl ? "下载更新" : "查看版本";
+}
 
 async function switchMode(value) {
   if (value === mode) return;
@@ -221,11 +270,74 @@ async function playMotion(element, frames, duration, easing) {
   element.style.removeProperty("transform");
   element.style.removeProperty("transition");
 }
+
+function setupAnimatedDisclosures() {
+  $$("details.animated-disclosure").forEach((details) => {
+    const summary = details.querySelector(":scope > summary");
+    if (!summary) return;
+    details.dataset.expanded = String(details.open);
+    summary.setAttribute("aria-expanded", String(details.open));
+    summary.addEventListener("click", (event) => {
+      event.preventDefault();
+      void animateDisclosure(details, details.dataset.expanded !== "true");
+    });
+  });
+}
+
+async function animateDisclosure(details, expanded) {
+  const summary = details.querySelector(":scope > summary");
+  const content = details.querySelector(":scope > .advanced-content");
+  if (!summary || !content) return;
+  const activeAnimation = disclosureAnimations.get(details);
+  const startHeight = details.open ? content.getBoundingClientRect().height : 0;
+  activeAnimation?.cancel();
+  if (expanded && !details.open) details.open = true;
+  details.dataset.expanded = String(expanded);
+  summary.setAttribute("aria-expanded", String(expanded));
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches || typeof content.animate !== "function") {
+    details.open = expanded;
+    details.classList.remove("is-animating");
+    disclosureAnimations.delete(details);
+    return;
+  }
+  const endHeight = expanded ? content.scrollHeight : 0;
+  details.classList.add("is-animating");
+  const animation = content.animate([
+    { height: `${startHeight}px`, opacity: expanded ? 0.35 : 1, transform: expanded ? "translateY(-6px)" : "translateY(0)" },
+    { height: `${endHeight}px`, opacity: expanded ? 1 : 0.25, transform: expanded ? "translateY(0)" : "translateY(-6px)" },
+  ], { duration: expanded ? 280 : 220, easing: "cubic-bezier(.2,.8,.2,1)", fill: "both" });
+  disclosureAnimations.set(details, animation);
+  await animation.finished.catch(() => {});
+  if (disclosureAnimations.get(details) !== animation) return;
+  if (!expanded) details.open = false;
+  animation.cancel();
+  disclosureAnimations.delete(details);
+  details.classList.remove("is-animating");
+}
+
+function renderMaximized(maximized) {
+  el.windowMaximize.classList.toggle("is-maximized", maximized);
+  el.windowMaximize.title = maximized ? "还原" : "最大化";
+  el.windowMaximize.setAttribute("aria-label", maximized ? "还原" : "最大化");
+}
+
+async function setupDesktopWindowControls() {
+  const desktop = window.ncmDesktop;
+  if (!desktop || desktop.platform !== "win32") return;
+  el.windowMinimize.addEventListener("click", () => desktop.minimize());
+  el.windowClose.addEventListener("click", () => desktop.close());
+  el.windowMaximize.addEventListener("click", async () => renderMaximized(await desktop.toggleMaximize()));
+  desktop.onMaximizedChange(renderMaximized);
+  renderMaximized(await desktop.isMaximized());
+}
+
 function setBusy(value) { el.parallelStart.disabled = value; el.sourceStart.disabled = value; el.dryRun.disabled = value; }
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
+function dateOnly(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value)); }
 function duration(seconds) { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [days ? `${days}天` : "", hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", rest && !days ? `${rest}秒` : ""].filter(Boolean).join(" ") || "0秒"; }
+function fileSize(bytes) { return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`; }
 function shortPath(value) { if (!value) return ""; const parts = value.split(/[\\/]/); return parts.slice(-3).join("/"); }
 function panelForTab(value) { return $({ results: "#resultsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value; return node.innerHTML; }
@@ -238,8 +350,13 @@ el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEve
 el.estimateButton.addEventListener("click", () => void refreshEstimate());
 $$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
+el.updateButton.addEventListener("click", () => void checkUpdates(true));
+$("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
+$("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
+el.updateDownload.addEventListener("click", () => el.updateDialog.close());
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
 $$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) return; const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); }));
-void refresh(); void refreshResults(); void refreshAuth(); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);
+setupAnimatedDisclosures(); void setupDesktopWindowControls();
+void refresh(); void refreshResults(); void refreshAuth(); void checkUpdates(false); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);

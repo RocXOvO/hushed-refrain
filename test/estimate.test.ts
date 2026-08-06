@@ -18,7 +18,41 @@ test("estimates a 100k comment scan at the configured serial rate", () => {
     expectedSeconds: 2_900,
     conservativeSeconds: 3_300,
     expectedCommentsPerSecond: 34.48,
+    lanes: 1,
+    workersPerLane: 1,
+    totalWorkers: 1,
   });
+});
+
+test("scales throughput across independent proxy lanes", () => {
+  const estimate = estimateCommentScan({
+    comments: 100_000,
+    pageSize: 100,
+    minDelayMs: 2_500,
+    jitterMs: 800,
+    networkMs: 400,
+    lanes: 4,
+    workersPerLane: 1,
+  });
+
+  assert.equal(estimate.expectedSeconds, 725);
+  assert.equal(estimate.expectedCommentsPerSecond, 137.93);
+  assert.equal(estimate.totalWorkers, 4);
+});
+
+test("accounts for worker concurrency when network latency exceeds spacing", () => {
+  const estimate = estimateCommentScan({
+    comments: 100_000,
+    pageSize: 100,
+    minDelayMs: 0,
+    jitterMs: 0,
+    networkMs: 800,
+    lanes: 4,
+    workersPerLane: 2,
+  });
+
+  assert.equal(estimate.expectedSeconds, 100);
+  assert.equal(estimate.expectedCommentsPerSecond, 1_000);
 });
 
 test("network latency becomes the lower bound when delay is zero", () => {
