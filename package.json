@@ -4,6 +4,7 @@
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music comment finder",
+  "author": "NCM Comment Finder Contributors",
   "license": "MIT",
   "bin": {
     "ncm-comments": "dist/cli.js"
@@ -16,7 +17,10 @@
     "web": "tsx src/cli.ts web",
     "desktop": "npm run build && electron .",
     "desktop:smoke": "npm run build && set NCM_DESKTOP_SMOKE=1&& electron .",
-    "dist:win": "npm run build && electron-builder --win nsis"
+    "desktop:smoke:mac": "npm run build && NCM_DESKTOP_SMOKE=1 electron .",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:mac": "npm run build && node scripts/build-mac.cjs arm64",
+    "dist:mac:all": "npm run build && node scripts/build-mac.cjs arm64 x64"
   },
   "dependencies": {
     "@neteasecloudmusicapienhanced/api": "4.39.0",
@@ -36,6 +40,7 @@
   "build": {
     "appId": "cn.local.ncm.commentfinder",
     "productName": "云评检索台",
+    "afterPack": "build/after-pack.cjs",
     "asar": true,
     "directories": {
       "output": "release"
@@ -55,6 +60,32 @@
         }
       ],
       "artifactName": "NCM-Comment-Finder-Setup-${version}.${ext}"
+    },
+    "mac": {
+      "icon": "build/icon.icns",
+      "category": "public.app-category.utilities",
+      "minimumSystemVersion": "11.0",
+      "hardenedRuntime": false,
+      "identity": "-",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64", "x64"]
+        }
+      ],
+      "artifactName": "NCM-Comment-Finder-${version}-${arch}.${ext}"
+    },
+    "dmg": {
+      "title": "云评检索台 ${version}",
+      "iconSize": 112,
+      "window": {
+        "width": 540,
+        "height": 380
+      },
+      "contents": [
+        { "x": 150, "y": 190, "type": "file" },
+        { "x": 390, "y": 190, "type": "link", "path": "/Applications" }
+      ]
     },
     "nsis": {
       "oneClick": false,

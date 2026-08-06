@@ -9,12 +9,15 @@ import { estimateCommentScan } from "./estimate";
 import { RequestGovernor } from "./governor";
 import {
   defaultMihomoPoolOptions,
+  discoverClashVerge,
+  importExternalProxyPool,
   proxyPoolRunning,
   readProxyPool,
   startMihomoPool,
   stopMihomoPool,
   verifyProxyPool,
-  type ProxyPoolFile,
+  type ProxyPoolEntry,
+  type ProxyPoolSource,
 } from "./mihomo-pool";
 import {
   loadParallelState,
@@ -142,6 +145,16 @@ interface UserProbe {
   likes: SourceProbe;
   sessionPresent: boolean;
   elapsedMs: number;
+}
+
+interface PoolSnapshot {
+  status: "running" | "not-running" | "starting";
+  poolPath: string;
+  source?: ProxyPoolSource;
+  pid?: number;
+  generatedAt?: string;
+  entries: ProxyPoolEntry[];
+  discovery: ReturnType<typeof discoverClashVerge>;
 }
 
 const projectRoot = resolve(__dirname, "..");
@@ -335,21 +348,30 @@ class PoolManager {
   private starting = false;
   constructor(private readonly paths: RuntimePaths) {}
 
-  async status(): Promise<{ status: "running" | "not-running" | "starting"; poolPath: string; pid?: number; generatedAt?: string; entries: ProxyPoolFile["entries"] }> {
+  async status(): Promise<PoolSnapshot> {
     const pool = await readProxyPool(this.paths.pool);
     return {
       status: this.starting ? "starting" : proxyPoolRunning(pool) ? "running" : "not-running",
-      poolPath: this.paths.pool, pid: pool?.pid, generatedAt: pool?.generatedAt, entries: pool?.entries ?? [],
+      poolPath: this.paths.pool,
+      source: pool?.source,
+      pid: pool?.pid,
+      generatedAt: pool?.generatedAt,
+      entries: publicPoolEntries(pool?.entries ?? []),
+      discovery: discoverClashVerge(),
     };
   }
 
-  async start(input: Record<string, unknown>): Promise<ReturnType<PoolManager["status"]>> {
+  async start(input: Record<string, unknown>): Promise<PoolSnapshot> {
     if (this.starting) throw new HttpError(409, "代理池正在构建。");
     this.starting = true;
     try {
       const defaults = defaultMihomoPoolOptions(this.paths.root);
       await startMihomoPool({
-        ...defaults, workDirectory: this.paths.poolWork, poolPath: this.paths.pool,
+        ...defaults,
+        sourceConfigPath: optionalPath(input.sourceConfigPath) ?? defaults.sourceConfigPath,
+        mihomoPath: optionalPath(input.mihomoPath) ?? defaults.mihomoPath,
+        workDirectory: this.paths.poolWork,
+        poolPath: this.paths.pool,
         size: integer(input.size ?? defaults.size, "size", 1, 32),
         candidateCount: integer(input.candidates ?? defaults.candidateCount, "candidates", 1, 128),
       });
@@ -357,7 +379,18 @@ class PoolManager {
     } finally { this.starting = false; }
   }
 
-  async stop(): Promise<ReturnType<PoolManager["status"]>> {
+  async import(input: Record<string, unknown>): Promise<PoolSnapshot> {
+    if (this.starting) throw new HttpError(409, "代理池正在验证。");
+    this.starting = true;
+    try {
+      const endpoints = proxyEndpoints(input.proxies);
+      const size = integer(input.size ?? 0, "size", 0, 64);
+      await importExternalProxyPool(endpoints, this.paths.pool, size);
+      return this.status();
+    } finally { this.starting = false; }
+  }
+
+  async stop(): Promise<PoolSnapshot> {
     await stopMihomoPool(this.paths.pool);
     return this.status();
   }
@@ -426,6 +459,7 @@ async function route(
   if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, { results: await parallel.results(limit(url)) });
   if (method === "GET" && url.pathname === "/api/pool") return json(response, 200, await pool.status());
   if (method === "POST" && url.pathname === "/api/pool/start") return json(response, 202, await pool.start(await body(request)));
+  if (method === "POST" && url.pathname === "/api/pool/import") return json(response, 202, await pool.import(await body(request)));
   if (method === "POST" && url.pathname === "/api/pool/stop") return json(response, 200, await pool.stop());
   if (method === "GET" && url.pathname === "/api/song") {
     const song = await new EnhancedNcmClient({ proxy: proxyUrl(url.searchParams.get("proxy")) }).getSongInfo(numericId(url.searchParams.get("id"), "歌曲 ID"));
@@ -542,6 +576,34 @@ function proxyUrl(value: unknown): string | undefined {
   if (typeof value !== "string") throw new HttpError(400, "代理地址格式错误。");
   try { const parsed = new URL(value); if (!["http:", "https:"].includes(parsed.protocol)) throw new Error(); return parsed.toString(); }
   catch { throw new HttpError(400, "代理地址需使用 http:// 或 https://。"); }
+}
+function proxyEndpoints(value: unknown): string[] {
+  const values = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+    ? value.split(/[\r\n,]+/)
+    : [];
+  const endpoints = values.map((item) => String(item).trim()).filter(Boolean);
+  if (endpoints.length === 0) throw new HttpError(400, "请至少输入一个代理地址。");
+  return endpoints.map((endpoint) => proxyUrl(endpoint)!);
+}
+function optionalPath(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string") throw new HttpError(400, "路径格式错误。");
+  return resolve(value.trim());
+}
+function publicPoolEntries(entries: ProxyPoolEntry[]): ProxyPoolEntry[] {
+  return entries.map((entry) => ({ ...entry, endpoint: maskProxyCredentials(entry.endpoint) }));
+}
+function maskProxyCredentials(endpoint: string): string {
+  try {
+    const parsed = new URL(endpoint);
+    if (parsed.username) parsed.username = "***";
+    if (parsed.password) parsed.password = "***";
+    return parsed.toString();
+  } catch {
+    return endpoint;
+  }
 }
 function limit(url: URL): number { return integer(url.searchParams.get("limit") ?? 20, "limit", 1, 200); }
 function mimeType(path: string): string { return ({ ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml" } as Record<string, string>)[extname(path).toLowerCase()] ?? "application/octet-stream"; }

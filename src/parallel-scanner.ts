@@ -39,6 +39,7 @@ export async function runParallelSongScan(
   if (loaded) assertCompatible(loaded, options);
   const state = loaded ?? createParallelState(options);
   const initialRequests = state.requestCount;
+  const seenCommentIds = new Set(state.seenCommentIds);
   const writer = new JsonlResultWriter(options.outputPath);
   await writer.initialize();
 
@@ -142,7 +143,7 @@ export async function runParallelSongScan(
       for (const comment of rangedComments) {
         if (comment.userId !== options.uid) continue;
         if (options.stopAfterFirst && matched) break;
-        if (state.seenCommentIds.includes(comment.commentId)) {
+        if (seenCommentIds.has(comment.commentId)) {
           if (options.stopAfterFirst) {
             matched = true;
             stopRequested = true;
@@ -151,6 +152,7 @@ export async function runParallelSongScan(
         }
         if (writer.has(comment.commentId)) {
           state.seenCommentIds.push(comment.commentId);
+          seenCommentIds.add(comment.commentId);
           state.matchCount += 1;
           if (options.stopAfterFirst) {
             matched = true;
@@ -168,6 +170,7 @@ export async function runParallelSongScan(
         };
         if (await writer.append(record)) {
           state.seenCommentIds.push(comment.commentId);
+          seenCommentIds.add(comment.commentId);
           state.matchCount += 1;
         }
         if (options.stopAfterFirst) {

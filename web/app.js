@@ -5,13 +5,17 @@ const el = {
   songId: $("#songId"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
   poolStatus: $("#poolStatus"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
+  poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
   connection: $("#connectionBadge"), login: $("#loginButton"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
+  estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
 let mode = "parallel";
+let poolSource = "clash-verge";
+let poolSourceInitialized = false;
 let poolRunning = false;
 let knownMatches = -1;
 let toastTimer;
@@ -76,9 +80,14 @@ async function togglePool() {
   el.poolToggle.disabled = true;
   const stopping = poolRunning;
   try {
-    const path = stopping ? "/api/pool/stop" : "/api/pool/start";
-    renderPool(await api(path, { method: "POST", body: stopping ? "{}" : JSON.stringify({ size: 4, candidates: 24 }) }));
-    toast(stopping ? "代理池已停止" : "代理池已完成出口验证");
+    const path = stopping ? "/api/pool/stop" : poolSource === "external" ? "/api/pool/import" : "/api/pool/start";
+    const value = stopping
+      ? {}
+      : poolSource === "external"
+      ? { proxies: el.externalProxies.value, size: 0 }
+      : { size: 4, candidates: 24 };
+    renderPool(await api(path, { method: "POST", body: JSON.stringify(value) }));
+    toast(stopping ? "代理池已停止" : "已选出可用的最优出口");
   } catch (error) { toast(error.message); } finally { el.poolToggle.disabled = false; }
 }
 
@@ -116,9 +125,21 @@ function renderSource(job) {
 function progress(percent, current, note) { el.bar.style.width = `${percent}%`; el.percent.textContent = `${percent}%`; el.current.textContent = current; el.note.hidden = !note; el.note.textContent = note || ""; }
 
 function renderPool(pool) {
+  if (!poolSourceInitialized && pool.source) {
+    poolSourceInitialized = true;
+    poolSource = pool.source;
+    const sourceInput = $(`input[name="poolSource"][value="${poolSource}"]`);
+    if (sourceInput) sourceInput.checked = true;
+    el.clashPoolPane.hidden = poolSource !== "clash-verge";
+    el.externalPoolPane.hidden = poolSource !== "external";
+  }
   poolRunning = pool.status === "running";
-  el.poolStatus.textContent = { running: `${pool.entries.length} 个出口在线`, starting: "正在验证", "not-running": "未运行" }[pool.status] || pool.status;
-  el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : "构建";
+  el.poolStatus.textContent = { running: `${pool.entries.length} 个出口在线`, starting: "正在测速与验证", "not-running": "未运行" }[pool.status] || pool.status;
+  el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : poolSource === "external" ? "验证并使用" : "自动优选";
+  const discovery = pool.discovery;
+  el.poolDiscovery.textContent = discovery?.installed
+    ? `已找到 Clash Verge 配置与 Mihomo 内核 · ${shortPath(discovery.configPath)}`
+    : "未自动找到 Clash Verge，可切换到“其他代理池”手动接入。";
   if (!pool.entries.length) { el.poolEntries.innerHTML = '<div class="pool-empty">等待代理节点</div>'; el.poolTable.innerHTML = '<tr class="empty-row"><td colspan="5">代理池未运行</td></tr>'; return; }
   el.poolEntries.replaceChildren(...pool.entries.map((entry, index) => { const row = document.createElement("div"); row.className = "pool-entry"; row.innerHTML = `<span class="lane-swatch lane-${index % 4}"></span><strong>${escapeHtml(entry.egressIp)}</strong><span>${fmt(entry.ncmLatencyMs)}ms</span>`; return row; }));
   el.poolTable.replaceChildren(...pool.entries.map((entry) => tableRow([entry.name, entry.endpoint, entry.egressIp, `${fmt(entry.ncmLatencyMs)} ms`, entry.ncmVerified ? "已验证" : "待验证"])));
@@ -129,6 +150,22 @@ async function refreshResults() {
   catch (error) { toast(error.message); }
 }
 
+async function refreshEstimate() {
+  if (!el.estimateComments.reportValidity()) return;
+  el.estimateButton.disabled = true;
+  try {
+    const minDelayMs = Number(el.sourceForm.elements.minDelayMs.value);
+    const jitterMs = Number(el.sourceForm.elements.jitterMs.value);
+    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: "100", minDelayMs: String(minDelayMs), jitterMs: String(jitterMs) });
+    const value = await api(`/api/estimate?${params}`);
+    el.estimatePages.textContent = fmt(value.pages);
+    el.estimateOptimistic.textContent = duration(value.optimisticSeconds);
+    el.estimateExpected.textContent = duration(value.expectedSeconds);
+    el.estimateConservative.textContent = duration(value.conservativeSeconds);
+    el.estimateContext.textContent = `每页 100 条 · 请求间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+  } catch (error) { toast(error.message); } finally { el.estimateButton.disabled = false; }
+}
+
 function tableRow(values) { const row = document.createElement("tr"); values.forEach((value) => { const cell = document.createElement("td"); cell.textContent = value; row.append(cell); }); return row; }
 function emptyRow() { const row = document.createElement("tr"); row.className = "empty-row"; const cell = document.createElement("td"); cell.colSpan = 5; cell.textContent = "暂无命中"; row.append(cell); return row; }
 
@@ -137,11 +174,60 @@ async function refreshAuth() { try { const auth = await api("/api/auth"); el.con
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
 
-function switchMode(value) { mode = value; el.parallelForm.hidden = mode !== "parallel"; el.sourceForm.hidden = mode !== "source"; knownMatches = -1; void refresh(); void refreshResults(); }
+async function switchMode(value) {
+  if (value === mode) return;
+  const previous = mode;
+  mode = value;
+  document.body.dataset.mode = mode;
+  await slideSwap(previous === "parallel" ? el.parallelForm : el.sourceForm, mode === "parallel" ? el.parallelForm : el.sourceForm, mode === "source" ? 1 : -1);
+  knownMatches = -1;
+  void refresh(); void refreshResults();
+}
+async function switchPoolSource(value) {
+  if (value === poolSource) return;
+  const previous = poolSource;
+  poolSource = value;
+  await slideSwap(previous === "clash-verge" ? el.clashPoolPane : el.externalPoolPane, poolSource === "clash-verge" ? el.clashPoolPane : el.externalPoolPane, poolSource === "external" ? 1 : -1);
+  if (!poolRunning) el.poolToggle.querySelector("span").textContent = poolSource === "external" ? "验证并使用" : "自动优选";
+}
+async function slideSwap(outgoing, incoming, direction = 1) {
+  if (outgoing === incoming) return;
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  if (!reduced && !outgoing.hidden) {
+    await playMotion(outgoing, [
+      { opacity: 1, transform: "translateX(0)" },
+      { opacity: 0, transform: `translateX(${-18 * direction}px)` },
+    ], 170, "cubic-bezier(.4,0,.2,1)");
+  }
+  outgoing.hidden = true; outgoing.setAttribute("aria-hidden", "true");
+  incoming.hidden = false; incoming.setAttribute("aria-hidden", "false");
+  if (!reduced) void playMotion(incoming, [
+    { opacity: 0, transform: `translateX(${18 * direction}px)` },
+    { opacity: 1, transform: "translateX(0)" },
+  ], 240, "cubic-bezier(.2,.8,.2,1)");
+}
+async function playMotion(element, frames, duration, easing) {
+  if (typeof element.animate === "function") {
+    const animation = element.animate(frames, { duration, easing });
+    await animation.finished.catch(() => {});
+    return;
+  }
+  Object.assign(element.style, frames[0]);
+  void element.offsetWidth;
+  element.style.transition = `opacity ${duration}ms ${easing}, transform ${duration}ms ${easing}`;
+  Object.assign(element.style, frames[1]);
+  await new Promise((resolve) => setTimeout(resolve, duration));
+  element.style.removeProperty("opacity");
+  element.style.removeProperty("transform");
+  element.style.removeProperty("transition");
+}
 function setBusy(value) { el.parallelStart.disabled = value; el.sourceStart.disabled = value; el.dryRun.disabled = value; }
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
+function duration(seconds) { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [days ? `${days}天` : "", hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", rest && !days ? `${rest}秒` : ""].filter(Boolean).join(" ") || "0秒"; }
+function shortPath(value) { if (!value) return ""; const parts = value.split(/[\\/]/); return parts.slice(-3).join("/"); }
+function panelForTab(value) { return $({ results: "#resultsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value; return node.innerHTML; }
 function toast(message) { clearTimeout(toastTimer); el.toast.textContent = message; el.toast.hidden = false; toastTimer = setTimeout(() => { el.toast.hidden = true; }, 4500); }
 
@@ -149,8 +235,11 @@ el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); 
 el.sourceForm.addEventListener("submit", (event) => { event.preventDefault(); void startSource(false); });
 el.dryRun.addEventListener("click", () => void startSource(true)); el.songLookup.addEventListener("click", () => void lookupSong()); el.lookup.addEventListener("click", () => void lookupUser());
 el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEventListener("click", () => void stopJob()); el.refresh.addEventListener("click", () => void refresh());
+el.estimateButton.addEventListener("click", () => void refreshEstimate());
+$$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
-$$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) switchMode(input.value); }));
+$$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
+$$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
-$$('.tab').forEach((tab) => tab.addEventListener("click", () => { $$('.tab').forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); $("#resultsPanel").hidden = tab.dataset.tab !== "results"; $("#poolPanel").hidden = tab.dataset.tab !== "pool"; }));
+$$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) return; const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); }));
 void refresh(); void refreshResults(); void refreshAuth(); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);

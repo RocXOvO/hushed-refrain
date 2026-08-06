@@ -22,17 +22,28 @@
         <img src="/icons/search.svg" alt="">
       </div>
 
-      <div class="mode-switch segmented two" aria-label="检索模式">
+      <div id="modeSwitch" class="mode-switch segmented two sliding-segment" aria-label="检索模式">
         <label><input type="radio" name="mode" value="parallel" checked><span><img src="/icons/gauge.svg" alt="">单曲并行</span></label>
         <label><input type="radio" name="mode" value="source"><span><img src="/icons/list-music.svg" alt="">用户来源</span></label>
       </div>
 
-      <form id="parallelForm" class="control-form">
+      <form id="parallelForm" class="control-form mode-panel" aria-hidden="false">
         <label class="field"><span>用户 UID</span><input id="parallelUid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="2044521815" required></label>
         <div class="field"><label for="songId">歌曲 ID</label><div class="input-action"><input id="songId" name="songId" inputmode="numeric" pattern="[0-9]+" placeholder="186016" required><button id="songLookupButton" class="icon-button dark" type="button" title="查询歌曲" aria-label="查询歌曲"><img src="/icons/search.svg" alt=""></button></div><span id="songPreview" class="field-hint" hidden></span></div>
 
         <section class="pool-section">
           <div class="pool-heading"><div><span class="field-label">多 IP 池</span><strong id="poolStatus">未运行</strong></div><button id="poolToggleButton" class="button secondary compact-button" type="button"><img src="/icons/network.svg" alt=""><span>构建</span></button></div>
+          <div class="pool-source-switch segmented two sliding-segment" aria-label="代理池来源">
+            <label><input type="radio" name="poolSource" value="clash-verge" checked><span>Clash Verge</span></label>
+            <label><input type="radio" name="poolSource" value="external"><span>其他代理池</span></label>
+          </div>
+          <div id="clashPoolPane" class="proxy-source-pane">
+            <p id="poolDiscovery" class="pool-discovery">正在检测 Clash Verge…</p>
+          </div>
+          <div id="externalPoolPane" class="proxy-source-pane" hidden>
+            <label class="field compact"><span>代理地址（每行一个）</span><textarea id="externalProxies" rows="4" placeholder="http://127.0.0.1:17891&#10;http://user:pass@proxy.example:8080"></textarea></label>
+            <p class="pool-discovery">支持 HTTP/HTTPS 代理；会先验证出口 IP 和网易云连通性，凭据不会显示在界面中。</p>
+          </div>
           <div id="poolEntries" class="pool-entries"><div class="pool-empty">等待代理节点</div></div>
         </section>
 
@@ -51,7 +62,7 @@
         <button id="parallelStartButton" class="button primary full" type="submit"><img src="/icons/play.svg" alt="">开始并行扫描</button>
       </form>
 
-      <form id="sourceForm" class="control-form" hidden>
+      <form id="sourceForm" class="control-form mode-panel" aria-hidden="true" hidden>
         <div class="field"><label for="uid">用户 UID</label><div class="input-action"><input id="uid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="123456789" required><button id="lookupButton" class="icon-button dark" type="button" title="查询用户" aria-label="查询用户"><img src="/icons/user-search.svg" alt=""></button></div></div>
         <div id="userPreview" class="user-preview" hidden><div><strong id="userNickname">-</strong><span id="userMeta">-</span></div><div class="source-probes"><span id="recordProbe">听歌排行</span><span id="likesProbe">喜欢歌曲</span></div></div>
         <fieldset class="field-group"><legend>歌曲来源</legend><div class="segmented three"><label><input type="radio" name="source" value="record" checked><span><img src="/icons/history.svg" alt="">听歌排行</span></label><label><input type="radio" name="source" value="likes"><span><img src="/icons/heart.svg" alt="">喜欢歌曲</span></label><label><input type="radio" name="source" value="both"><span><img src="/icons/layers-2.svg" alt="">两者</span></label></div></fieldset>
@@ -71,9 +82,20 @@
         <div class="metric"><span>累计请求</span><strong id="requestsMetric">0</strong></div>
       </div>
       <div class="progress-band"><div class="progress-copy"><span id="currentSong">尚未开始</span><span id="progressPercent">0%</span></div><div class="progress-track"><span id="progressBar"></span></div><div id="taskNote" class="task-note" hidden></div></div>
-      <div class="tabs" role="tablist" aria-label="任务视图"><button class="tab active" type="button" role="tab" data-tab="results" aria-selected="true">实时结果</button><button class="tab" type="button" role="tab" data-tab="pool" aria-selected="false">出口详情</button></div>
-      <section id="resultsPanel" class="tab-panel" role="tabpanel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>歌曲</th><th>评论内容</th><th>点赞</th></tr></thead><tbody id="resultsBody"><tr class="empty-row"><td colspan="5">暂无命中</td></tr></tbody></table></div></section>
-      <section id="poolPanel" class="tab-panel" role="tabpanel" hidden><div class="table-wrap"><table><thead><tr><th>节点</th><th>监听地址</th><th>出口 IP</th><th>网易云延迟</th><th>状态</th></tr></thead><tbody id="poolTableBody"><tr class="empty-row"><td colspan="5">代理池未运行</td></tr></tbody></table></div></section>
+      <div class="tabs" role="tablist" aria-label="任务视图"><button class="tab active" type="button" role="tab" data-tab="results" aria-selected="true">实时结果</button><button class="tab" type="button" role="tab" data-tab="pool" aria-selected="false">出口详情</button><button class="tab" type="button" role="tab" data-tab="estimate" aria-selected="false">速度估算</button></div>
+      <section id="resultsPanel" class="tab-panel view-panel" role="tabpanel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>歌曲</th><th>评论内容</th><th>点赞</th></tr></thead><tbody id="resultsBody"><tr class="empty-row"><td colspan="5">暂无命中</td></tr></tbody></table></div></section>
+      <section id="poolPanel" class="tab-panel view-panel" role="tabpanel" hidden><div class="table-wrap"><table><thead><tr><th>节点</th><th>监听地址</th><th>出口 IP</th><th>网易云延迟</th><th>状态</th></tr></thead><tbody id="poolTableBody"><tr class="empty-row"><td colspan="5">代理池未运行</td></tr></tbody></table></div></section>
+      <section id="estimatePanel" class="tab-panel view-panel" role="tabpanel" hidden>
+        <div class="estimate-card">
+          <div class="estimate-toolbar">
+            <label class="field inline"><span>评论总数</span><input id="estimateComments" type="number" min="0" max="100000000" value="100000"></label>
+            <div class="preset-group" aria-label="常用规模"><button type="button" data-comments="100000">10 万</button><button type="button" data-comments="300000">30 万</button><button type="button" data-comments="500000">50 万</button><button type="button" data-comments="1000000">100 万</button></div>
+            <button id="estimateButton" class="button secondary" type="button"><img src="/icons/calculator.svg" alt="">重新计算</button>
+          </div>
+          <p id="estimateContext" class="estimate-context">按用户来源扫描的当前请求间隔估算。</p>
+          <div class="estimate-results"><div><span>需求页数</span><strong id="estimatePages">1,000</strong></div><div><span>理想耗时</span><strong id="estimateOptimistic">-</strong></div><div><span>预期耗时</span><strong id="estimateExpected">-</strong></div><div><span>保守耗时</span><strong id="estimateConservative">-</strong></div></div>
+        </div>
+      </section>
     </section>
   </main>
 

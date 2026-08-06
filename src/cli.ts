@@ -5,6 +5,7 @@ import { parseArgs } from "node:util";
 import { RequestGovernor } from "./governor";
 import {
   defaultMihomoPoolOptions,
+  importExternalProxyPool,
   proxyPoolRunning,
   readProxyPool,
   startMihomoPool,
@@ -56,7 +57,7 @@ Parallel song options:
   --proxy URL                       repeat for each Clash/Mihomo listener
   --proxy-list URL,URL              comma-separated listener list
   --workers-per-proxy N             default: 3
-  --shards N                        default: 24 time ranges
+  --shards N                        default: 96 time ranges
   --comment-page-size N             default: 1000, maximum: 2000
   --start-time TIME                 epoch milliseconds or ISO date
   --end-time TIME                   epoch milliseconds or ISO date
@@ -69,6 +70,7 @@ Parallel song options:
 
 Proxy pool commands:
   npm run start -- proxy-pool start    build and verify distinct egress listeners
+  npm run start -- proxy-pool import   verify and use external HTTP proxy endpoints
   npm run start -- proxy-pool status   show the active pool and verified IPs
   npm run start -- proxy-pool stop     stop the dedicated Mihomo process
 
@@ -123,6 +125,8 @@ async function proxyPoolCommand(args: string[]): Promise<void> {
       size: { type: "string", default: String(defaults.size) },
       candidates: { type: "string", default: String(defaults.candidateCount) },
       "controller-port": { type: "string", default: String(defaults.controllerPort) },
+      proxy: { type: "string", multiple: true },
+      "proxy-list": { type: "string" },
     },
     allowPositionals: true,
     strict: true,
@@ -144,8 +148,18 @@ async function proxyPoolCommand(args: string[]): Promise<void> {
     }, null, 2)}\n`);
     return;
   }
+  if (action === "import") {
+    const endpoints = proxyList(parsed.values.proxy, parsed.values["proxy-list"]);
+    const pool = await importExternalProxyPool(
+      endpoints,
+      poolPath,
+      integer(parsed.values.size, "size", 0, 64),
+    );
+    process.stdout.write(`${JSON.stringify({ status: "running", ...pool }, null, 2)}\n`);
+    return;
+  }
   if (action !== "start") {
-    throw new Error("proxy-pool action must be start, status, or stop.");
+    throw new Error("proxy-pool action must be start, import, status, or stop.");
   }
   const pool = await startMihomoPool({
     sourceConfigPath: resolve(parsed.values["source-config"]!),

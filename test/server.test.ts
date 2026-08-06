@@ -56,3 +56,17 @@ test("dashboard keeps proxy-pool state under the configured runtime root", async
   assert.equal(pool.poolPath, join(runtimeRoot, ".ncm", "proxy-pool.json"));
   assert.deepEqual(pool.entries, []);
 });
+
+test("dashboard validates an external proxy pool before importing it", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-proxy-"));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/pool/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ proxies: "" }),
+  });
+  assert.equal(response.status, 400);
+  assert.match(await response.text(), /代理地址/);
+});

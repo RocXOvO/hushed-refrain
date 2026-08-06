@@ -27,6 +27,7 @@ export async function runCommentFinder(
   const initialRequests = loadedState?.requestCount ?? 0;
   const provisionalStrategy = options.strategy === "history" ? "history" : "scan";
   const state = loadedState ?? createState(options, provisionalStrategy);
+  const seenCommentIds = new Set(state.seenCommentIds);
 
   if (state.blockedUntil) {
     const resumeAt = Date.parse(state.blockedUntil);
@@ -63,10 +64,10 @@ export async function runCommentFinder(
       if (!options.cookie) {
         throw new Error("The history strategy requires a logged-in cookie.");
       }
-      return await runHistory(client, governor, options, state, writer, checkpoint, initialRequests);
+      return await runHistory(client, governor, options, state, writer, seenCommentIds, checkpoint, initialRequests);
     }
 
-    return await runSongScan(client, governor, options, state, writer, checkpoint, initialRequests);
+    return await runSongScan(client, governor, options, state, writer, seenCommentIds, checkpoint, initialRequests);
   } catch (error) {
     if (error instanceof CooldownRequired) {
       state.blockedUntil = new Date(Date.now() + error.retryAfterMs).toISOString();
@@ -114,6 +115,7 @@ async function runHistory(
   options: ScanOptions,
   state: ScanState,
   writer: JsonlResultWriter,
+  seenCommentIds: Set<string>,
   checkpoint: () => Promise<void>,
   initialRequests: number,
 ): Promise<RunReport> {
@@ -128,7 +130,7 @@ async function runHistory(
     );
 
     const matches = page.comments.filter((comment) => comment.userId === options.uid);
-    const added = await appendMatches(writer, state, matches.map((comment) => ({
+    const added = await appendMatches(writer, state, seenCommentIds, matches.map((comment) => ({
       ...comment,
       route: "user-history" as const,
       capturedAt: new Date().toISOString(),
@@ -162,6 +164,7 @@ async function runSongScan(
   options: ScanOptions,
   state: ScanState,
   writer: JsonlResultWriter,
+  seenCommentIds: Set<string>,
   checkpoint: () => Promise<void>,
   initialRequests: number,
 ): Promise<RunReport> {
@@ -216,7 +219,7 @@ async function runSongScan(
         route: "song-comments",
         capturedAt: new Date().toISOString(),
       }));
-    const added = await appendMatches(writer, state, matches);
+    const added = await appendMatches(writer, state, seenCommentIds, matches);
 
     state.pageInSong += 1;
     state.commentOffset += options.commentPageSize;
@@ -295,9 +298,9 @@ export function mergeSongs(songs: SongCandidate[]): SongCandidate[] {
 async function appendMatches(
   writer: JsonlResultWriter,
   state: ScanState,
+  seen: Set<string>,
   matches: FoundComment[],
 ): Promise<number> {
-  const seen = new Set(state.seenCommentIds);
   let added = 0;
   for (const match of matches) {
     if (seen.has(match.commentId) || writer.has(match.commentId)) continue;

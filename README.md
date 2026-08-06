@@ -23,12 +23,32 @@ release/NCM-Comment-Finder-Setup-0.1.0.exe
 
 安装器支持选择目录，并创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
 
+macOS Apple Silicon 用户可打开：
+
+```text
+release/NCM-Comment-Finder-0.1.0-arm64.dmg
+```
+
+将“云评检索台”拖入 Applications 即可安装。当前本地包使用 ad-hoc 签名；向其他用户公开分发时，应使用 Apple Developer ID 证书签名并公证。
+
 从源码运行需要 Node.js 20 或更高版本：
 
 ```powershell
 npm install
 npm run build
 ```
+
+macOS 安装包构建：
+
+```bash
+# Apple Silicon
+npm run dist:mac
+
+# 同时生成 Apple Silicon 和 Intel 版本
+npm run dist:mac:all
+```
+
+构建脚本会先在系统临时目录中签名和生成 DMG，再把安装包复制到 `release/`，避免 Documents/iCloud 文件提供器的扩展属性干扰 macOS 签名。
 
 底座依赖固定为 `@neteasecloudmusicapienhanced/api@4.39.0`，避免上游接口变更直接影响一次正在续跑的任务。
 
@@ -58,7 +78,7 @@ npm run web
 
 UID 输入框右侧的用户查询按钮会先读取昵称、等级、累计听歌数，并分别探测听歌排行和喜欢列表是否可读。来源显示“受限”时，先检查二维码登录状态和该用户的公开设置，再决定是否启动评论扫描。
 
-控制台默认进入“单曲并行”，可直接构建 Clash Verge 多 IP 池、查询歌曲、启动/停止分片任务，并查看每个出口 IP 与网易云实测延迟。“用户来源”保留二维码登录、用户探测、听歌排行/喜欢列表和断点续跑。
+控制台默认进入“单曲并行”，可直接构建 Clash Verge 多 IP 池、查询歌曲、启动/停止分片任务，并查看每个出口 IP 与网易云实测延迟。代理池可在“Clash Verge”自动优选和“其他代理池”手动导入之间滑动切换。“用户来源”保留二维码登录、用户探测、听歌排行/喜欢列表和断点续跑。
 
 ### 命令行
 
@@ -209,6 +229,24 @@ npm run start -- proxy-pool status
 # 停止工具创建的独立 Mihomo
 npm run start -- proxy-pool stop
 ```
+
+程序会按平台自动发现 Clash Verge：
+
+- macOS：`~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml` 和 `/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo`
+- Windows：`%APPDATA%/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml` 和 Clash Verge 安装目录中的 `verge-mihomo.exe`
+- Linux：XDG 配置目录和常见的 `mihomo`/`verge-mihomo` 可执行路径
+
+可通过 `NCM_CLASH_CONFIG` 和 `NCM_MIHOMO_PATH` 环境变量覆盖自动发现结果。
+
+使用其他 HTTP/HTTPS 代理池时，可在 GUI 中每行粘贴一个代理，或使用 CLI：
+
+```bash
+npm run start -- proxy-pool import \
+  --proxy http://127.0.0.1:17891 \
+  --proxy http://user:password@proxy.example:8080
+```
+
+所有导入代理都会检查真实出口 IP，按 IP 去重，再用网易云评论接口实测并按总延迟排序。带账号密码的代理 URL 保存在本地代理池文件中，该文件在 macOS/Linux 上使用 `0600` 权限，GUI API 返回时会隐去凭据。
 
 池配置写入 `.ncm/mihomo-pool/config.yaml`，验证结果写入 `.ncm/proxy-pool.json`。这两个路径都被 Git 忽略。构建过程执行两级检查：
 

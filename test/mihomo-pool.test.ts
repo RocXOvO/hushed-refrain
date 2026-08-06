@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { selectFastestDistinct } from "../src/mihomo-pool";
+import {
+  discoverClashVerge,
+  proxyPoolRunning,
+  selectFastestDistinct,
+} from "../src/mihomo-pool";
 import type { ProxyPoolEntry } from "../src/mihomo-pool";
 
 function entry(
@@ -35,4 +39,32 @@ test("selects the fastest verified entries with distinct egress IPs", () => {
     "fast-c",
   ]);
   assert.equal(new Set(selected.map((value) => value.egressIp)).size, 3);
+});
+
+test("treats an active external pool as running without a managed PID", () => {
+  assert.equal(proxyPoolRunning({
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    source: "external",
+    active: true,
+    entries: [entry("external", "8.8.8.8", 20, 30)],
+  }), true);
+  assert.equal(proxyPoolRunning({
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    source: "external",
+    active: false,
+    entries: [entry("external", "8.8.8.8", 20, 30)],
+  }), false);
+});
+
+test("provides platform-specific Clash Verge discovery candidates", () => {
+  const discovery = discoverClashVerge();
+  assert.equal(discovery.platform, process.platform);
+  assert.ok(discovery.configCandidates.length > 0);
+  assert.ok(discovery.mihomoCandidates.length > 0);
+  if (discovery.installed) {
+    assert.ok(discovery.configPath);
+    assert.ok(discovery.mihomoPath);
+  }
 });

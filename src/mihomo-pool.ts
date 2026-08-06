@@ -1,7 +1,9 @@
-import { closeSync, openSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { closeSync, existsSync, openSync } from "node:fs";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
+import https from "node:https";
 import net from "node:net";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -32,22 +34,42 @@ export interface ProxyPoolEntry {
   ncmVerified: boolean;
 }
 
+export type ProxyPoolSource = "clash-verge" | "external";
+
 export interface ProxyPoolFile {
   version: 1;
   generatedAt: string;
-  sourceConfigPath: string;
-  mihomoConfigPath: string;
-  pid: number;
+  source: ProxyPoolSource;
+  active: boolean;
+  sourceConfigPath?: string;
+  mihomoConfigPath?: string;
+  pid?: number;
   entries: ProxyPoolEntry[];
+}
+
+export interface ClashVergeDiscovery {
+  platform: NodeJS.Platform;
+  installed: boolean;
+  configPath?: string;
+  mihomoPath?: string;
+  configCandidates: string[];
+  mihomoCandidates: string[];
 }
 
 export async function startMihomoPool(
   options: MihomoPoolOptions,
 ): Promise<ProxyPoolFile> {
   const previous = await readProxyPool(options.poolPath);
-  if (previous && isProcessAlive(previous.pid)) {
+  if (previous?.pid && isProcessAlive(previous.pid)) {
     process.kill(previous.pid);
     await waitForProcessExit(previous.pid, 5_000);
+  }
+
+  if (!existsSync(options.sourceConfigPath)) {
+    throw new Error(`Clash Verge config was not found: ${options.sourceConfigPath}`);
+  }
+  if (!existsSync(options.mihomoPath) && !isCommandName(options.mihomoPath)) {
+    throw new Error(`Mihomo executable was not found: ${options.mihomoPath}`);
   }
 
   const source = parse(await readFile(options.sourceConfigPath, "utf8")) as YamlObject;
@@ -83,6 +105,7 @@ export async function startMihomoPool(
     rules: ["MATCH,DIRECT"],
   };
   await writeFile(configPath, stringify(config, { lineWidth: 0 }), "utf8");
+  if (process.platform !== "win32") await chmod(configPath, 0o600);
   await execFileAsync(options.mihomoPath, [
     "-t",
     "-d",
@@ -165,13 +188,14 @@ export async function startMihomoPool(
     const pool: ProxyPoolFile = {
       version: 1,
       generatedAt: new Date().toISOString(),
+      source: "clash-verge",
+      active: true,
       sourceConfigPath: options.sourceConfigPath,
       mihomoConfigPath: configPath,
       pid: child.pid,
       entries: distinct,
     };
-    await mkdir(dirname(options.poolPath), { recursive: true });
-    await writeFile(options.poolPath, `${JSON.stringify(pool, null, 2)}\n`, "utf8");
+    await writeProxyPool(options.poolPath, pool);
     return pool;
   } catch (error) {
     if (isProcessAlive(child.pid)) process.kill(child.pid);
@@ -181,9 +205,13 @@ export async function startMihomoPool(
 
 export async function stopMihomoPool(poolPath: string): Promise<boolean> {
   const pool = await readProxyPool(poolPath);
-  if (!pool || !isProcessAlive(pool.pid)) return false;
-  process.kill(pool.pid);
-  await waitForProcessExit(pool.pid, 5_000);
+  if (!pool || !pool.active) return false;
+  if (pool.pid && isProcessAlive(pool.pid)) {
+    process.kill(pool.pid);
+    await waitForProcessExit(pool.pid, 5_000);
+  }
+  pool.active = false;
+  await writeProxyPool(poolPath, pool);
   return true;
 }
 
@@ -193,6 +221,8 @@ export async function readProxyPool(path: string): Promise<ProxyPoolFile | undef
     if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
       throw new Error("Unsupported proxy pool file.");
     }
+    parsed.source ??= parsed.sourceConfigPath ? "clash-verge" : "external";
+    parsed.active ??= true;
     return parsed;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -201,29 +231,47 @@ export async function readProxyPool(path: string): Promise<ProxyPoolFile | undef
 }
 
 export function proxyPoolRunning(pool: ProxyPoolFile | undefined): boolean {
-  return Boolean(pool && isProcessAlive(pool.pid));
+  if (!pool?.active || pool.entries.length === 0) return false;
+  return pool.source === "external" || Boolean(pool.pid && isProcessAlive(pool.pid));
+}
+
+export async function importExternalProxyPool(
+  endpoints: string[],
+  poolPath: string,
+  size = 0,
+): Promise<ProxyPoolFile> {
+  const normalized = [...new Set(endpoints.map(normalizeProxyEndpoint))];
+  if (normalized.length === 0) {
+    throw new Error("At least one HTTP/HTTPS proxy endpoint is required.");
+  }
+  const checked = await mapLimit(normalized, Math.min(6, normalized.length), async (endpoint, index) => {
+    try {
+      return await verifyProxyEndpoint(`external-${index + 1}`, endpoint);
+    } catch {
+      return undefined;
+    }
+  });
+  const verified = checked.filter((entry): entry is ProxyPoolEntry => entry !== undefined);
+  const selected = selectFastestDistinct(verified, size > 0 ? size : verified.length);
+  if (selected.length === 0) {
+    throw new Error("None of the supplied proxies could reach both the IP service and NetEase comments.");
+  }
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    source: "external",
+    active: true,
+    entries: selected,
+  };
+  await writeProxyPool(poolPath, pool);
+  return pool;
 }
 
 export async function verifyProxyPool(pool: ProxyPoolFile): Promise<ProxyPoolEntry[]> {
-  if (!proxyPoolRunning(pool)) throw new Error("The Mihomo proxy pool process is not running.");
-  const checked = await mapLimit(pool.entries, pool.entries.length, async (entry) => {
-    const startedAt = Date.now();
-    const egressIp = await fetchEgressIp(entry.endpoint, 12_000);
-    const ipLatencyMs = Date.now() - startedAt;
-    const ncmStartedAt = Date.now();
-    const page = await new EnhancedNcmClient({ proxy: entry.endpoint })
-      .getSongCommentsByCursor("186016", 20, 2, String(Date.now()));
-    if (page.comments.length === 0) {
-      throw new Error(`Listener ${entry.endpoint} returned no comments.`);
-    }
-    return {
-      ...entry,
-      egressIp,
-      latencyMs: ipLatencyMs,
-      ncmLatencyMs: Date.now() - ncmStartedAt,
-      ncmVerified: true,
-    };
-  });
+  if (!proxyPoolRunning(pool)) throw new Error("The proxy pool is not active.");
+  const checked = await mapLimit(pool.entries, pool.entries.length, (entry) =>
+    verifyProxyEndpoint(entry.name, entry.endpoint)
+  );
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
     throw new Error("The proxy pool no longer has distinct egress IPs.");
@@ -285,7 +333,11 @@ function isProxyDefinition(value: unknown): value is YamlObject {
 function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string> {
   const proxy = new URL(proxyEndpoint);
   return new Promise((resolveIp, reject) => {
-    const request = http.request({
+    const transport = proxy.protocol === "https:" ? https : http;
+    const authorization = proxy.username
+      ? `Basic ${Buffer.from(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`).toString("base64")}`
+      : undefined;
+    const request = transport.request({
       host: proxy.hostname,
       port: Number(proxy.port),
       method: "GET",
@@ -293,6 +345,7 @@ function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string
       headers: {
         Host: "api.ipify.org",
         Connection: "close",
+        ...(authorization ? { "Proxy-Authorization": authorization } : {}),
       },
     }, (response) => {
       let body = "";
@@ -314,6 +367,29 @@ function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string
     request.on("error", reject);
     request.end();
   });
+}
+
+async function verifyProxyEndpoint(
+  name: string,
+  endpoint: string,
+): Promise<ProxyPoolEntry> {
+  const startedAt = Date.now();
+  const egressIp = await fetchEgressIp(endpoint, 12_000);
+  const latencyMs = Date.now() - startedAt;
+  const ncmStartedAt = Date.now();
+  const page = await new EnhancedNcmClient({ proxy: endpoint })
+    .getSongCommentsByCursor("186016", 20, 2, String(Date.now()));
+  if (page.comments.length === 0) {
+    throw new Error(`Proxy ${endpoint} returned no comments.`);
+  }
+  return {
+    name,
+    endpoint,
+    egressIp,
+    latencyMs,
+    ncmLatencyMs: Date.now() - ncmStartedAt,
+    ncmVerified: true,
+  };
 }
 
 function waitForPort(port: number, timeoutMs: number): Promise<void> {
@@ -370,6 +446,26 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+function normalizeProxyEndpoint(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) throw new Error("Proxy endpoint cannot be empty.");
+  const parsed = new URL(normalized);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(`Proxy endpoint must use http:// or https://: ${normalized}`);
+  }
+  return parsed.toString();
+}
+
+function isCommandName(path: string): boolean {
+  return !path.includes("/") && !path.includes("\\");
+}
+
+async function writeProxyPool(path: string, pool: ProxyPoolFile): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, `${JSON.stringify(pool, null, 2)}\n`, "utf8");
+  if (process.platform !== "win32") await chmod(path, 0o600);
+}
+
 async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (isProcessAlive(pid) && Date.now() < deadline) {
@@ -378,20 +474,57 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void>
 }
 
 export function defaultMihomoPoolOptions(projectRoot: string): MihomoPoolOptions {
-  const appData = process.env.APPDATA;
-  if (!appData) throw new Error("APPDATA is not set.");
+  const discovery = discoverClashVerge();
   return {
-    sourceConfigPath: join(
-      appData,
-      "io.github.clash-verge-rev.clash-verge-rev",
-      "clash-verge.yaml",
-    ),
-    mihomoPath: "C:\\Program Files\\Clash Verge\\verge-mihomo.exe",
+    sourceConfigPath: discovery.configPath ?? discovery.configCandidates[0],
+    mihomoPath: discovery.mihomoPath ?? discovery.mihomoCandidates[0],
     workDirectory: resolve(projectRoot, ".ncm", "mihomo-pool"),
     poolPath: resolve(projectRoot, ".ncm", "proxy-pool.json"),
     basePort: 17_891,
     size: 4,
     candidateCount: 24,
     controllerPort: 19_097,
+  };
+}
+
+export function discoverClashVerge(): ClashVergeDiscovery {
+  const userHome = homedir();
+  const configCandidates = process.platform === "darwin"
+    ? [
+      join(userHome, "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
+      join(userHome, "Library", "Application Support", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge-check.yaml"),
+    ]
+    : process.platform === "win32"
+    ? [
+      join(process.env.APPDATA ?? join(userHome, "AppData", "Roaming"), "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
+    ]
+    : [
+      join(process.env.XDG_CONFIG_HOME ?? join(userHome, ".config"), "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
+      join(userHome, ".local", "share", "io.github.clash-verge-rev.clash-verge-rev", "clash-verge.yaml"),
+    ];
+  const mihomoCandidates = process.platform === "darwin"
+    ? [
+      "/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo",
+      join(userHome, "Applications", "Clash Verge.app", "Contents", "MacOS", "verge-mihomo"),
+    ]
+    : process.platform === "win32"
+    ? [
+      "C:\\Program Files\\Clash Verge\\verge-mihomo.exe",
+      join(process.env.LOCALAPPDATA ?? join(userHome, "AppData", "Local"), "Programs", "Clash Verge", "verge-mihomo.exe"),
+    ]
+    : ["/usr/bin/verge-mihomo", "/usr/bin/mihomo", "/usr/local/bin/mihomo"];
+  const configuredConfig = process.env.NCM_CLASH_CONFIG?.trim();
+  const configuredMihomo = process.env.NCM_MIHOMO_PATH?.trim();
+  if (configuredConfig) configCandidates.unshift(resolve(configuredConfig));
+  if (configuredMihomo) mihomoCandidates.unshift(resolve(configuredMihomo));
+  const configPath = configCandidates.find(existsSync);
+  const mihomoPath = mihomoCandidates.find(existsSync);
+  return {
+    platform: process.platform,
+    installed: Boolean(configPath && mihomoPath),
+    configPath,
+    mihomoPath,
+    configCandidates: [...new Set(configCandidates)],
+    mihomoCandidates: [...new Set(mihomoCandidates)],
   };
 }
