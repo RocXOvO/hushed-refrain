@@ -1,0 +1,113 @@
+import {
+  CooldownRequired,
+  RequestBudgetExhausted,
+  RunCancelled,
+  errorStatus,
+} from "./errors";
+
+export interface GovernorOptions {
+  minDelayMs: number;
+  jitterMs: number;
+  maxRetries: number;
+  forbiddenCooldownMs: number;
+  requestBudget: number;
+  retryBaseMs?: number;
+  retryCapMs?: number;
+}
+
+interface GovernorRuntime {
+  now: () => number;
+  sleep: (milliseconds: number) => Promise<void>;
+  random: () => number;
+}
+
+const defaultRuntime: GovernorRuntime = {
+  now: () => Date.now(),
+  sleep: (milliseconds) =>
+    new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  random: () => Math.random(),
+};
+
+export class RequestGovernor {
+  private lastRequestAt = 0;
+  private used = 0;
+  private cancelled = false;
+  private slotTail: Promise<void> = Promise.resolve();
+
+  constructor(
+    private readonly options: GovernorOptions,
+    private readonly runtime: GovernorRuntime = defaultRuntime,
+  ) {}
+
+  get requestsUsed(): number {
+    return this.used;
+  }
+
+  cancel(): void {
+    this.cancelled = true;
+  }
+
+  async execute<T>(label: string, request: () => Promise<T>): Promise<T> {
+    let retry = 0;
+    while (true) {
+      this.throwIfCancelled();
+      await this.reserveSlot();
+
+      try {
+        return await request();
+      } catch (error) {
+        const status = errorStatus(error);
+        if (status === 403 || status === 429) {
+          throw new CooldownRequired(status, this.options.forbiddenCooldownMs);
+        }
+
+        if (!isRetryable(status) || retry >= this.options.maxRetries) {
+          const detail = error instanceof Error ? error.message : JSON.stringify(error);
+          throw new Error(`${label} failed${status ? ` (${status})` : ""}: ${detail}`);
+        }
+
+        const base = this.options.retryBaseMs ?? 2_000;
+        const cap = this.options.retryCapMs ?? 30_000;
+        const backoff = Math.min(cap, base * 2 ** retry);
+        const jitter = Math.floor(this.runtime.random() * this.options.jitterMs);
+        await this.runtime.sleep(backoff + jitter);
+        this.throwIfCancelled();
+        retry += 1;
+      }
+    }
+  }
+
+  private async reserveSlot(): Promise<void> {
+    let release = (): void => {};
+    const previous = this.slotTail;
+    this.slotTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      this.throwIfCancelled();
+      if (this.options.requestBudget > 0 && this.used >= this.options.requestBudget) {
+        throw new RequestBudgetExhausted(this.options.requestBudget);
+      }
+      if (this.lastRequestAt !== 0) {
+        const jitter = Math.floor(this.runtime.random() * this.options.jitterMs);
+        const target = this.lastRequestAt + this.options.minDelayMs + jitter;
+        const waitMs = target - this.runtime.now();
+        if (waitMs > 0) await this.runtime.sleep(waitMs);
+      }
+      this.throwIfCancelled();
+      this.used += 1;
+      this.lastRequestAt = this.runtime.now();
+    } finally {
+      release();
+    }
+  }
+
+  private throwIfCancelled(): void {
+    if (this.cancelled) throw new RunCancelled();
+  }
+}
+
+function isRetryable(status: number | undefined): boolean {
+  return status === undefined || status === 408 || status === 425 || (status >= 500 && status <= 599);
+}

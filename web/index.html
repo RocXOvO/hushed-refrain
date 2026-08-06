@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>云评检索台</title>
+  <link rel="stylesheet" href="/styles.css?v=4">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark"><img src="/icons/disc-3.svg" alt=""></span><span>云评检索台</span></div>
+    <div class="top-actions">
+      <span id="connectionBadge" class="status-badge neutral"><span class="status-dot"></span>本地服务</span>
+      <button id="loginButton" class="button ghost" type="button"><img src="/icons/qr-code.svg" alt=""><span>二维码登录</span></button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <aside class="sidebar">
+      <div class="section-heading">
+        <div><p class="eyebrow">TASK INPUT</p><h1>新建检索</h1></div>
+        <img src="/icons/search.svg" alt="">
+      </div>
+
+      <div class="mode-switch segmented two" aria-label="检索模式">
+        <label><input type="radio" name="mode" value="parallel" checked><span><img src="/icons/gauge.svg" alt="">单曲并行</span></label>
+        <label><input type="radio" name="mode" value="source"><span><img src="/icons/list-music.svg" alt="">用户来源</span></label>
+      </div>
+
+      <form id="parallelForm" class="control-form">
+        <label class="field"><span>用户 UID</span><input id="parallelUid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="2044521815" required></label>
+        <div class="field"><label for="songId">歌曲 ID</label><div class="input-action"><input id="songId" name="songId" inputmode="numeric" pattern="[0-9]+" placeholder="186016" required><button id="songLookupButton" class="icon-button dark" type="button" title="查询歌曲" aria-label="查询歌曲"><img src="/icons/search.svg" alt=""></button></div><span id="songPreview" class="field-hint" hidden></span></div>
+
+        <section class="pool-section">
+          <div class="pool-heading"><div><span class="field-label">多 IP 池</span><strong id="poolStatus">未运行</strong></div><button id="poolToggleButton" class="button secondary compact-button" type="button"><img src="/icons/network.svg" alt=""><span>构建</span></button></div>
+          <div id="poolEntries" class="pool-entries"><div class="pool-empty">等待代理节点</div></div>
+        </section>
+
+        <details class="advanced" open>
+          <summary><img src="/icons/sliders-horizontal.svg" alt="">并行参数</summary>
+          <div class="settings-grid">
+            <label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="16" value="3"></label>
+            <label class="field compact"><span>时间分片</span><input name="shards" type="number" min="1" max="512" value="96"></label>
+            <label class="field compact"><span>每页评论</span><input name="pageSize" type="number" min="1" max="2000" value="1000"></label>
+            <label class="field compact"><span>请求预算</span><input name="requestBudget" type="number" min="1" value="5000"></label>
+            <label class="field compact"><span>单 IP 间隔 ms</span><input name="minDelayMs" type="number" min="0" value="333"></label>
+            <label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="100"></label>
+          </div>
+          <div class="check-row"><label><input id="parallelStopFirst" type="checkbox" checked>首条命中后停止</label><label><input id="parallelFresh" type="checkbox">新建状态</label></div>
+        </details>
+        <button id="parallelStartButton" class="button primary full" type="submit"><img src="/icons/play.svg" alt="">开始并行扫描</button>
+      </form>
+
+      <form id="sourceForm" class="control-form" hidden>
+        <div class="field"><label for="uid">用户 UID</label><div class="input-action"><input id="uid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="123456789" required><button id="lookupButton" class="icon-button dark" type="button" title="查询用户" aria-label="查询用户"><img src="/icons/user-search.svg" alt=""></button></div></div>
+        <div id="userPreview" class="user-preview" hidden><div><strong id="userNickname">-</strong><span id="userMeta">-</span></div><div class="source-probes"><span id="recordProbe">听歌排行</span><span id="likesProbe">喜欢歌曲</span></div></div>
+        <fieldset class="field-group"><legend>歌曲来源</legend><div class="segmented three"><label><input type="radio" name="source" value="record" checked><span><img src="/icons/history.svg" alt="">听歌排行</span></label><label><input type="radio" name="source" value="likes"><span><img src="/icons/heart.svg" alt="">喜欢歌曲</span></label><label><input type="radio" name="source" value="both"><span><img src="/icons/layers-2.svg" alt="">两者</span></label></div></fieldset>
+        <fieldset id="recordScopeField" class="field-group"><legend>排行范围</legend><div class="segmented two"><label><input type="radio" name="recordScope" value="all" checked><span>全部时间</span></label><label><input type="radio" name="recordScope" value="week"><span>最近一周</span></label></div></fieldset>
+        <details class="advanced"><summary><img src="/icons/settings-2.svg" alt="">运行参数</summary><div class="settings-grid"><label class="field compact"><span>请求间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算</span><input name="requestBudget" type="number" min="1" value="250"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>HTTP 代理</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div><div class="check-row"><label><input id="stopAfterFirst" type="checkbox">首条命中后暂停</label><label><input id="fresh" type="checkbox">新建状态</label></div></details>
+        <div class="form-actions"><button id="sourceStartButton" class="button primary" type="submit"><img src="/icons/play.svg" alt="">开始扫描</button><button id="dryRunButton" class="button secondary" type="button"><img src="/icons/list-music.svg" alt="">仅获取歌曲</button></div>
+      </form>
+    </aside>
+
+    <section class="main-pane">
+      <div class="task-header"><div><p class="eyebrow">LIVE TASK</p><h2 id="taskTitle">等待任务</h2></div><div class="task-actions"><button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态"><img src="/icons/refresh-cw.svg" alt=""></button><button id="stopButton" class="button danger" type="button" disabled><img src="/icons/square.svg" alt="">停止</button></div></div>
+      <div class="metrics" aria-label="任务指标">
+        <div class="metric"><span>状态</span><strong id="statusMetric">空闲</strong></div>
+        <div class="metric"><span id="progressLabel">分片进度</span><strong id="progressMetric">0 / 0</strong></div>
+        <div class="metric"><span id="workLabel">已读评论</span><strong id="workMetric">0</strong></div>
+        <div class="metric accent"><span>命中评论</span><strong id="matchesMetric">0</strong></div>
+        <div class="metric"><span>累计请求</span><strong id="requestsMetric">0</strong></div>
+      </div>
+      <div class="progress-band"><div class="progress-copy"><span id="currentSong">尚未开始</span><span id="progressPercent">0%</span></div><div class="progress-track"><span id="progressBar"></span></div><div id="taskNote" class="task-note" hidden></div></div>
+      <div class="tabs" role="tablist" aria-label="任务视图"><button class="tab active" type="button" role="tab" data-tab="results" aria-selected="true">实时结果</button><button class="tab" type="button" role="tab" data-tab="pool" aria-selected="false">出口详情</button></div>
+      <section id="resultsPanel" class="tab-panel" role="tabpanel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>歌曲</th><th>评论内容</th><th>点赞</th></tr></thead><tbody id="resultsBody"><tr class="empty-row"><td colspan="5">暂无命中</td></tr></tbody></table></div></section>
+      <section id="poolPanel" class="tab-panel" role="tabpanel" hidden><div class="table-wrap"><table><thead><tr><th>节点</th><th>监听地址</th><th>出口 IP</th><th>网易云延迟</th><th>状态</th></tr></thead><tbody id="poolTableBody"><tr class="empty-row"><td colspan="5">代理池未运行</td></tr></tbody></table></div></section>
+    </section>
+  </main>
+
+  <dialog id="qrDialog"><div class="dialog-heading"><h2>二维码登录</h2><button id="closeQrButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="qr-stage"><img id="qrImage" alt="登录二维码"></div><p id="qrStatus">正在生成</p></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <script src="/app.js?v=4" defer></script>
+</body>
+</html>

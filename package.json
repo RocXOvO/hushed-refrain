@@ -1,0 +1,67 @@
+{
+  "name": "ncm-comment-finder",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/electron-main.js",
+  "description": "Checkpointed NetEase Cloud Music comment finder",
+  "license": "MIT",
+  "bin": {
+    "ncm-comments": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test test/*.test.ts",
+    "start": "tsx src/cli.ts",
+    "web": "tsx src/cli.ts web",
+    "desktop": "npm run build && electron .",
+    "desktop:smoke": "npm run build && set NCM_DESKTOP_SMOKE=1&& electron .",
+    "dist:win": "npm run build && electron-builder --win nsis"
+  },
+  "dependencies": {
+    "@neteasecloudmusicapienhanced/api": "4.39.0",
+    "lucide-static": "1.28.0",
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "tsx": "^4.23.9",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "build": {
+    "appId": "cn.local.ncm.commentfinder",
+    "productName": "云评检索台",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "web/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "NCM-Comment-Finder-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "云评检索台"
+    }
+  }
+}
