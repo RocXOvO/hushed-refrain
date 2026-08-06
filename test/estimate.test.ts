@@ -55,6 +55,31 @@ test("accounts for worker concurrency when network latency exceeds spacing", () 
   assert.equal(estimate.expectedCommentsPerSecond, 1_000);
 });
 
+test("scales delay-bound throughput across workers on one lane", () => {
+  const singleWorker = estimateCommentScan({
+    comments: 100_000,
+    pageSize: 100,
+    minDelayMs: 2_500,
+    jitterMs: 800,
+    networkMs: 400,
+    lanes: 1,
+    workersPerLane: 1,
+  });
+  const fourWorkers = estimateCommentScan({
+    comments: 100_000,
+    pageSize: 100,
+    minDelayMs: 2_500,
+    jitterMs: 800,
+    networkMs: 400,
+    lanes: 1,
+    workersPerLane: 4,
+  });
+
+  assert.equal(singleWorker.expectedSeconds, 2_900);
+  assert.equal(fourWorkers.expectedSeconds, 725);
+  assert.equal(fourWorkers.expectedCommentsPerSecond, 137.93);
+});
+
 test("network latency becomes the lower bound when delay is zero", () => {
   const estimate = estimateCommentScan({
     comments: 1_000,

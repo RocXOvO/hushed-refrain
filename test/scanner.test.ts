@@ -300,6 +300,40 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(tracker.calls.some((call) => call.startsWith("b:")));
 });
 
+test("pooled source scan uses multiple workers on one proxy lane", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-workers-"));
+  const config = await options(directory);
+  config.source = "record";
+  const tracker = { active: 0, maxActive: 0 };
+  const songs: SongCandidate[] = Array.from({ length: 4 }, (_, index) => ({
+    id: String(index + 1),
+    sources: ["record"],
+  }));
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async () => {
+      tracker.active += 1;
+      tracker.maxActive = Math.max(tracker.maxActive, tracker.active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      tracker.active -= 1;
+      return { comments: [], hotComments: [], more: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client, governor: governor(100) },
+  ], { ...config, workersPerLane: 2, requestBudget: 100 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.lanes, 1);
+  assert.equal(report.workers, 2);
+  assert.equal(report.pagesProcessed, 4);
+  assert.equal(tracker.maxActive, 2);
+});
+
 test("pooled source scan checkpoints capped songs before pausing on budget", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-pool-cap-"));
   const config = await options(directory);

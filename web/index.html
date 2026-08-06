@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>云评检索台</title>
   <link rel="icon" type="image/png" href="/app-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=12">
+  <link rel="stylesheet" href="/styles.css?v=13">
 </head>
 <body>
   <div id="appSplash" class="app-splash" role="status" aria-label="云评检索台正在启动">
@@ -66,7 +66,7 @@
       </section>
 
       <form id="parallelForm" class="control-form mode-panel" aria-hidden="false">
-        <label class="field"><span>用户 UID</span><input id="parallelUid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="2044521815" required></label>
+        <div class="field"><div class="field-heading"><label for="parallelUid">用户 UID</label><button class="field-help-button" type="button" data-open-uid-help><img src="/icons/circle-help.svg" alt="">如何获取 UID？</button></div><input id="parallelUid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="2044521815" required></div>
         <div class="field"><label for="songId">歌曲 ID</label><div class="input-action"><input id="songId" name="songId" inputmode="numeric" pattern="[0-9]+" placeholder="186016" required><button id="songLookupButton" class="icon-button dark" type="button" title="查询歌曲" aria-label="查询歌曲"><img src="/icons/search.svg" alt=""></button></div><span id="songPreview" class="field-hint" hidden></span></div>
 
         <details class="advanced animated-disclosure" open>
@@ -77,7 +77,7 @@
               <label class="field compact"><span>时间分片</span><input name="shards" type="number" min="1" max="512" value="96"></label>
               <label class="field compact"><span>每页评论</span><input name="pageSize" type="number" min="1" max="2000" value="1000"></label>
               <label class="field compact"><span>请求预算（0 不限）</span><input name="requestBudget" type="number" min="0" value="0"></label>
-              <label class="field compact"><span>单 IP 间隔 ms</span><input name="minDelayMs" type="number" min="0" value="333"></label>
+              <label class="field compact"><span>每线程间隔 ms</span><input name="minDelayMs" type="number" min="0" value="333"></label>
               <label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="100"></label>
             </div>
             <div class="check-row"><label><input id="parallelFresh" type="checkbox">新建状态</label><span class="continuous-hint">会持续扫描并实时输出，直到完成或手动停止</span></div>
@@ -87,14 +87,14 @@
       </form>
 
       <form id="sourceForm" class="control-form mode-panel" aria-hidden="true" hidden>
-        <div class="field"><label for="uid">用户 UID</label><div class="input-action"><input id="uid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="123456789" required><button id="lookupButton" class="icon-button dark" type="button" title="查询用户" aria-label="查询用户"><img src="/icons/user-search.svg" alt=""></button></div></div>
+        <div class="field"><div class="field-heading"><label for="uid">用户 UID</label><button class="field-help-button" type="button" data-open-uid-help><img src="/icons/circle-help.svg" alt="">如何获取 UID？</button></div><div class="input-action"><input id="uid" name="uid" inputmode="numeric" pattern="[0-9]+" placeholder="123456789" required><button id="lookupButton" class="icon-button dark" type="button" title="查询用户" aria-label="查询用户"><img src="/icons/user-search.svg" alt=""></button></div></div>
         <div id="userPreview" class="user-preview" hidden><div><strong id="userNickname">-</strong><span id="userMeta">-</span></div><div class="source-probes"><span id="recordProbe">听歌排行</span><span id="likesProbe">喜欢歌曲</span></div></div>
         <fieldset class="field-group"><legend>歌曲来源</legend><div class="segmented three"><label><input type="radio" name="source" value="record" checked><span><img src="/icons/history.svg" alt="">听歌排行</span></label><label><input type="radio" name="source" value="likes"><span><img src="/icons/heart.svg" alt="">喜欢歌曲</span></label><label><input type="radio" name="source" value="both"><span><img src="/icons/layers-2.svg" alt="">两者</span></label></div></fieldset>
         <fieldset id="recordScopeField" class="field-group"><legend>排行范围</legend><div class="segmented two"><label><input type="radio" name="recordScope" value="all" checked><span>全部时间</span></label><label><input type="radio" name="recordScope" value="week"><span>最近一周</span></label></div></fieldset>
         <details class="advanced animated-disclosure">
           <summary aria-expanded="false"><img src="/icons/settings-2.svg" alt="">运行参数</summary>
           <div class="advanced-content">
-            <div class="settings-grid"><label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="8" value="1"></label><label class="field compact"><span>请求间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算（0 不限）</span><input name="requestBudget" type="number" min="0" value="0"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>单代理（代理池未运行时）</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div>
+            <div class="settings-grid"><label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="8" value="1"></label><label class="field compact"><span>每线程间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算（0 不限）</span><input name="requestBudget" type="number" min="0" value="0"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>单代理（代理池未运行时）</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div>
             <div class="check-row"><label><input id="fresh" type="checkbox">新建状态</label><span class="continuous-hint">会持续扫描并实时输出，直到完成或手动停止</span></div>
           </div>
         </details>
@@ -122,13 +122,27 @@
             <div class="preset-group" aria-label="常用规模"><button type="button" data-comments="100000">10 万</button><button type="button" data-comments="300000">30 万</button><button type="button" data-comments="500000">50 万</button><button type="button" data-comments="1000000">100 万</button></div>
             <button id="estimateButton" class="button secondary" type="button"><img src="/icons/calculator.svg" alt="">重新计算</button>
           </div>
-          <p id="estimateContext" class="estimate-context">按用户来源扫描的出口数、并发、网络延迟和请求间隔估算。</p>
+          <p id="estimateContext" class="estimate-context">按当前检索模式的分页、出口数、并发、网络延迟和线程间隔估算。</p>
           <div class="estimate-results"><div><span>需求页数</span><strong id="estimatePages">1,000</strong></div><div><span>理想耗时</span><strong id="estimateOptimistic">-</strong></div><div><span>预期耗时</span><strong id="estimateExpected">-</strong></div><div><span>保守耗时</span><strong id="estimateConservative">-</strong></div></div>
         </div>
       </section>
     </section>
   </main>
 
+  <dialog id="uidHelpDialog" class="uid-help-dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">USER ID GUIDE</p><h2>如何获取用户 UID</h2></div><button id="closeUidHelpButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div>
+    <div class="uid-help-content">
+      <p>UID 是网易云音乐用户主页链接里的纯数字编号，不是昵称。</p>
+      <ol>
+        <li>打开网易云音乐客户端或网页版。</li>
+        <li>进入要查找的用户主页，选择“分享”并复制主页链接。</li>
+        <li>找到链接中 <code>id=</code> 后面的数字，把它粘贴到 UID 输入框。</li>
+      </ol>
+      <a class="uid-link-example" href="https://music.163.com/#/user/home?id=123456789" target="_blank" rel="noreferrer"><span><small>示例主页链接</small><code>music.163.com/#/user/home?id=123456789</code></span><img src="/icons/external-link.svg" alt="在浏览器打开"></a>
+      <p class="uid-help-note">上面示例中的 UID 是 <strong>123456789</strong>。手机分享出的短链接也可以先在浏览器打开，再从跳转后的用户主页地址中读取。</p>
+      <div class="dialog-actions"><button id="gotUidHelpButton" class="button primary" type="button">知道了</button></div>
+    </div>
+  </dialog>
   <dialog id="qrDialog"><div class="dialog-heading"><h2>二维码登录</h2><button id="closeQrButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="qr-stage"><img id="qrImage" alt="登录二维码"></div><p id="qrStatus">正在生成</p></dialog>
   <dialog id="updateDialog" class="update-dialog">
     <div class="dialog-heading update-dialog-heading"><div><p class="eyebrow">UPDATE AVAILABLE</p><h2>发现新版本</h2></div><button id="closeUpdateButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div>
@@ -142,6 +156,6 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/app.js?v=12" defer></script>
+  <script src="/app.js?v=13" defer></script>
 </body>
 </html>

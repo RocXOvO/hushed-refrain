@@ -8,6 +8,7 @@ import {
 export interface GovernorOptions {
   minDelayMs: number;
   jitterMs: number;
+  concurrency?: number;
   maxRetries: number;
   forbiddenCooldownMs: number;
   requestBudget: number;
@@ -33,11 +34,18 @@ export class RequestGovernor {
   private used = 0;
   private cancelled = false;
   private slotTail: Promise<void> = Promise.resolve();
+  private readonly concurrency: number;
 
   constructor(
     private readonly options: GovernorOptions,
     private readonly runtime: GovernorRuntime = defaultRuntime,
-  ) {}
+  ) {
+    const concurrency = options.concurrency ?? 1;
+    if (!Number.isInteger(concurrency) || concurrency <= 0) {
+      throw new Error("concurrency must be a positive integer.");
+    }
+    this.concurrency = concurrency;
+  }
 
   get requestsUsed(): number {
     return this.used;
@@ -91,7 +99,8 @@ export class RequestGovernor {
       }
       if (this.lastRequestAt !== 0) {
         const jitter = Math.floor(this.runtime.random() * this.options.jitterMs);
-        const target = this.lastRequestAt + this.options.minDelayMs + jitter;
+        const workerSpacingMs = Math.ceil((this.options.minDelayMs + jitter) / this.concurrency);
+        const target = this.lastRequestAt + workerSpacingMs;
         const waitMs = target - this.runtime.now();
         if (waitMs > 0) await this.runtime.sleep(waitMs);
       }

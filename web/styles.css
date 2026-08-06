@@ -415,6 +415,36 @@ h2 {
   font-weight: 700;
 }
 
+.field-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.field-heading > label {
+  color: #40464d;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.field-help-button {
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--teal);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.field-help-button:hover { color: #006c70; }
+.field-help-button img { width: 14px; }
+
 .input-action {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 42px;
@@ -1172,6 +1202,62 @@ dialog::backdrop {
 .dialog-heading {
   justify-content: space-between;
 }
+
+.uid-help-dialog {
+  width: min(520px, calc(100vw - 32px));
+  padding: 0;
+  overflow: hidden;
+}
+
+.uid-help-dialog > .dialog-heading {
+  padding: 20px 22px;
+  background: linear-gradient(120deg, #f5fbfb, #f7f8f9);
+  border-bottom: 1px solid var(--line);
+}
+
+.uid-help-dialog .eyebrow { color: var(--teal); }
+.uid-help-content { padding: 20px 22px 22px; }
+
+.uid-help-content > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.65;
+}
+
+.uid-help-content ol {
+  margin: 16px 0;
+  padding-left: 22px;
+  color: #3f464c;
+  font-size: 0.86rem;
+  line-height: 1.8;
+}
+
+.uid-help-content code {
+  padding: 2px 5px;
+  background: #eef2f3;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.uid-link-example {
+  padding: 13px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--text);
+  background: #f7f9f9;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  text-decoration: none;
+}
+
+.uid-link-example span { min-width: 0; display: grid; gap: 5px; }
+.uid-link-example small { color: var(--muted); }
+.uid-link-example code { overflow-wrap: anywhere; color: var(--teal); }
+.uid-link-example > img { width: 18px; flex: 0 0 auto; }
+.uid-help-content .uid-help-note { margin-top: 13px; font-size: 0.78rem; }
 
 .qr-stage {
   width: 240px;

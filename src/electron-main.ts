@@ -1,5 +1,5 @@
-import { app, BrowserWindow, ipcMain, shell } from "electron";
-import * as electronUpdater from "electron-updater";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { join } from "node:path";
@@ -9,14 +9,61 @@ import {
   isWindowsAutoUpdateSupported,
   unsupportedWindowsUpdateState,
   WindowsUpdateController,
+  type WindowsUpdateState,
   type WindowsUpdaterBackend,
 } from "./windows-updater";
 
 let dashboard: Server | undefined;
 let windowsUpdater: WindowsUpdateController | undefined;
+let windowsUpdateFallbackState: WindowsUpdateState | undefined;
 
 function currentUpdateState() {
-  return windowsUpdater?.getState() ?? unsupportedWindowsUpdateState(app.getVersion());
+  return windowsUpdater?.getState() ?? windowsUpdateFallbackState ?? unsupportedWindowsUpdateState(app.getVersion());
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.stack ?? error.message : String(error);
+}
+
+function writeDesktopLog(scope: string, detail: unknown): string | undefined {
+  try {
+    const logDirectory = join(app.getPath("userData"), "logs");
+    const logPath = join(logDirectory, "desktop.log");
+    mkdirSync(logDirectory, { recursive: true });
+    appendFileSync(logPath, `[${new Date().toISOString()}] ${scope}\n${errorText(detail)}\n\n`, "utf8");
+    return logPath;
+  } catch {
+    return undefined;
+  }
+}
+
+function initializeWindowsUpdater(window: BrowserWindow): void {
+  if (!isWindowsAutoUpdateSupported(process.platform, app.isPackaged)) return;
+  try {
+    // Keep the optional updater out of the startup import graph. If its native
+    // Windows initialization fails, the dashboard must still remain usable.
+    const electronUpdater = require("electron-updater") as typeof import("electron-updater");
+    if (typeof electronUpdater.NsisUpdater !== "function") {
+      throw new Error("Electron updater module exports are unavailable.");
+    }
+    const backend = electronUpdater.autoUpdater as unknown as WindowsUpdaterBackend;
+    windowsUpdater = new WindowsUpdateController(
+      backend,
+      app.getVersion(),
+      (state) => {
+        if (!window.isDestroyed()) window.webContents.send(DESKTOP_UPDATE_CHANNELS.stateChanged, state);
+      },
+    );
+  } catch (error) {
+    const message = errorText(error).replace(/[\r\n]+/g, " ").slice(0, 500);
+    windowsUpdateFallbackState = {
+      supported: false,
+      phase: "error",
+      currentVersion: app.getVersion(),
+      error: `自动更新组件不可用：${message}`,
+    };
+    writeDesktopLog("windows-updater-init", error);
+  }
 }
 
 function senderWindow(event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent): BrowserWindow | undefined {
@@ -68,16 +115,7 @@ async function createWindow(): Promise<void> {
       preload: join(__dirname, "electron-preload.js"),
     },
   });
-  if (isWindowsAutoUpdateSupported(process.platform, app.isPackaged)) {
-    const { autoUpdater } = electronUpdater;
-    windowsUpdater = new WindowsUpdateController(
-      autoUpdater as unknown as WindowsUpdaterBackend,
-      app.getVersion(),
-      (state) => {
-        if (!window.isDestroyed()) window.webContents.send(DESKTOP_UPDATE_CHANNELS.stateChanged, state);
-      },
-    );
-  }
+  initializeWindowsUpdater(window);
   const sendMaximizedState = (): void => {
     if (!window.isDestroyed()) {
       window.webContents.send(DESKTOP_WINDOW_CHANNELS.maximizedChanged, window.isMaximized());
@@ -95,8 +133,13 @@ async function createWindow(): Promise<void> {
       void shell.openExternal(target);
     }
   });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    writeDesktopLog("render-process-gone", JSON.stringify(details));
+  });
+  window.on("unresponsive", () => writeDesktopLog("window-unresponsive", "The main window stopped responding."));
   await window.loadURL(url);
   if (smokeTest) {
+    const electronUpdater = require("electron-updater") as typeof import("electron-updater");
     if (typeof electronUpdater.NsisUpdater !== "function") {
       throw new Error("Electron updater module exports are unavailable.");
     }
@@ -108,6 +151,13 @@ async function createWindow(): Promise<void> {
     if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean") {
       throw new Error("Desktop window preload bridge is unavailable.");
     }
+    if (process.platform === "win32" && app.isPackaged && bridge.updateState.supported !== true) {
+      throw new Error(`Packaged Windows updater failed to initialize. See ${writeDesktopLog("windows-updater-smoke", windowsUpdateFallbackState?.error ?? "unknown error") ?? "desktop log"}.`);
+    }
+    const smokeResult = `DESKTOP_WINDOW_BRIDGE_OK ${bridge.platform}\nDESKTOP_SMOKE_OK ${url}\n`;
+    if (process.env.NCM_DESKTOP_SMOKE_RESULT) {
+      writeFileSync(process.env.NCM_DESKTOP_SMOKE_RESULT, smokeResult, "utf8");
+    }
     process.stdout.write(`DESKTOP_WINDOW_BRIDGE_OK ${bridge.platform}\n`);
     process.stdout.write(`DESKTOP_SMOKE_OK ${url}\n`);
     setTimeout(() => app.quit(), 250);
@@ -115,7 +165,12 @@ async function createWindow(): Promise<void> {
 }
 
 app.whenReady().then(createWindow).catch((error) => {
-  process.stderr.write(`${error instanceof Error ? error.stack : String(error)}\n`);
+  const logPath = writeDesktopLog("startup-fatal", error);
+  const detail = logPath
+    ? `启动日志已保存到：\n${logPath}`
+    : "启动日志写入失败，请截图此提示并反馈。";
+  dialog.showErrorBox("云评检索台启动失败", `${errorText(error)}\n\n${detail}`);
+  process.stderr.write(`${errorText(error)}\n`);
   app.exit(1);
 });
 
@@ -124,4 +179,5 @@ app.on("before-quit", () => {
   dashboard?.close();
   dashboard = undefined;
   windowsUpdater = undefined;
+  windowsUpdateFallbackState = undefined;
 });

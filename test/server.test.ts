@@ -19,6 +19,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /持续扫描并实时输出/);
   assert.match(pageText, /updateProgress/);
   assert.match(pageText, /重启并安装|下载更新/);
+  assert.match(pageText, /如何获取用户 UID/);
+  assert.match(pageText, /home\?id=123456789/);
   assert.doesNotMatch(pageText, /首条命中后/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
@@ -36,6 +38,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const pooledValue = await pooledEstimate.json() as { expectedSeconds: number; totalWorkers: number };
   assert.equal(pooledValue.expectedSeconds, 725);
   assert.equal(pooledValue.totalWorkers, 4);
+
+  const parallelEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=1000&minDelayMs=333&jitterMs=100&networkMs=400&lanes=4&workersPerLane=3`);
+  assert.equal(parallelEstimate.status, 200);
+  const parallelValue = await parallelEstimate.json() as { pages: number; expectedSeconds: number; totalWorkers: number };
+  assert.equal(parallelValue.pages, 100);
+  assert.equal(parallelValue.expectedSeconds, 4);
+  assert.equal(parallelValue.totalWorkers, 12);
 });
 
 test("dashboard opens a live result event stream", async (context) => {

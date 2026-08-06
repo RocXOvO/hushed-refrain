@@ -63,8 +63,8 @@ Parallel song options:
   --end-time TIME                   epoch milliseconds or ISO date
   --request-budget N                default: 5000
   --max-pages N                     default: 0 (all pages)
-  --min-delay-ms N                  default: 333 per proxy
-  --jitter-ms N                     default: 100 per proxy
+  --min-delay-ms N                  default: 333 per worker
+  --jitter-ms N                     default: 100 per worker
   --stop-after-first
   --fresh
 
@@ -255,6 +255,7 @@ async function scanSongCommand(args: string[]): Promise<void> {
     client: new EnhancedNcmClient({ proxy }),
     governor: new RequestGovernor({
       requestBudget: Math.max(1_000, requestBudget * 2),
+      concurrency: workersPerLane,
       minDelayMs,
       jitterMs,
       maxRetries,

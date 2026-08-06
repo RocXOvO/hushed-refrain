@@ -11,7 +11,7 @@ const el = {
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
-  connection: $("#connectionBadge"), login: $("#loginButton"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
+  connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
   updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
@@ -357,8 +357,32 @@ function commentTarget(item) {
   return `https://music.163.com/#/song?id=${encodeURIComponent(songId)}&commentId=${encodeURIComponent(commentId)}`;
 }
 
+function estimateForm() {
+  return mode === "parallel" ? el.parallelForm : el.sourceForm;
+}
+
 function estimateInputs() {
-  return [el.estimateComments, el.sourceForm.elements.minDelayMs, el.sourceForm.elements.jitterMs, el.sourceForm.elements.workersPerProxy];
+  const form = estimateForm();
+  return [
+    el.estimateComments,
+    form.elements.minDelayMs,
+    form.elements.jitterMs,
+    form.elements.workersPerProxy,
+    ...(mode === "parallel" ? [form.elements.pageSize] : []),
+  ];
+}
+
+function allEstimateInputs() {
+  return [
+    el.estimateComments,
+    el.parallelForm.elements.minDelayMs,
+    el.parallelForm.elements.jitterMs,
+    el.parallelForm.elements.workersPerProxy,
+    el.parallelForm.elements.pageSize,
+    el.sourceForm.elements.minDelayMs,
+    el.sourceForm.elements.jitterMs,
+    el.sourceForm.elements.workersPerProxy,
+  ];
 }
 
 function scheduleEstimateRefresh(delay = 240) {
@@ -373,17 +397,20 @@ async function refreshEstimate(reportInvalid = true) {
   const request = ++estimateRequest;
   el.estimateButton.disabled = true;
   try {
-    const minDelayMs = Number(el.sourceForm.elements.minDelayMs.value);
-    const jitterMs = Number(el.sourceForm.elements.jitterMs.value);
-    const workersPerLane = Number(el.sourceForm.elements.workersPerProxy.value);
-    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: "100", minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(poolLaneCount), workersPerLane: String(workersPerLane) });
+    const form = estimateForm();
+    const minDelayMs = Number(form.elements.minDelayMs.value);
+    const jitterMs = Number(form.elements.jitterMs.value);
+    const workersPerLane = Number(form.elements.workersPerProxy.value);
+    const pageSize = mode === "parallel" ? Number(form.elements.pageSize.value) : 100;
+    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(poolLaneCount), workersPerLane: String(workersPerLane) });
     const value = await api(`/api/estimate?${params}`);
     if (request !== estimateRequest) return;
     el.estimatePages.textContent = fmt(value.pages);
     el.estimateOptimistic.textContent = duration(value.optimisticSeconds);
     el.estimateExpected.textContent = duration(value.expectedSeconds);
     el.estimateConservative.textContent = duration(value.conservativeSeconds);
-    el.estimateContext.textContent = `${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 100 条 · 每出口间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+    const scanMode = mode === "parallel" ? "单曲并行" : "用户来源";
+    el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { if (request === estimateRequest) toast(error.message); }
   finally { if (request === estimateRequest) el.estimateButton.disabled = false; }
 }
@@ -554,6 +581,7 @@ async function switchMode(value) {
   await slideSwap(previous === "parallel" ? el.parallelForm : el.sourceForm, mode === "parallel" ? el.parallelForm : el.sourceForm, mode === "source" ? 1 : -1);
   knownMatches = -1;
   void refresh(); void refreshResults();
+  if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
 }
 async function switchPoolSource(value) {
   if (value === poolSource) return;
@@ -689,8 +717,11 @@ el.sourceForm.addEventListener("submit", (event) => { event.preventDefault(); vo
 el.dryRun.addEventListener("click", () => void startSource(true)); el.songLookup.addEventListener("click", () => void lookupSong()); el.lookup.addEventListener("click", () => void lookupUser());
 el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEventListener("click", () => void stopJob()); el.refresh.addEventListener("click", () => void refresh());
 el.estimateButton.addEventListener("click", () => void refreshEstimate());
-estimateInputs().forEach((input) => input.addEventListener("input", () => scheduleEstimateRefresh()));
+allEstimateInputs().forEach((input) => input.addEventListener("input", () => scheduleEstimateRefresh()));
 $$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
+$$('[data-open-uid-help]').forEach((button) => button.addEventListener("click", () => el.uidHelpDialog.showModal()));
+$("#closeUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
+$("#gotUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
 el.updateButton.addEventListener("click", () => void checkUpdates(true));
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());

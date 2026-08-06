@@ -32,7 +32,7 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
 
   const duration = (spacingMs: number): number => {
     if (pages === 0) return 0;
-    const perLaneCycleMs = Math.max(spacingMs, networkMs / workersPerLane);
+    const perLaneCycleMs = Math.max(spacingMs, networkMs) / workersPerLane;
     return Math.ceil(Math.max(networkMs, pages * perLaneCycleMs / lanes) / 1_000);
   };
   const optimisticSeconds = duration(minDelayMs);

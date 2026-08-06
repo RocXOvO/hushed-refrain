@@ -208,6 +208,7 @@ class JobManager {
       client: new EnhancedNcmClient({ proxy: endpoint }),
       governor: new RequestGovernor({
         requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2),
+        concurrency: workersPerLane,
         minDelayMs,
         jitterMs,
         maxRetries: 3,
@@ -332,7 +333,7 @@ class ParallelJobManager {
       name: `proxy-${index + 1}`,
       client: new EnhancedNcmClient({ proxy: entry.endpoint }),
       governor: new RequestGovernor({
-        requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2), minDelayMs, jitterMs,
+        requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2), concurrency: workersPerLane, minDelayMs, jitterMs,
         maxRetries: 2, forbiddenCooldownMs,
       }),
     }));
@@ -538,7 +539,7 @@ async function route(
   if (method === "GET" && url.pathname === "/api/estimate") {
     return json(response, 200, estimateCommentScan({
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
-      pageSize: integer(url.searchParams.get("pageSize") ?? 100, "pageSize", 1, 100),
+      pageSize: integer(url.searchParams.get("pageSize") ?? 100, "pageSize", 1, 2_000),
       minDelayMs: integer(url.searchParams.get("minDelayMs") ?? 2_500, "minDelayMs", 0, 600_000),
       jitterMs: integer(url.searchParams.get("jitterMs") ?? 800, "jitterMs", 0, 600_000),
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),

@@ -1,0 +1,76 @@
+name: Windows package validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check and test
+        run: |
+          npm run check
+          npm test
+
+      - name: Build unpacked Windows application
+        run: npx electron-builder --win dir --x64
+
+      - name: Smoke test packaged Windows application
+        shell: pwsh
+        run: |
+          $env:NCM_DESKTOP_SMOKE = "1"
+          $appPath = Join-Path $PWD "release\win-unpacked\云评检索台.exe"
+          $stdoutPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stdout.log"
+          $stderrPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stderr.log"
+          $resultPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-result.log"
+          $env:NCM_DESKTOP_SMOKE_RESULT = $resultPath
+          if (-not (Test-Path $appPath)) { throw "Packaged executable was not found: $appPath" }
+          $process = Start-Process -FilePath $appPath -PassThru -Wait -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+          $stdout = if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw } else { "" }
+          $stderr = if (Test-Path $stderrPath) { Get-Content $stderrPath -Raw } else { "" }
+          Write-Host $stdout
+          Write-Host $stderr
+          if ($process.ExitCode -ne 0) { throw "Packaged application exited with code $($process.ExitCode)." }
+          $result = if (Test-Path $resultPath) { Get-Content $resultPath -Raw } else { "" }
+          Write-Host $result
+          if ($result -notmatch "DESKTOP_SMOKE_OK" -or $result -notmatch "DESKTOP_WINDOW_BRIDGE_OK win32") {
+            throw "Packaged application did not report a successful Windows smoke test."
+          }
+
+      - name: Build NSIS installer
+        run: npm run dist:win
+
+      - name: Verify update assets
+        shell: pwsh
+        run: |
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $installer = "release\NCM-Comment-Finder-Setup-$version.exe"
+          $blockmap = "$installer.blockmap"
+          foreach ($path in @($installer, $blockmap, "release\latest.yml")) {
+            if (-not (Test-Path $path)) { throw "Missing release asset: $path" }
+          }
+          Get-FileHash $installer -Algorithm SHA256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            release/NCM-Comment-Finder-Setup-*.exe
+            release/NCM-Comment-Finder-Setup-*.exe.blockmap
+            release/latest.yml

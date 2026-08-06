@@ -36,6 +36,35 @@ test("serializes requests with a minimum delay", async () => {
   assert.equal(governor.requestsUsed, 2);
 });
 
+test("shares one lane's start spacing across configured workers", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 1_000,
+    jitterMs: 0,
+    concurrency: 4,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, fake.runtime);
+
+  await governor.execute("one", async () => 1);
+  await governor.execute("two", async () => 2);
+
+  assert.deepEqual(fake.sleeps, [250]);
+  assert.equal(governor.requestsUsed, 2);
+});
+
+test("rejects an invalid worker concurrency", () => {
+  assert.throws(() => new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    concurrency: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }), /concurrency/);
+});
+
 test("retries transient failures with exponential backoff", async () => {
   const fake = fakeRuntime();
   const governor = new RequestGovernor({
