@@ -18,7 +18,7 @@
 Windows 用户可直接运行：
 
 ```text
-release/NCM-Comment-Finder-Setup-0.1.0.exe
+release/NCM-Comment-Finder-Setup-0.2.0.exe
 ```
 
 安装器支持选择目录，并创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
@@ -30,7 +30,7 @@ Windows 桌面版使用与应用顶栏融合的无边框窗口，最小化、最
 macOS Apple Silicon 用户可打开：
 
 ```text
-release/NCM-Comment-Finder-0.1.0-arm64.dmg
+release/NCM-Comment-Finder-0.2.0-arm64.dmg
 ```
 
 将“云评检索台”拖入 Applications 即可安装。当前本地包使用 ad-hoc 签名；向其他用户公开分发时，应使用 Apple Developer ID 证书签名并公证。
