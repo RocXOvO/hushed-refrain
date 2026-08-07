@@ -370,7 +370,7 @@ function estimateInputs() {
     form.elements.minDelayMs,
     form.elements.jitterMs,
     form.elements.workersPerProxy,
-    ...(mode === "parallel" ? [form.elements.pageSize] : []),
+    form.elements.pageSize,
   ];
 }
 
@@ -384,6 +384,7 @@ function allEstimateInputs() {
     el.sourceForm.elements.minDelayMs,
     el.sourceForm.elements.jitterMs,
     el.sourceForm.elements.workersPerProxy,
+    el.sourceForm.elements.pageSize,
   ];
 }
 
@@ -403,7 +404,7 @@ async function refreshEstimate(reportInvalid = true) {
     const minDelayMs = Number(form.elements.minDelayMs.value);
     const jitterMs = Number(form.elements.jitterMs.value);
     const workersPerLane = Number(form.elements.workersPerProxy.value);
-    const pageSize = mode === "parallel" ? Number(form.elements.pageSize.value) : 100;
+    const pageSize = Number(form.elements.pageSize.value);
     const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(poolLaneCount), workersPerLane: String(workersPerLane) });
     const value = await api(`/api/estimate?${params}`);
     if (request !== estimateRequest) return;

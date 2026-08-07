@@ -95,7 +95,7 @@
         <details class="advanced animated-disclosure">
           <summary aria-expanded="false"><img src="/icons/settings-2.svg" alt="">运行参数</summary>
           <div class="advanced-content">
-            <div class="settings-grid"><label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="8" value="1"></label><label class="field compact"><span>每线程间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算（0 不限）</span><input name="requestBudget" type="number" min="0" value="0"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>单代理（代理池未运行时）</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div>
+            <div class="settings-grid"><label class="field compact"><span>每页评论</span><input name="pageSize" type="number" min="1" max="2000" value="1000"></label><label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="8" value="1"></label><label class="field compact"><span>每线程间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算（0 不限）</span><input name="requestBudget" type="number" min="0" value="0"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>单代理（代理池未运行时）</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div>
             <div class="check-row"><label><input id="fresh" type="checkbox">新建状态</label><span class="continuous-hint">会持续扫描并实时输出，直到完成或手动停止</span></div>
           </div>
         </details>
@@ -157,6 +157,6 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/app.js?v=14" defer></script>
+  <script src="/app.js?v=15" defer></script>
 </body>
 </html>

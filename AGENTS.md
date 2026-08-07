@@ -12,6 +12,8 @@ The app finds NetEase Cloud Music comments authored by a numeric user UID. It ha
 
 There is no database. Durable scan state is JSON; matches are append-only JSONL. Generated/runtime directories (`dist/`, `release/`, `.ncm/`, `data/`, `tmp/`) are ignored and must not be committed.
 
+The code version is `v0.6.0`; its release process is in progress. The currently published baseline remains `v0.5.0`, so do not describe `v0.6.0` as released until the release checklist is complete.
+
 ## Architecture and data flow
 
 Two scan engines exist and must not be conflated:
@@ -19,7 +21,8 @@ Two scan engines exist and must not be conflated:
 1. User-source scan (`scan`, `/api/job`, `runPooledCommentFinder`)
    - Read candidate songs from listening rank (`user_record`), likes (`likelist`), or both.
    - Merge songs by ID while preserving record-first order and source metadata.
-   - Page each song through `comment_music`, match `comment.user.userId` exactly, and write results.
+   - Page each song through `comment_new` with a descending time cursor, match `comment.user.userId` exactly, and write results. The default page size is 1000 and the accepted range is 1..2000.
+   - When `hasMore` is true, the next cursor must be strictly older than the prior cursor. An empty page may still continue when `hasMore` is true and the cursor advances; non-progress or an exception remains recoverable work and must not be reported as complete.
    - `auto` in the CLI may select `user_comment_history` only when the logged-in account UID equals the target. The GUI deliberately uses `strategy: "scan"`.
    - With a verified pool, one lane is created per distinct egress IP and songs are distributed across lane workers.
 
@@ -40,17 +43,18 @@ The writer serializes concurrent appends and de-duplicates by `commentId`, inclu
 - `workersPerLane` (UI name: `workersPerProxy`, label: "each IP concurrency") is the number of async workers created for every lane. Total workers are `lanes * workersPerLane`.
 - The governor serializes request **start slots** per lane using `ceil((minDelayMs + random jitter) / workersPerLane)`; requests already in flight may overlap. The configured per-IP concurrency therefore increases that lane's start rate while preserving one shared scheduler for the IP.
 - UI topology settings must travel through the entire chain: form control -> `payload()` -> server input validation -> scanner options -> actual worker-array cardinality -> status/report. A speed-estimate-only change is not a runtime concurrency change. Add a test that observes overlapping requests when touching this chain.
-- `estimateCommentScan` must model the same topology: per-lane cycle is `max(spacingMs, networkMs) / workersPerLane`, then divide pages across lanes. The dashboard estimate reads the currently selected mode's page size/delay/jitter/concurrency plus the active pool's verified lane count and average NetEase latency (source scan pages are fixed at 100; parallel pages are configurable).
-- GUI request budget `0` means unlimited. Positive pooled budgets are enforced by the shared scanner scheduler; generous per-lane governor budgets prevent concurrent reservation races from silently lowering the configured aggregate budget. CLI `scan` uses the governor budget directly.
+- `estimateCommentScan` must model the same topology: per-lane cycle is `max(spacingMs, networkMs) / workersPerLane`, then divide pages across lanes. The dashboard estimate reads the currently selected mode's page size/delay/jitter/concurrency plus the active pool's verified lane count and average NetEase latency. Both source and parallel scans have configurable page sizes (1..2000, default 1000).
+- GUI request budget `0` means unlimited. A positive pooled budget is enforced by the shared scheduler for comment-page reservations; source discovery happens before that reservation, and governor-internal retries do not consume the aggregate reservation, so this is not an absolute hard limit on every actual HTTP request. This is a known follow-up optimization point. CLI `scan` uses the governor budget directly.
 - Network/`5xx`/408/425 failures receive bounded exponential retry. `403` and `429` never loop-retry: they produce a persisted cooldown. Operator stop cancels governors before the next remote request.
 - Do not use routine tests to create high real-world traffic. Unit/integration tests use stubs and loopback servers; real NetEase or proxy-pool checks must be explicit and low-risk.
 
 ## State, checkpoints, and coverage
 
-- `src/state.ts` owns source-scan state version 1. State is written to a sibling `.tmp` and atomically renamed.
-- Source state records UID, strategy/source/scope, candidates, per-song offsets/page counts, seen IDs, request/match totals, truncation, source errors, cooldown, and coverage.
+- `src/state.ts` owns source-scan state. State is written to a sibling `.tmp` and atomically renamed.
+- Current source state records `commentPagination: "cursor-v1"` and `commentPageSize`, plus UID, strategy/source/scope, candidates, per-song cursors/page counts, seen IDs, request/match totals, truncation, source errors, cooldown, and coverage. Changing its page size requires `--fresh` (or a new state path).
+- Legacy offset checkpoints are migrated only by safely rescanning songs that were unfinished or truncated: each starts at the task's immutable `createdAt` cursor, and JSONL `commentId` de-duplication makes the intentional overlap idempotent. Completed, non-truncated songs are not rescanned merely for migration.
 - `src/parallel-scanner.ts` owns `kind: "parallel-song"`, version 1 state with immutable scan range/shard/page-size identity plus per-shard cursor and counters. Writes are coalesced to about 500 ms and forced at task end.
-- Reusing state with a different UID/source/scope/strategy or parallel range/shard/page-size is rejected. Use `--fresh` or a new state path.
+- Reusing state with a different UID/source/scope/strategy, source cursor page size, or parallel range/shard/page-size is rejected. Use `--fresh` or a new state path.
 - `--fresh` ignores the checkpoint; it does not clear the JSONL output, which still de-duplicates existing comment IDs.
 - `coverageComplete` is true only when all selected work finished without source failures or configured truncation. A task may have status `complete` while coverage remains incomplete.
 - GUI tasks intentionally force `stopAfterFirst: false` so scanning continues until completion, cooldown, budget, failure, or manual stop.
@@ -63,6 +67,8 @@ The writer serializes concurrent appends and de-duplicates by `commentId`, inclu
 - External: normalize supplied HTTP/HTTPS proxy URLs and verify them directly; no managed PID is required.
 
 Verification has two gates: query the public egress IP, then call a real NetEase comment endpoint. Entries are sorted by combined IP-check and NetEase latency, de-duplicated by real egress IP, and only verified distinct IPs survive. Scans re-verify an active pool at task start.
+
+`v0.5.0` additionally treats an IPv4 `/24` or IPv6 `/48` as one network: only the fastest verified entry from each network may be selected. A managed or external pool that cannot fill its requested size with separate networks fails rather than using concentrated substitutes. While a pool is running, its dashboard status schedules a non-overlapping background recheck about every 60 seconds; successful full rounds persist fresh latency/IP data and a temporary failure keeps the last known-good entries for a later retry.
 
 Default managed pool: 4 selected exits from 24 candidates, listeners beginning at port 17891, controller on 19097. These are defaults, not assumptions for scan logic.
 
@@ -81,6 +87,7 @@ Security rules:
 - Renderer navigation/popups are denied and opened via the OS external browser. Static responses set a self-only CSP and prevent path traversal.
 - `src/update.ts`: generic GitHub latest-release lookup and platform asset selection for web/macOS/manual fallback; API responses are cached for five minutes by the server.
 - `src/windows-updater.ts`: packaged-Windows-only state machine around `electron-updater`. Auto-download/install are off; the UI checks, downloads with progress/integrity verification, then explicitly calls silent restart/install.
+- Release notes received from `electron-updater` are normalized into readable plain text before being sent to the renderer. This is intentionally defensive: GitHub-authored HTML such as headings/lists and encoded entities must never render as literal markup in the update dialog.
 - `electron-updater` is loaded lazily only when packaged Windows initializes native updates. Never use its nonexistent default export, and keep updater initialization failure non-fatal so the dashboard can fall back to manual release checks. Desktop startup/updater/renderer failures are written under `userData/logs/desktop.log`.
 - Windows auto-update releases require all three matching artifacts: the NSIS `.exe`, its `.exe.blockmap`, and `latest.yml`. The metadata names/version/hash must match the final installer. A client older than the first updater-capable release still needs one manual upgrade.
 
@@ -104,7 +111,7 @@ Security rules:
 | `src/electron-main.ts`, `src/electron-preload.ts`, `src/window-shell.ts` | Desktop host and isolated renderer bridge. |
 | `web/index.html` | Accessible controls/dialog structure; no inline scripts/styles because of CSP. |
 | `web/app.js` | UI state, API calls, polling/SSE, estimates, native update UX. |
-| `web/styles.css` | Responsive/desktop styling and reduced-motion handling. |
+| `web/styles.css` | Responsive/desktop styling, integrated thin transparent-track scrollbars, and reduced-motion handling. |
 | `test/` | Node test-runner coverage by source module; upstream and network behavior are stubbed. |
 | `build/` | Icons and electron-builder macOS metadata hook. |
 | `scripts/build-mac.cjs` | Builds signed DMGs in a temp directory, then copies artifacts to `release/`. |
@@ -153,14 +160,15 @@ Local verification, the Windows workflow, and post-upload checks are all release
 ## Common traps
 
 - Editing only the estimator/UI can make a concurrency number look changed while execution still uses an old/default worker count. Trace and test the full topology path.
-- `scan` (`comment_music` offsets) and `scan-song` (`comment_new` time cursors) have different pagination, state, defaults, and privacy/login behavior.
+- Source scan and `scan-song` both use `comment_new` time cursors, but they retain different scheduling, state, defaults, and privacy/login behavior. `comment_music` is legacy compatibility only: endpoint evidence showed `limit=100` returned 100 records while 200/500/1000 returned only 20, which is why old offset pagination must not be extended for large pages.
 - Multiple workers share one governor per lane. Giving every worker its own governor would accidentally multiply the per-IP start rate.
 - Pool entry count is not proof of independent capacity; only verified distinct egress IPs count as lanes.
 - Source `both` may finish with partial coverage when one source is restricted. Keep `sourceErrors` and coverage semantics visible.
 - A finished checkpoint returns immediately. When testing a changed configuration, use a fresh temp state path; do not silently mutate compatibility fields in old state.
 - Runtime paths differ: source/CLI defaults use the project root; packaged Electron uses `userData`. Never hardcode repository runtime paths in desktop code.
 - `dist/` is generated from `src/` and ignored. Edit TypeScript sources, not compiled JavaScript.
-- GitHub's generic latest-release check and native Windows `electron-updater` are separate paths. Test both when changing update UX.
+- GitHub's generic latest-release check and native Windows `electron-updater` are separate paths. Test both when changing update UX. In particular, verify HTML release notes become plain text in the native updater state, not merely in a browser-only view.
+- A source page-size control in the UI or estimate is not evidence that source scanning safely uses it. Trace the setting through CLI/UI, server, scanner, `comment_new` cursor update, state compatibility, and the legacy-checkpoint `createdAt` rescan path.
 
 ## Maintaining this memory
 

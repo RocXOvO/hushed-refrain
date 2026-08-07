@@ -202,20 +202,30 @@ export async function runPooledCommentFinder(
           break;
         }
         if (!reserveRequest()) return;
+        const requestedCursor = progress.commentCursor!;
+        const requestedPageNo = progress.commentPageNo!;
         let page;
         try {
-          page = await lane.governor.execute(`comment_music:${song.id}`, () =>
-            lane.client.getSongComments(song.id, options.commentPageSize, progress.commentOffset, options.cookie),
+          page = await lane.governor.execute(`comment_new:${song.id}`, () =>
+            lane.client.getSongCommentsByCursor(
+              song.id,
+              options.commentPageSize,
+              requestedPageNo,
+              requestedCursor,
+            ),
           );
         } catch (error) {
           if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
           throw new SourceLaneFailure(lane.name, error);
         }
 
+        const nextCursor = nextCommentCursor(page.hasMore, page.nextCursor, requestedCursor, song.id);
+
         progress.pageInSong += 1;
-        progress.commentOffset += options.commentPageSize;
+        progress.commentOffset += page.comments.length;
+        progress.commentPageNo = requestedPageNo + 1;
         state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
-        const matches = [...page.hotComments, ...page.comments]
+        const matches = page.comments
           .filter((comment) => comment.userId === options.uid)
           .map<FoundComment>((comment) => ({
             ...comment,
@@ -228,11 +238,13 @@ export async function runPooledCommentFinder(
             capturedAt: new Date().toISOString(),
           }));
         const added = await appendMatches(writer, state, seenCommentIds, matches);
-        if (!page.more || page.comments.length === 0) {
+        if (nextCursor === undefined) {
           progress.done = true;
         } else if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
           if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
           progress.done = true;
+        } else {
+          progress.commentCursor = nextCursor;
         }
         syncSongCursor(state);
         await checkpoint();
@@ -448,16 +460,19 @@ async function runSongScan(
       continue;
     }
 
-    const page = await governor.execute(`comment_music:${song.id}`, () =>
-      client.getSongComments(
+    const requestedCursor = songProgress.commentCursor!;
+    const requestedPageNo = songProgress.commentPageNo!;
+    const page = await governor.execute(`comment_new:${song.id}`, () =>
+      client.getSongCommentsByCursor(
         song.id,
         options.commentPageSize,
-        state.commentOffset,
-        options.cookie,
+        requestedPageNo,
+        requestedCursor,
       ),
     );
+    const nextCursor = nextCommentCursor(page.hasMore, page.nextCursor, requestedCursor, song.id);
 
-    const matches = [...page.hotComments, ...page.comments]
+    const matches = page.comments
       .filter((comment) => comment.userId === options.uid)
       .map<FoundComment>((comment) => ({
         ...comment,
@@ -472,12 +487,17 @@ async function runSongScan(
     const added = await appendMatches(writer, state, seenCommentIds, matches);
 
     songProgress.pageInSong += 1;
-    songProgress.commentOffset += options.commentPageSize;
+    songProgress.commentOffset += page.comments.length;
+    songProgress.commentPageNo = requestedPageNo + 1;
     state.pageInSong = songProgress.pageInSong;
     state.commentOffset = songProgress.commentOffset;
     state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
 
-    if (!page.more || page.comments.length === 0) advanceSong(state);
+    if (nextCursor === undefined) {
+      advanceSong(state);
+    } else {
+      songProgress.commentCursor = nextCursor;
+    }
     await checkpoint();
 
     if (added > 0 && options.stopAfterFirst) {
@@ -677,12 +697,21 @@ function pooledReport(
 }
 
 function ensureSongProgress(state: ScanState): void {
-  if (state.songProgress && state.songProgress.length === state.songs.length) return;
-  state.songProgress = state.songs.map((_, index) => ({
-    commentOffset: index === state.songIndex ? state.commentOffset : 0,
-    pageInSong: index === state.songIndex ? state.pageInSong : 0,
-    done: index < state.songIndex || state.finished,
-  }));
+  const createdAt = Date.parse(state.createdAt);
+  const initialCommentCursor = String(Number.isFinite(createdAt) ? createdAt : Date.now());
+  if (!state.songProgress || state.songProgress.length !== state.songs.length) {
+    state.songProgress = state.songs.map((_, index) => ({
+      commentOffset: index === state.songIndex ? state.commentOffset : 0,
+      pageInSong: index === state.songIndex ? state.pageInSong : 0,
+      commentCursor: initialCommentCursor,
+      commentPageNo: 1,
+      done: index < state.songIndex || state.finished,
+    }));
+  }
+  for (const progress of state.songProgress) {
+    progress.commentCursor ??= initialCommentCursor;
+    progress.commentPageNo ??= 1;
+  }
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
 }
 
@@ -711,6 +740,23 @@ function isPauseSignal(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+function nextCommentCursor(
+  hasMore: boolean,
+  rawNextCursor: string | undefined,
+  requestedCursor: string,
+  songId: string,
+): string | undefined {
+  if (!hasMore) return undefined;
+  const current = Number(requestedCursor);
+  const next = Number(rawNextCursor);
+  if (!Number.isFinite(current) || !Number.isFinite(next) || next >= current) {
+    throw new Error(
+      `Comment cursor did not advance for song ${songId}; the checkpoint remains resumable.`,
+    );
+  }
+  return String(next);
 }
 
 function estimateNote(state: ScanState, options: ScanOptions): string {

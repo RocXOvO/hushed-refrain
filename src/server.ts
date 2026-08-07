@@ -111,6 +111,7 @@ interface StartJobInput {
   uid?: unknown;
   source?: unknown;
   recordScope?: unknown;
+  pageSize?: unknown;
   requestBudget?: unknown;
   minDelayMs?: unknown;
   jitterMs?: unknown;
@@ -199,6 +200,7 @@ class JobManager {
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const minDelayMs = integer(input.minDelayMs ?? 2_500, "minDelayMs", 0, 600_000);
     const jitterMs = integer(input.jitterMs ?? 800, "jitterMs", 0, 600_000);
+    const commentPageSize = integer(input.pageSize ?? 1_000, "pageSize", 1, 2_000);
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const maxCommentPagesPerSong = integer(input.maxCommentPagesPerSong ?? 0, "maxCommentPagesPerSong", 0, 1_000_000);
     const maxSongs = integer(input.maxSongs ?? 0, "maxSongs", 0, 100_000);
@@ -230,7 +232,7 @@ class JobManager {
       cookie: await readCookie(this.paths.cookie),
       statePath: this.statePath,
       outputPath: this.outputPath,
-      commentPageSize: 100,
+      commentPageSize,
       historyPageSize: 50,
       maxCommentPagesPerSong,
       maxSongs,
@@ -587,7 +589,7 @@ async function route(
   if (method === "GET" && url.pathname === "/api/estimate") {
     return json(response, 200, estimateCommentScan({
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
-      pageSize: integer(url.searchParams.get("pageSize") ?? 100, "pageSize", 1, 2_000),
+      pageSize: integer(url.searchParams.get("pageSize") ?? 1_000, "pageSize", 1, 2_000),
       minDelayMs: integer(url.searchParams.get("minDelayMs") ?? 2_500, "minDelayMs", 0, 600_000),
       jitterMs: integer(url.searchParams.get("jitterMs") ?? 800, "jitterMs", 0, 600_000),
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),

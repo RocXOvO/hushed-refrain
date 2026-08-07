@@ -37,7 +37,7 @@ Scan options:
   --cookie-file PATH                 default: .ncm/cookie.txt
   --output PATH                      default: data/comments-UID.jsonl
   --state PATH                       default: data/state-UID-SOURCE.json
-  --comment-page-size N              default: 100
+  --comment-page-size N              default: 1000, maximum: 2000
   --history-page-size N              default: 50
   --max-comment-pages-per-song N     default: 0 (all pages)
   --max-songs N                      default: 0 (all source songs)
@@ -345,7 +345,7 @@ async function scanCommand(args: string[]): Promise<void> {
       "cookie-file": { type: "string", default: ".ncm/cookie.txt" },
       output: { type: "string" },
       state: { type: "string" },
-      "comment-page-size": { type: "string", default: "100" },
+      "comment-page-size": { type: "string", default: "1000" },
       "history-page-size": { type: "string", default: "50" },
       "max-comment-pages-per-song": { type: "string", default: "0" },
       "max-songs": { type: "string", default: "0" },
@@ -378,7 +378,7 @@ async function scanCommand(args: string[]): Promise<void> {
     cookie,
     statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}.json`),
     outputPath: resolve(parsed.values.output ?? `data/comments-${uid}.jsonl`),
-    commentPageSize: integer(parsed.values["comment-page-size"], "comment-page-size", 1, 100),
+    commentPageSize: integer(parsed.values["comment-page-size"], "comment-page-size", 1, 2_000),
     historyPageSize: integer(parsed.values["history-page-size"], "history-page-size", 1, 100),
     maxCommentPagesPerSong: integer(parsed.values["max-comment-pages-per-song"], "max-comment-pages-per-song", 0),
     maxSongs: integer(parsed.values["max-songs"], "max-songs", 0),

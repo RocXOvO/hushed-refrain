@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -15,7 +15,7 @@ import type {
 } from "../src/types";
 
 class FakeClient implements NcmClient {
-  commentCalls: Array<{ songId: string; offset: number }> = [];
+  commentCalls: Array<{ songId: string; pageSize: number; pageNo: number; cursor: string }> = [];
 
   async getLoginProfile(): Promise<LoginProfile | undefined> {
     return undefined;
@@ -36,25 +36,29 @@ class FakeClient implements NcmClient {
   }
 
   async getSongComments(songId: string, _limit: number, offset: number): Promise<CommentPage> {
-    this.commentCalls.push({ songId, offset });
-    if (songId === "1" && offset === 0) {
+    return { comments: [], hotComments: [], more: false };
+  }
+
+  async getSongCommentsByCursor(songId: string, pageSize: number, pageNo: number, cursor: string) {
+    this.commentCalls.push({ songId, pageSize, pageNo, cursor });
+    if (songId === "1" && pageNo === 1) {
       return {
         comments: [
           { commentId: "c1", userId: "42", content: "first" },
           { commentId: "other", userId: "9", content: "ignore" },
         ],
-        hotComments: [{ commentId: "c1", userId: "42", content: "first" }],
-        more: true,
+        hasMore: true,
+        nextCursor: "100",
       };
     }
     if (songId === "1") {
       return {
         comments: [{ commentId: "c2", userId: "42", content: "second" }],
-        hotComments: [],
-        more: false,
+        hasMore: false,
+        nextCursor: "90",
       };
     }
-    return { comments: [], hotComments: [], more: false };
+    return { comments: [], hasMore: false };
   }
 
   async getUserCommentHistory(): Promise<HistoryPage> {
@@ -103,12 +107,13 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(report.coverageComplete, true);
   assert.equal(report.songs, 3);
   assert.equal(report.matches, 2);
-  assert.deepEqual(client.commentCalls, [
-    { songId: "1", offset: 0 },
-    { songId: "1", offset: 2 },
-    { songId: "2", offset: 0 },
-    { songId: "3", offset: 0 },
+  assert.deepEqual(client.commentCalls.map(({ songId, pageSize, pageNo }) => ({ songId, pageSize, pageNo })), [
+    { songId: "1", pageSize: 2, pageNo: 1 },
+    { songId: "1", pageSize: 2, pageNo: 2 },
+    { songId: "2", pageSize: 2, pageNo: 1 },
+    { songId: "3", pageSize: 2, pageNo: 1 },
   ]);
+  assert.equal(client.commentCalls[1].cursor, "100");
 
   const lines = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/);
   assert.equal(lines.length, 2);
@@ -122,26 +127,172 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(state.songIndex, 3);
 });
 
-test("pauses on budget and resumes at the exact comment offset", async () => {
+test("pauses on budget and resumes at the exact comment cursor", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-resume-"));
   const client = new FakeClient();
   const config = await options(directory);
 
   const first = await runCommentFinder(client, governor(3), config);
   assert.equal(first.status, "paused");
-  assert.deepEqual(client.commentCalls, [{ songId: "1", offset: 0 }]);
+  assert.deepEqual(client.commentCalls.map(({ songId, pageNo }) => ({ songId, pageNo })), [{ songId: "1", pageNo: 1 }]);
 
   const second = await runCommentFinder(client, governor(20), config);
   assert.equal(second.status, "complete");
-  assert.deepEqual(client.commentCalls, [
-    { songId: "1", offset: 0 },
-    { songId: "1", offset: 2 },
-    { songId: "2", offset: 0 },
-    { songId: "3", offset: 0 },
+  assert.deepEqual(client.commentCalls.map(({ songId, pageNo }) => ({ songId, pageNo })), [
+    { songId: "1", pageNo: 1 },
+    { songId: "1", pageNo: 2 },
+    { songId: "2", pageNo: 1 },
+    { songId: "3", pageNo: 1 },
   ]);
+  assert.equal(client.commentCalls[1].cursor, "100");
 
   const lines = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/);
   assert.equal(lines.length, 2);
+});
+
+test("uses large cursor pages and advances with the server cursor", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-large-page-"));
+  const client = new FakeClient();
+  const config = await options(directory);
+  config.source = "record";
+  config.commentPageSize = 1_000;
+
+  const report = await runCommentFinder(client, governor(20), config);
+
+  assert.equal(report.status, "complete");
+  assert.ok(client.commentCalls.every((call) => call.pageSize === 1_000));
+  assert.deepEqual(client.commentCalls.slice(0, 2).map(({ pageNo, cursor }) => ({ pageNo, cursor })), [
+    { pageNo: 1, cursor: client.commentCalls[0].cursor },
+    { pageNo: 2, cursor: "100" },
+  ]);
+  assert.ok(Number(client.commentCalls[0].cursor) > 100);
+});
+
+test("migrates an incomplete legacy offset checkpoint without skipping pages or duplicating JSONL", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-legacy-state-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.commentPageSize = 1_000;
+  const createdAt = "2026-08-01T00:00:00.000Z";
+  await writeFile(config.outputPath, `${JSON.stringify({ commentId: "existing" })}\n`, "utf8");
+  await writeFile(config.statePath, `${JSON.stringify({
+    version: 1,
+    uid: config.uid,
+    strategy: "scan",
+    strategyResolved: true,
+    source: config.source,
+    recordScope: config.recordScope,
+    sourcesLoaded: true,
+    songs: [{ id: "1", sources: ["record"] }],
+    songProgress: [{ commentOffset: 100, pageInSong: 1, done: true }],
+    sourceSongCount: 1,
+    sourceTruncated: false,
+    sourceErrors: [],
+    songIndex: 1,
+    commentOffset: 0,
+    pageInSong: 0,
+    historyTime: 0,
+    seenCommentIds: ["existing"],
+    matchCount: 1,
+    requestCount: 2,
+    pagesProcessed: 1,
+    truncatedSongIds: ["1"],
+    finished: true,
+    coverageComplete: false,
+    createdAt,
+    updatedAt: createdAt,
+  }, null, 2)}\n`, "utf8");
+
+  const client = new FakeClient();
+  client.getUserRecord = async () => { throw new Error("legacy checkpoint should retain its song list"); };
+  client.getSongCommentsByCursor = async (songId, pageSize, pageNo, cursor) => {
+    client.commentCalls.push({ songId, pageSize, pageNo, cursor });
+    return {
+      comments: [
+        { commentId: "existing", userId: "42", content: "already stored" },
+        { commentId: "new", userId: "42", content: "new match" },
+      ],
+      hasMore: false,
+    };
+  };
+
+  const report = await runCommentFinder(client, governor(20), config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.coverageComplete, true);
+  assert.equal(report.matches, 2);
+  assert.deepEqual(client.commentCalls, [{
+    songId: "1",
+    pageSize: 1_000,
+    pageNo: 1,
+    cursor: String(Date.parse(createdAt)),
+  }]);
+  const lines = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/);
+  assert.deepEqual(lines.map((line) => JSON.parse(line).commentId), ["existing", "new"]);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.commentPagination, "cursor-v1");
+  assert.equal(state.commentPageSize, 1_000);
+  assert.equal(state.pagesProcessed, 1);
+  assert.deepEqual(state.truncatedSongIds, []);
+});
+
+test("rejects resuming a cursor checkpoint with a different page size", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-page-size-state-"));
+  const firstConfig = await options(directory);
+  firstConfig.source = "record";
+  firstConfig.commentPageSize = 1_000;
+  await runCommentFinder(new FakeClient(), governor(20), firstConfig);
+
+  const changedConfig = { ...firstConfig, commentPageSize: 2_000 };
+  await assert.rejects(
+    runCommentFinder(new FakeClient(), governor(20), changedConfig),
+    /commentPageSize.*--fresh/,
+  );
+});
+
+test("keeps an invalid server cursor resumable instead of claiming completion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-invalid-cursor-"));
+  const config = await options(directory);
+  config.source = "record";
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getSongCommentsByCursor = async (_songId, _pageSize, _pageNo, cursor) => ({
+    comments: [{ commentId: "bad-cursor", userId: "42", content: "not committed" }],
+    hasMore: true,
+    nextCursor: cursor,
+  });
+
+  await assert.rejects(
+    runCommentFinder(client, governor(20), config),
+    /cursor did not advance/,
+  );
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.finished, false);
+  assert.equal(state.coverageComplete, false);
+  assert.equal(state.songProgress[0].pageInSong, 0);
+});
+
+test("continues past an empty cursor page when the server still has more", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-empty-cursor-page-"));
+  const config = await options(directory);
+  config.source = "record";
+  let calls = 0;
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getSongCommentsByCursor = async (_songId, _pageSize, _pageNo, cursor) => {
+    calls += 1;
+    return calls === 1
+      ? { comments: [], hasMore: true, nextCursor: String(Number(cursor) - 1) }
+      : {
+          comments: [{ commentId: "after-empty", userId: "42", content: "found later" }],
+          hasMore: false,
+        };
+  };
+
+  const report = await runCommentFinder(client, governor(20), config);
+  assert.equal(report.status, "complete");
+  assert.equal(report.matches, 1);
+  assert.equal(calls, 2);
 });
 
 test("auto strategy uses direct history only for the logged-in UID", async () => {
@@ -157,6 +308,7 @@ test("auto strategy uses direct history only for the logged-in UID", async () =>
     getUserRecord: async () => [],
     getLikedSongs: async () => [],
     getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
     getUserCommentHistory: async () => {
       historyCalls += 1;
       return {
@@ -268,7 +420,8 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
     getLoginProfile: async () => undefined,
     getUserRecord: async () => songs,
     getLikedSongs: async () => [],
-    getSongComments: async (songId) => {
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async (songId) => {
       tracker.active += 1;
       tracker.maxActive = Math.max(tracker.maxActive, tracker.active);
       tracker.calls.push(`${name}:${songId}`);
@@ -276,8 +429,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
       tracker.active -= 1;
       return {
         comments: songId === "3" ? [{ commentId: "pool-match", userId: "42", content: "found" }] : [],
-        hotComments: [],
-        more: false,
+        hasMore: false,
       };
     },
     getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
@@ -313,12 +465,13 @@ test("pooled source scan uses multiple workers on one proxy lane", async () => {
     getLoginProfile: async () => undefined,
     getUserRecord: async () => songs,
     getLikedSongs: async () => [],
-    getSongComments: async () => {
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
       tracker.active += 1;
       tracker.maxActive = Math.max(tracker.maxActive, tracker.active);
       await new Promise((resolve) => setTimeout(resolve, 20));
       tracker.active -= 1;
-      return { comments: [], hotComments: [], more: false };
+      return { comments: [], hasMore: false };
     },
     getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
   };
@@ -344,7 +497,12 @@ test("pooled source scan checkpoints capped songs before pausing on budget", asy
     getLoginProfile: async () => undefined,
     getUserRecord: async () => songs,
     getLikedSongs: async () => [],
-    getSongComments: async () => ({ comments: [{ commentId: crypto.randomUUID(), userId: "9", content: "other" }], hotComments: [], more: true }),
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async (_songId, _pageSize, _pageNo, cursor) => ({
+      comments: [{ commentId: crypto.randomUUID(), userId: "9", content: "other" }],
+      hasMore: true,
+      nextCursor: String(Number(cursor) - 1),
+    }),
     getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
   });
 

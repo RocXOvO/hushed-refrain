@@ -171,11 +171,15 @@ export interface FoundComment extends CommentRecord {
 export interface SongScanProgress {
   commentOffset: number;
   pageInSong: number;
+  commentCursor?: string;
+  commentPageNo?: number;
   done: boolean;
 }
 
 export interface ScanState {
   version: 1;
+  commentPagination?: "cursor-v1";
+  commentPageSize?: number;
   uid: string;
   strategy: "scan" | "history";
   strategyResolved: boolean;

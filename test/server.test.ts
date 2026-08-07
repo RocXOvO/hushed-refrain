@@ -23,6 +23,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /如何获取用户 UID/);
   assert.match(pageText, /home\?id=123456789/);
   assert.match(pageText, /IPv4 \/24.*IPv6 \/48/);
+  assert.match(pageText, /name="pageSize"[^>]*max="2000"[^>]*value="1000"/);
   assert.doesNotMatch(pageText, /首条命中后/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
@@ -38,8 +39,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const estimate = await fetch(`${base}/api/estimate?comments=500000`);
   assert.equal(estimate.status, 200);
   const value = await estimate.json() as { pages: number; expectedSeconds: number };
-  assert.equal(value.pages, 5_000);
-  assert.equal(value.expectedSeconds, 14_500);
+  assert.equal(value.pages, 500);
+  assert.equal(value.expectedSeconds, 1_450);
 
   const pooledEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=100&minDelayMs=2500&jitterMs=800&networkMs=400&lanes=4&workersPerLane=1`);
   assert.equal(pooledEstimate.status, 200);
@@ -121,6 +122,14 @@ test("dashboard validates UID before starting a job", async (context) => {
   const lookup = await fetch(`http://127.0.0.1:${address.port}/api/user?uid=abc`);
   assert.equal(lookup.status, 400);
   assert.match(await lookup.text(), /UID/);
+
+  const oversizedPage = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: "42", source: "record", recordScope: "all", pageSize: 2_001 }),
+  });
+  assert.equal(oversizedPage.status, 400);
+  assert.match(await oversizedPage.text(), /pageSize/);
 });
 
 test("dashboard keeps proxy-pool state under the configured runtime root", async (context) => {
