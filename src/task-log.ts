@@ -1,0 +1,111 @@
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { dirname } from "node:path";
+import type { ScanRequestActivity, ScanSchedulerActivity } from "./types";
+
+export type TaskLogLevel = "debug" | "info" | "warn" | "error";
+
+export interface TaskLogEntry {
+  timestamp: string;
+  level: TaskLogLevel;
+  event: string;
+  mode: "source" | "parallel";
+  runId: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export class TaskLogger {
+  private tail = Promise.resolve();
+  private initialized = false;
+
+  constructor(
+    readonly path: string,
+    private readonly mode: "source" | "parallel",
+    private readonly runId: string,
+  ) {}
+
+  write(
+    level: TaskLogLevel,
+    event: string,
+    message: string,
+    details?: Record<string, unknown>,
+  ): Promise<void> {
+    const entry: TaskLogEntry = {
+      timestamp: new Date().toISOString(),
+      level,
+      event,
+      mode: this.mode,
+      runId: this.runId,
+      message,
+      details,
+    };
+    this.tail = this.tail.then(async () => {
+      if (!this.initialized) {
+        await mkdir(dirname(this.path), { recursive: true });
+        this.initialized = true;
+      }
+      await appendFile(this.path, `${JSON.stringify(entry)}\n`, "utf8");
+    }).catch(() => {
+      // Diagnostics must never interrupt or change scan results.
+    });
+    return this.tail;
+  }
+
+  request(activity: ScanRequestActivity): void {
+    const suffix = activity.shardId === undefined
+      ? `第 ${activity.page} 页`
+      : `分片 ${activity.shardId} 第 ${activity.page} 页`;
+    if (activity.phase === "start") {
+      void this.write("debug", "page_start", `${activity.lane} 开始请求歌曲 ${activity.songId} ${suffix}。`, activityDetails(activity));
+      return;
+    }
+    if (activity.phase === "success") {
+      void this.write(
+        "info",
+        "page_success",
+        `${activity.lane} 成功读取 ${activity.comments ?? 0} 条评论，耗时 ${activity.elapsedMs ?? 0}ms。`,
+        activityDetails(activity),
+      );
+      return;
+    }
+    const rateLimited = activity.rateLimited === true;
+    void this.write(
+      rateLimited ? "warn" : "error",
+      rateLimited ? "rate_limited" : "page_failure",
+      rateLimited
+        ? `${activity.lane} 触发远端风控/限流（${activity.status ?? "未知状态"}），本出口将冷却。`
+        : `${activity.lane} 读取失败：${activity.error ?? "未知错误"}`,
+      activityDetails(activity),
+    );
+  }
+
+  scheduler(activity: ScanSchedulerActivity): void {
+    void this.write(
+      "info",
+      "adaptive_split",
+      `检测到 ${activity.waitingWorkers} 个空闲 Worker，已将分片 ${activity.originalShardId} 的剩余范围拆分为两段。`,
+      activityDetails(activity),
+    );
+  }
+}
+
+export async function readTaskLog(path: string | undefined, limit: number): Promise<TaskLogEntry[]> {
+  if (!path) return [];
+  try {
+    return (await readFile(path, "utf8"))
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .slice(-limit)
+      .flatMap((line) => {
+        try { return [JSON.parse(line) as TaskLogEntry]; } catch { return []; }
+      })
+      .reverse();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  }
+}
+
+function activityDetails(activity: ScanRequestActivity | ScanSchedulerActivity): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(activity).filter(([, value]) => value !== undefined));
+}

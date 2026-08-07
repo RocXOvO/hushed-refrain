@@ -5,7 +5,7 @@ import https from "node:https";
 import net from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { EnhancedNcmClient } from "./api";
@@ -44,6 +44,7 @@ export interface ProxyPoolFile {
   active: boolean;
   sourceConfigPath?: string;
   mihomoConfigPath?: string;
+  mihomoExecutablePath?: string;
   pid?: number;
   entries: ProxyPoolEntry[];
 }
@@ -70,7 +71,7 @@ export async function startMihomoPool(
   options: MihomoPoolOptions,
 ): Promise<ProxyPoolFile> {
   const previous = await readProxyPool(options.poolPath);
-  if (previous?.pid && isProcessAlive(previous.pid)) {
+  if (previous?.pid && managedMihomoProcessAlive(previous)) {
     process.kill(previous.pid);
     await waitForProcessExit(previous.pid, 5_000);
   }
@@ -205,6 +206,7 @@ export async function startMihomoPool(
       active: true,
       sourceConfigPath: options.sourceConfigPath,
       mihomoConfigPath: configPath,
+      mihomoExecutablePath: options.mihomoPath,
       pid: child.pid,
       entries: distinct,
     };
@@ -219,7 +221,7 @@ export async function startMihomoPool(
 export async function stopMihomoPool(poolPath: string): Promise<boolean> {
   const pool = await readProxyPool(poolPath);
   if (!pool || !pool.active) return false;
-  if (pool.pid && isProcessAlive(pool.pid)) {
+  if (pool.pid && managedMihomoProcessAlive(pool)) {
     process.kill(pool.pid);
     await waitForProcessExit(pool.pid, 5_000);
   }
@@ -245,7 +247,7 @@ export async function readProxyPool(path: string): Promise<ProxyPoolFile | undef
 
 export function proxyPoolRunning(pool: ProxyPoolFile | undefined): boolean {
   if (!pool?.active || pool.entries.length === 0) return false;
-  return pool.source === "external" || Boolean(pool.pid && isProcessAlive(pool.pid));
+  return pool.source === "external" || managedMihomoProcessAlive(pool);
 }
 
 export async function importExternalProxyPool(
@@ -535,6 +537,56 @@ function isProcessAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function managedMihomoProcessAlive(pool: ProxyPoolFile): boolean {
+  if (!pool.pid || !isProcessAlive(pool.pid) || !pool.mihomoConfigPath) return false;
+  const commandLine = processCommandLine(pool.pid);
+  return commandLine !== undefined && managedMihomoCommandMatches(
+    commandLine,
+    pool.mihomoConfigPath,
+    pool.mihomoExecutablePath,
+  );
+}
+
+export function managedMihomoCommandMatches(
+  commandLine: string,
+  configPath: string,
+  executablePath?: string,
+): boolean {
+  const normalizedCommand = normalizeCommandIdentity(commandLine);
+  const normalizedConfig = normalizeCommandIdentity(configPath);
+  const executable = normalizeCommandIdentity(executablePath ?? "mihomo").split("/").at(-1)!;
+  const executableMatches = executablePath
+    ? normalizedCommand.includes(executable)
+    : /(?:^|[\s/\\])(?:verge-)?mihomo(?:\.exe)?(?:\s|$)/i.test(commandLine);
+  return executableMatches && normalizedConfig.length > 0 && normalizedCommand.includes(normalizedConfig);
+}
+
+function normalizeCommandIdentity(value: string): string {
+  return value.trim().replaceAll("\\", "/").replaceAll('"', "").toLowerCase();
+}
+
+function processCommandLine(pid: number): string | undefined {
+  try {
+    if (process.platform === "win32") {
+      const script = `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\").CommandLine`;
+      const output = execFileSync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+      ], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+      return output.trim() || undefined;
+    }
+    const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      timeout: 2_000,
+    });
+    return output.trim() || undefined;
+  } catch {
+    return undefined;
   }
 }
 

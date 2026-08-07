@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>云评检索台</title>
   <link rel="icon" type="image/png" href="/app-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=15">
+  <link rel="stylesheet" href="/styles.css?v=16">
 </head>
 <body>
   <div id="appSplash" class="app-splash" role="status" aria-label="云评检索台正在启动">
@@ -117,8 +117,9 @@
         <div class="metric"><span>累计请求</span><strong id="requestsMetric">0</strong></div>
       </div>
       <div class="progress-band"><div class="progress-copy"><span id="currentSong">尚未开始</span><span id="progressPercent">0%</span></div><div class="progress-track"><span id="progressBar"></span></div><div id="taskNote" class="task-note" hidden></div></div>
-      <div class="tabs" role="tablist" aria-label="任务视图"><button class="tab active" type="button" role="tab" data-tab="results" aria-selected="true">实时结果</button><button class="tab" type="button" role="tab" data-tab="pool" aria-selected="false">出口详情</button><button class="tab" type="button" role="tab" data-tab="estimate" aria-selected="false">速度估算</button></div>
+      <div class="tabs" role="tablist" aria-label="任务视图"><button class="tab active" type="button" role="tab" data-tab="results" aria-selected="true">实时结果</button><button class="tab" type="button" role="tab" data-tab="logs" aria-selected="false">运行日志</button><button class="tab" type="button" role="tab" data-tab="pool" aria-selected="false">出口详情</button><button class="tab" type="button" role="tab" data-tab="estimate" aria-selected="false">速度估算</button></div>
       <section id="resultsPanel" class="tab-panel view-panel" role="tabpanel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>歌曲</th><th>评论内容</th><th>点赞</th></tr></thead><tbody id="resultsBody" aria-live="polite" aria-relevant="additions"><tr class="empty-row"><td colspan="5">暂无命中</td></tr></tbody></table></div></section>
+      <section id="logsPanel" class="tab-panel view-panel" role="tabpanel" hidden><p id="logPath" class="log-path">任务启动后将在本地生成结构化日志。</p><div class="table-wrap"><table class="logs-table"><thead><tr><th>时间</th><th>级别</th><th>事件</th><th>详情</th></tr></thead><tbody id="logsBody" aria-live="polite"><tr class="empty-row"><td colspan="4">暂无日志</td></tr></tbody></table></div></section>
       <section id="poolPanel" class="tab-panel view-panel" role="tabpanel" hidden><div class="table-wrap"><table><thead><tr><th>节点</th><th>监听地址</th><th>出口 IP</th><th>网易云延迟</th><th>状态</th></tr></thead><tbody id="poolTableBody"><tr class="empty-row"><td colspan="5">代理池未运行</td></tr></tbody></table></div></section>
       <section id="estimatePanel" class="tab-panel view-panel" role="tabpanel" hidden>
         <div class="estimate-card">
@@ -149,6 +150,17 @@
     </div>
   </dialog>
   <dialog id="qrDialog"><div class="dialog-heading"><h2>二维码登录</h2><button id="closeQrButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="qr-stage"><img id="qrImage" alt="登录二维码"></div><p id="qrStatus">正在生成</p></dialog>
+  <dialog id="settlementDialog" class="settlement-dialog">
+    <div class="dialog-heading settlement-heading"><div><p class="eyebrow">TASK SUMMARY</p><h2 id="settlementTitle">检索已结束</h2></div><button id="closeSettlementButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div>
+    <div class="settlement-content">
+      <div class="settlement-status"><span class="settlement-icon"><img src="/icons/check-circle-2.svg" alt=""></span><div><strong id="settlementStatus">已完成</strong><p id="settlementContext">用户来源扫描</p></div></div>
+      <div class="settlement-metrics"><div><span>本轮耗时</span><strong id="settlementElapsed">0秒</strong></div><div><span>累计命中</span><strong id="settlementMatches">0</strong></div><div><span>读取页数</span><strong id="settlementPages">0</strong></div><div><span>累计请求</span><strong id="settlementRequests">0</strong></div></div>
+      <p id="settlementNote" class="settlement-note"></p>
+      <p class="settlement-log-label">调试日志</p><code id="settlementLogPath" class="settlement-log-path">-</code>
+      <p class="settlement-footnote">命中数按当前检查点累计；耗时只统计本次任务。</p>
+      <div class="dialog-actions"><button id="viewSettlementLogsButton" class="button secondary" type="button">查看日志</button><button id="viewSettlementResultsButton" class="button primary" type="button">查看结果</button></div>
+    </div>
+  </dialog>
   <dialog id="updateDialog" class="update-dialog">
     <div class="dialog-heading update-dialog-heading"><div><p class="eyebrow">UPDATE AVAILABLE</p><h2>发现新版本</h2></div><button id="closeUpdateButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div>
     <div class="update-content">
@@ -161,6 +173,6 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/app.js?v=17" defer></script>
+  <script src="/app.js?v=19" defer></script>
 </body>
 </html>

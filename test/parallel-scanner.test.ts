@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
 import {
   createTimeShards,
+  loadParallelState,
   runParallelSongScan,
 } from "../src/parallel-scanner";
 import type {
@@ -131,6 +132,109 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.equal(result.songId, "186016");
   assert.deepEqual(liveMatches, ["comment-75"]);
 });
+
+test("continues an empty page when its descending cursor advances", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-empty-page-"));
+  const client = new ParallelFakeClient();
+  let calls = 0;
+  client.getSongCommentsByCursor = async (_songId, _pageSize, _pageNo, cursor) => {
+    calls += 1;
+    if (calls === 1) return { comments: [], hasMore: true, nextCursor: "50" };
+    return {
+      comments: [{ commentId: "after-empty", userId: "42", content: "found", time: 25 }],
+      hasMore: false,
+      nextCursor: cursor,
+    };
+  };
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+
+  const report = await runParallelSongScan([{
+    name: "lane-1",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.pagesProcessed, 2);
+  assert.equal(report.matches, 1);
+  assert.equal(calls, 2);
+});
+
+test("adaptively splits a long remaining shard across idle workers", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-adaptive-split-"));
+  const client = new ParallelFakeClient();
+  let active = 0;
+  let maxActive = 0;
+  client.getSongCommentsByCursor = async (_songId, _pageSize, _pageNo, cursor) => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise((resolve) => setTimeout(resolve, 8));
+    active -= 1;
+    const upper = Number(cursor);
+    const next = Math.max(0, upper - 20);
+    return {
+      comments: [{
+        commentId: `comment-${upper}`,
+        userId: "9",
+        content: `before ${upper}`,
+        time: Math.max(0, upper - 1),
+      }],
+      hasMore: next > 0,
+      nextCursor: String(next),
+    };
+  };
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 3;
+  const splits: NonNullable<ParallelSongScanOptions["onSchedulerActivity"]> extends (value: infer T) => void ? T[] : never = [];
+  config.onSchedulerActivity = (activity) => splits.push(activity);
+
+  const report = await runParallelSongScan([{
+    name: "lane-1",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "complete");
+  assert.ok(maxActive >= 2, `expected idle workers to receive split work, saw ${maxActive}`);
+  assert.ok(splits.length >= 1);
+  assert.equal(splits[0].type, "adaptive-split");
+  assert.equal(report.shards, 1 + splits.length);
+  assert.equal(report.shardsComplete, report.shards);
+  const state = await loadParallelState(config.statePath);
+  assert.equal(state?.shards.length, report.shards);
+  assert.ok(state?.shards.every((shard) => shard.done));
+});
+
+for (const [label, nextCursor] of [["unchanged", "100"], ["missing", undefined]] as const) {
+  test(`keeps a parallel shard resumable when the ${label} cursor cannot advance`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), `ncm-parallel-${label}-cursor-`));
+    const client = new ParallelFakeClient();
+    client.getSongCommentsByCursor = async () => ({
+      comments: [],
+      hasMore: true,
+      nextCursor,
+    });
+    const config = await options(directory);
+    config.shardCount = 1;
+    config.workersPerLane = 1;
+
+    await assert.rejects(
+      runParallelSongScan([{
+        name: "lane-1",
+        client,
+        governor: governor(),
+      }], config),
+      /cursor did not advance/,
+    );
+    const state = await loadParallelState(config.statePath);
+    assert.equal(state?.finished, false);
+    assert.equal(state?.shards[0].done, false);
+    assert.equal(state?.shards[0].cursor, "100");
+  });
+}
 
 test("stops after one match while concurrent pages are in flight", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-first-"));

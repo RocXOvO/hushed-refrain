@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,11 +8,13 @@ import {
   discoverClashVerge,
   defaultMihomoPoolOptions,
   egressNetworkKey,
+  managedMihomoCommandMatches,
   proxyPoolRunning,
   readClashVergeProfiles,
   readProxyPool,
   refreshProxyPool,
   selectFastestDistinct,
+  stopMihomoPool,
 } from "../src/mihomo-pool";
 import type { ProxyPoolEntry, ProxyPoolFile } from "../src/mihomo-pool";
 
@@ -117,6 +120,47 @@ test("treats an active external pool as running without a managed PID", () => {
     active: false,
     entries: [entry("external", "8.8.8.8", 20, 30)],
   }), false);
+});
+
+test("matches a managed Mihomo process by executable and config path", () => {
+  assert.equal(managedMihomoCommandMatches(
+    '"C:\\Apps\\verge-mihomo.exe" -d "C:\\Pool" -f "C:\\Pool\\config.yaml"',
+    "C:\\Pool\\config.yaml",
+    "C:\\Apps\\verge-mihomo.exe",
+  ), true);
+  assert.equal(managedMihomoCommandMatches(
+    "node unrelated-service.js",
+    "C:\\Pool\\config.yaml",
+    "C:\\Apps\\verge-mihomo.exe",
+  ), false);
+});
+
+test("does not kill a reused PID whose process identity is not Mihomo", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pool-stale-pid-"));
+  const poolPath = join(directory, "proxy-pool.json");
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+    stdio: "ignore",
+  });
+  assert.ok(child.pid);
+  try {
+    const pool: ProxyPoolFile = {
+      version: 1,
+      generatedAt: new Date(0).toISOString(),
+      source: "clash-verge",
+      active: true,
+      mihomoConfigPath: join(directory, "config.yaml"),
+      mihomoExecutablePath: join(directory, "mihomo"),
+      pid: child.pid,
+      entries: [entry("stale", "8.8.8.8", 20, 30)],
+    };
+    await writeFile(poolPath, JSON.stringify(pool));
+
+    assert.equal(await stopMihomoPool(poolPath), true);
+    assert.doesNotThrow(() => process.kill(child.pid!, 0));
+    assert.equal((await readProxyPool(poolPath))?.active, false);
+  } finally {
+    child.kill();
+  }
 });
 
 test("provides platform-specific Clash Verge discovery candidates", () => {

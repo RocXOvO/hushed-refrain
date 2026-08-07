@@ -22,6 +22,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /重启并安装|下载更新/);
   assert.match(pageText, /如何获取用户 UID/);
   assert.match(pageText, /home\?id=123456789/);
+  assert.match(pageText, /id="settlementDialog"/);
+  assert.match(pageText, /本轮耗时/);
+  assert.match(pageText, /累计命中/);
+  assert.match(pageText, /id="logsPanel"/);
   assert.match(pageText, /IPv4 \/24.*IPv6 \/48/);
   assert.match(pageText, /id="poolSize"[^>]*max="32"[^>]*value="8"/);
   assert.match(pageText, /id="poolCandidates"[^>]*max="128"[^>]*value="48"/);
@@ -33,6 +37,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const appText = await app.text();
   assert.match(appText, /year:\s*"numeric"/);
   assert.match(appText, /currentSong\.pageInSong/);
+  assert.match(appText, /observeTaskSettlement/);
+  assert.match(appText, /\/api\/logs\?mode=/);
+  assert.match(appText, /prepareTaskForUpdate/);
+  assert.match(appText, /\/api\/resume/);
+  assert.match(appText, /保存进度并重启/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
@@ -62,6 +71,43 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(parallelValue.pages, 100);
   assert.equal(parallelValue.expectedSeconds, 4);
   assert.equal(parallelValue.totalWorkers, 12);
+});
+
+test("dashboard restores the last task descriptor from the persistent runtime root", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-resume-"));
+  const dataDirectory = join(runtimeRoot, "data");
+  await mkdir(dataDirectory, { recursive: true });
+  const descriptor = {
+    version: 1,
+    mode: "parallel",
+    updatedAt: "2026-08-07T00:00:00.000Z",
+    input: {
+      uid: "42",
+      songId: "186016",
+      workersPerProxy: 3,
+      shards: 96,
+      pageSize: 1000,
+    },
+  };
+  await writeFile(join(dataDirectory, "resume-task.json"), JSON.stringify(descriptor));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { task: descriptor });
+});
+
+test("dashboard reports an empty cross-version task descriptor explicitly", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-no-resume-"));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { task: null });
 });
 
 test("dashboard opens a live result event stream", async (context) => {

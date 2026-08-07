@@ -1,6 +1,8 @@
 import { CooldownRequired, RequestBudgetExhausted, RunCancelled } from "./errors";
 import { RequestGovernor } from "./governor";
+import { nextDescendingCursor } from "./cursor-pagination";
 import { JsonlResultWriter } from "./results";
+import { AsyncWorkQueue } from "./work-queue";
 import {
   assertCompatibleState,
   createState,
@@ -171,7 +173,9 @@ export async function runPooledCommentFinder(
     }
     if (state.finished) return pooledReport(state, lanes, options, initialRequests, "complete");
 
-    const queue = state.songs.map((_, index) => index).filter((index) => !state.songProgress![index].done);
+    const queue = new AsyncWorkQueue(
+      state.songs.map((_, index) => index).filter((index) => !state.songProgress![index].done),
+    );
     const blockedLanes = new Map<string, number>();
     const failedLanes = new Map<string, string>();
     let reservedRequests = pooledRequestsUsed(lanes);
@@ -181,117 +185,156 @@ export async function runPooledCommentFinder(
     let matched = false;
     let fatalError: unknown;
 
+    const stopScheduling = (): void => {
+      stopRequested = true;
+      queue.stop();
+    };
+
     const reserveRequest = (): boolean => {
       if (stopRequested) return false;
       if (options.requestBudget > 0 && reservedRequests >= options.requestBudget) {
         budgetReached = true;
-        stopRequested = true;
+        stopScheduling();
         return false;
       }
       reservedRequests += 1;
       return true;
     };
 
-    const scanSong = async (lane: SourceScanLane, index: number): Promise<void> => {
+    const scanSongPage = async (lane: SourceScanLane, index: number): Promise<void> => {
       const song = state.songs[index];
       const progress = state.songProgress![index];
-      while (!stopRequested && !progress.done) {
-        if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
-          if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
-          progress.done = true;
-          break;
-        }
-        if (!reserveRequest()) return;
-        const requestedCursor = progress.commentCursor!;
-        const requestedPageNo = progress.commentPageNo!;
-        let page;
-        try {
-          page = await lane.governor.execute(`comment_new:${song.id}`, () => {
-            publishSongProgress(options, song, requestedPageNo);
-            return lane.client.getSongCommentsByCursor(
-              song.id,
-              options.commentPageSize,
-              requestedPageNo,
-              requestedCursor,
-            );
-          });
-        } catch (error) {
-          if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
-          throw new SourceLaneFailure(lane.name, error);
-        }
-
-        const nextCursor = nextCommentCursor(page.hasMore, page.nextCursor, requestedCursor, song.id);
-
-        progress.pageInSong += 1;
-        progress.commentOffset += page.comments.length;
-        progress.commentPageNo = requestedPageNo + 1;
-        state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
-        const matches = page.comments
-          .filter((comment) => comment.userId === options.uid)
-          .map<FoundComment>((comment) => ({
-            ...comment,
-            songId: song.id,
-            songName: song.name,
-            sources: song.sources,
-            sourceRank: song.sourceRank,
-            playCount: song.playCount,
-            route: "song-comments",
-            capturedAt: new Date().toISOString(),
-          }));
-        const added = await appendMatches(writer, state, seenCommentIds, matches);
-        if (nextCursor === undefined) {
-          progress.done = true;
-        } else if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
-          if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
-          progress.done = true;
-        } else {
-          progress.commentCursor = nextCursor;
-        }
+      if (stopRequested || progress.done) return;
+      if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
+        if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
+        progress.done = true;
         syncSongCursor(state);
         await checkpoint();
-        if (added > 0 && options.stopAfterFirst) {
-          matched = true;
-          stopRequested = true;
-          return;
-        }
+        return;
+      }
+      if (!reserveRequest()) return;
+      const requestedCursor = progress.commentCursor!;
+      const requestedPageNo = progress.commentPageNo!;
+      const requestStartedAt = Date.now();
+      const requestActivity = {
+        lane: lane.name,
+        operation: "comment-page" as const,
+        songId: song.id,
+        page: requestedPageNo,
+      };
+      publishRequestActivity(options, { ...requestActivity, phase: "start" });
+      let page;
+      try {
+        page = await lane.governor.execute(`comment_new:${song.id}`, () => {
+          publishSongProgress(options, song, requestedPageNo);
+          return lane.client.getSongCommentsByCursor(
+            song.id,
+            options.commentPageSize,
+            requestedPageNo,
+            requestedCursor,
+          );
+        });
+      } catch (error) {
+        const status = remoteStatus(error);
+        publishRequestActivity(options, {
+          ...requestActivity,
+          phase: "failure",
+          elapsedMs: Date.now() - requestStartedAt,
+          status,
+          rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
+          error: errorMessage(error),
+        });
+        if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
+        throw new SourceLaneFailure(lane.name, error);
+      }
+      publishRequestActivity(options, {
+        ...requestActivity,
+        phase: "success",
+        elapsedMs: Date.now() - requestStartedAt,
+        comments: page.comments.length,
+        hasMore: page.hasMore,
+      });
+
+      const nextCursor = nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}`);
+      progress.pageInSong += 1;
+      progress.commentOffset += page.comments.length;
+      progress.commentPageNo = requestedPageNo + 1;
+      state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
+      const matches = page.comments
+        .filter((comment) => comment.userId === options.uid)
+        .map<FoundComment>((comment) => ({
+          ...comment,
+          songId: song.id,
+          songName: song.name,
+          sources: song.sources,
+          sourceRank: song.sourceRank,
+          playCount: song.playCount,
+          route: "song-comments",
+          capturedAt: new Date().toISOString(),
+        }));
+      const added = await appendMatches(writer, state, seenCommentIds, matches);
+      if (nextCursor === undefined) {
+        progress.done = true;
+      } else if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
+        if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
+        progress.done = true;
+      } else {
+        progress.commentCursor = nextCursor;
       }
       syncSongCursor(state);
       await checkpoint();
+      if (added > 0 && options.stopAfterFirst) {
+        matched = true;
+        stopScheduling();
+      }
     };
 
     const runWorker = async (lane: SourceScanLane): Promise<void> => {
       while (!stopRequested && !blockedLanes.has(lane.name) && !failedLanes.has(lane.name)) {
-        const index = queue.shift();
+        const index = await queue.take();
         if (index === undefined) return;
+        let requeue = false;
         try {
-          await scanSong(lane, index);
-          if (!state.songProgress![index].done && !stopRequested) queue.push(index);
+          if (blockedLanes.has(lane.name) || failedLanes.has(lane.name)) {
+            requeue = !stopRequested;
+            return;
+          }
+          await scanSongPage(lane, index);
+          requeue = !state.songProgress![index].done && !stopRequested;
         } catch (error) {
           if (error instanceof CooldownRequired) {
             blockedLanes.set(lane.name, error.retryAfterMs);
-            if (!state.songProgress![index].done) queue.push(index);
-            if (blockedLanes.size + failedLanes.size === lanes.length) stopRequested = true;
+            requeue = !state.songProgress![index].done;
+            if (blockedLanes.size + failedLanes.size === lanes.length) {
+              requeue = false;
+              stopScheduling();
+            }
             return;
           }
           if (error instanceof SourceLaneFailure) {
             failedLanes.set(lane.name, errorMessage(error.original));
-            if (!state.songProgress![index].done) queue.push(index);
-            if (blockedLanes.size + failedLanes.size === lanes.length) stopRequested = true;
+            requeue = !state.songProgress![index].done;
+            if (blockedLanes.size + failedLanes.size === lanes.length) {
+              requeue = false;
+              stopScheduling();
+            }
             return;
           }
           if (error instanceof RequestBudgetExhausted) {
             budgetReached = true;
-            stopRequested = true;
+            stopScheduling();
             return;
           }
           if (error instanceof RunCancelled) {
             cancelled = true;
-            stopRequested = true;
+            stopScheduling();
             return;
           }
           fatalError = error;
-          stopRequested = true;
+          stopScheduling();
           return;
+        } finally {
+          queue.complete(requeue ? index : undefined);
         }
       }
     };
@@ -472,7 +515,7 @@ async function runSongScan(
         requestedCursor,
       );
     });
-    const nextCursor = nextCommentCursor(page.hasMore, page.nextCursor, requestedCursor, song.id);
+    const nextCursor = nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}`);
 
     const matches = page.comments
       .filter((comment) => comment.userId === options.uid)
@@ -752,21 +795,23 @@ function publishSongProgress(options: ScanOptions, song: SongCandidate, pageInSo
   }
 }
 
-function nextCommentCursor(
-  hasMore: boolean,
-  rawNextCursor: string | undefined,
-  requestedCursor: string,
-  songId: string,
-): string | undefined {
-  if (!hasMore) return undefined;
-  const current = Number(requestedCursor);
-  const next = Number(rawNextCursor);
-  if (!Number.isFinite(current) || !Number.isFinite(next) || next >= current) {
-    throw new Error(
-      `Comment cursor did not advance for song ${songId}; the checkpoint remains resumable.`,
-    );
+function publishRequestActivity(
+  options: ScanOptions,
+  activity: Parameters<NonNullable<ScanOptions["onRequestActivity"]>>[0],
+): void {
+  try {
+    options.onRequestActivity?.(activity);
+  } catch {
+    // Diagnostic logging must never interrupt the scan.
   }
-  return String(next);
+}
+
+function remoteStatus(error: unknown): number | undefined {
+  if (error instanceof CooldownRequired) return error.status;
+  if (!error || typeof error !== "object") return undefined;
+  const value = error as { status?: unknown; body?: { code?: unknown } };
+  if (typeof value.status === "number") return value.status;
+  return typeof value.body?.code === "number" ? value.body.code : undefined;
 }
 
 function estimateNote(state: ScanState, options: ScanOptions): string {

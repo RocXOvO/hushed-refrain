@@ -134,6 +134,8 @@ export interface ParallelSongScanOptions {
   statePath: string;
   outputPath: string;
   onMatch?: (comment: FoundComment) => void;
+  onRequestActivity?: (activity: ScanRequestActivity) => void;
+  onSchedulerActivity?: (activity: ScanSchedulerActivity) => void;
 }
 
 export interface ParallelSongScanReport {
@@ -224,12 +226,38 @@ export interface ScanOptions {
   dryRun: boolean;
   onMatch?: (comment: FoundComment) => void;
   onSongProgress?: (activity: SongScanActivity) => void;
+  onRequestActivity?: (activity: ScanRequestActivity) => void;
 }
 
 export interface SongScanActivity {
   songId: string;
   songName?: string;
   pageInSong: number;
+}
+
+export interface ScanRequestActivity {
+  phase: "start" | "success" | "failure";
+  lane: string;
+  operation: "comment-page";
+  songId: string;
+  page: number;
+  shardId?: number;
+  elapsedMs?: number;
+  comments?: number;
+  hasMore?: boolean;
+  status?: number;
+  rateLimited?: boolean;
+  error?: string;
+}
+
+export interface ScanSchedulerActivity {
+  type: "adaptive-split";
+  originalShardId: number;
+  newShardId: number;
+  splitAt: number;
+  remainingStart: number;
+  remainingEnd: number;
+  waitingWorkers: number;
 }
 
 export interface RunReport {

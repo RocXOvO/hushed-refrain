@@ -11,7 +11,9 @@ const el = {
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
+  logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
+  settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
   updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
@@ -37,6 +39,8 @@ let poolRotationIndex = -1;
 let resultStream;
 let resultMode = mode;
 let nativeUpdateState;
+let activeTaskMode;
+const settlementPending = { parallel: undefined, source: undefined };
 const visibleResults = new Map();
 const disclosureAnimations = new WeakMap();
 
@@ -58,7 +62,10 @@ async function startParallel() {
   try {
     const value = payload(el.parallelForm);
     value.fresh = $("#parallelFresh").checked;
-    renderParallel(await api("/api/parallel/job", { method: "POST", body: JSON.stringify(value) }));
+    const job = await api("/api/parallel/job", { method: "POST", body: JSON.stringify(value) });
+    activeTaskMode = ["running", "stopping"].includes(job.status) ? "parallel" : undefined;
+    settlementPending.parallel = job.id;
+    renderParallel(job);
     toast("并行扫描已启动");
   } catch (error) { toast(error.message); } finally { setBusy(false); }
 }
@@ -70,7 +77,10 @@ async function startSource(dryRun) {
     const value = payload(el.sourceForm);
     value.maxCommentPagesPerSong = value.maxPages; delete value.maxPages;
     value.fresh = $("#fresh").checked; value.dryRun = dryRun;
-    renderSource(await api("/api/job", { method: "POST", body: JSON.stringify(value) }));
+    const job = await api("/api/job", { method: "POST", body: JSON.stringify(value) });
+    activeTaskMode = ["running", "stopping"].includes(job.status) ? "source" : undefined;
+    settlementPending.source = job.id;
+    renderSource(job);
     toast(dryRun ? "正在读取候选歌曲" : "来源扫描已启动");
   } catch (error) { toast(error.message); } finally { setBusy(false); }
 }
@@ -120,11 +130,28 @@ async function togglePool() {
 
 async function refresh() {
   try {
-    const [job, pool] = await Promise.all([api(mode === "parallel" ? "/api/parallel/job" : "/api/job"), api("/api/pool")]);
+    const [parallelJob, sourceJob, pool] = await Promise.all([api("/api/parallel/job"), api("/api/job"), api("/api/pool")]);
+    activeTaskMode = ["running", "stopping"].includes(parallelJob.status)
+      ? "parallel"
+      : ["running", "stopping"].includes(sourceJob.status)
+      ? "source"
+      : undefined;
+    if (nativeUpdateState?.phase === "downloaded") {
+      setNativeUpdateAction(activeTaskMode ? "保存进度并重启" : "重启并安装");
+    }
+    observeTaskSettlement(parallelJob, "parallel");
+    observeTaskSettlement(sourceJob, "source");
+    const job = mode === "parallel" ? parallelJob : sourceJob;
     mode === "parallel" ? renderParallel(job) : renderSource(job);
+    const globallyActive = Boolean(activeTaskMode);
+    el.parallelStart.disabled = globallyActive;
+    el.sourceStart.disabled = globallyActive;
+    el.dryRun.disabled = globallyActive;
+    el.stop.disabled = !globallyActive;
     renderPool(pool);
     el.connection.classList.add("ready");
     if (job.matches !== knownMatches) { knownMatches = job.matches; await refreshResults(); }
+    if ($('.tab.active')?.dataset.tab === "logs") await refreshLogs();
   } catch (error) { el.connection.classList.remove("ready"); toast(error.message); }
 }
 
@@ -136,6 +163,7 @@ function renderParallel(job) {
   const percent = job.shards ? Math.min(100, Math.round(job.shardsComplete / job.shards * 100)) : 0;
   progress(percent, job.songId ? `${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个工作线程 · ${fmt(job.pagesProcessed)} 页` : "尚未开始", job.note || job.error);
   el.stop.disabled = !active; el.parallelStart.disabled = active;
+  observeTaskSettlement(job, "parallel");
 }
 
 function renderSource(job) {
@@ -150,9 +178,53 @@ function renderSource(job) {
   const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程`;
   progress(percent, `${current} · ${topology}`, [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "));
   el.stop.disabled = !active; el.sourceStart.disabled = active; el.dryRun.disabled = active;
+  observeTaskSettlement(job, "source");
 }
 
 function progress(percent, current, note) { el.bar.style.width = `${percent}%`; el.percent.textContent = `${percent}%`; el.current.textContent = current; el.note.hidden = !note; el.note.textContent = note || ""; }
+
+function observeTaskSettlement(job, jobMode) {
+  if (!job.id) return;
+  if (["running", "stopping"].includes(job.status)) {
+    settlementPending[jobMode] = job.id;
+    return;
+  }
+  if (job.status === "idle" || settlementPending[jobMode] !== job.id) return;
+  settlementPending[jobMode] = undefined;
+  renderSettlement(job, jobMode);
+}
+
+function renderSettlement(job, jobMode) {
+  const titles = { complete: "检索已完成", matched: "已找到目标评论", paused: "本轮扫描已暂停", cooldown: "扫描进入冷却", "dry-run": "候选歌曲读取完成", stopped: "任务已停止", error: "任务异常结束" };
+  const defaults = {
+    complete: "所选范围已处理完成。",
+    matched: "已命中目标评论。",
+    paused: "检查点已保存，可以使用相同参数继续。",
+    cooldown: job.blockedUntil ? `远端风控/限流，建议在 ${date(job.blockedUntil)} 后继续。` : "远端返回风控/限流信号，检查点已保存。",
+    "dry-run": "只读取了候选歌曲，未扫描评论。",
+    stopped: "已按要求停止，当前进度可续跑。",
+    error: "任务未正常完成，请查看运行日志。",
+  };
+  el.settlementDialog.dataset.mode = jobMode;
+  el.settlementTitle.textContent = titles[job.status] || "任务已结束";
+  el.settlementStatus.textContent = statusLabels[job.status] || job.status;
+  el.settlementContext.textContent = jobMode === "parallel"
+    ? `${job.songName || `歌曲 ${job.songId || "-"}`} · UID ${job.uid || "-"}`
+    : `UID ${job.uid || "-"} · ${sourceName(job.source)}`;
+  el.settlementElapsed.textContent = duration(Math.round(Number(job.elapsedMs || 0) / 1000));
+  el.settlementMatches.textContent = fmt(job.matches);
+  el.settlementPages.textContent = fmt(job.pagesProcessed);
+  el.settlementRequests.textContent = fmt(job.requestsTotal);
+  el.settlementNote.textContent = [job.note, job.error, ...(job.sourceErrors || []), defaults[job.status]].filter(Boolean).join(" · ");
+  el.settlementLogPath.textContent = job.logPath || "未生成日志文件";
+  if (!el.settlementDialog.open) el.settlementDialog.showModal();
+}
+
+function openTaskTab(tabName) {
+  const tab = $(`.tab[data-tab="${tabName}"]`);
+  if (tab && !tab.classList.contains("active")) tab.click();
+  panelForTab(tabName)?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+}
 
 function renderPool(pool) {
   if (!poolSourceInitialized && pool.source) {
@@ -284,6 +356,42 @@ async function refreshResults() {
     renderResults();
   }
   catch (error) { toast(error.message); }
+}
+
+async function refreshLogs() {
+  const requestedMode = mode;
+  try {
+    const data = await api(`/api/logs?mode=${encodeURIComponent(requestedMode)}&limit=200`);
+    if (requestedMode !== mode) return;
+    el.logPath.textContent = data.path || "任务启动后将在本地生成结构化日志。";
+    el.logs.replaceChildren(...(data.entries.length ? data.entries.map(logRow) : [emptyLogRow()]));
+  } catch (error) {
+    toast(`读取日志失败：${error.message}`);
+  }
+}
+
+function logRow(entry) {
+  const row = document.createElement("tr");
+  appendTextCell(row, entry.timestamp ? date(entry.timestamp) : "-");
+  const levelCell = document.createElement("td");
+  const level = document.createElement("span");
+  level.className = `log-level ${entry.level || "info"}`;
+  level.textContent = entry.level || "info";
+  levelCell.append(level);
+  row.append(levelCell);
+  appendTextCell(row, ({ page_start: "请求开始", page_success: "读取成功", page_failure: "读取失败", rate_limited: "风控/限流", adaptive_split: "自适应拆分", resume_descriptor_failure: "续跑参数警告", task_started: "任务启动", task_finished: "任务结束", task_error: "任务异常" })[entry.event] || entry.event || "-");
+  appendTextCell(row, entry.message || "-");
+  return row;
+}
+
+function emptyLogRow() {
+  const row = document.createElement("tr");
+  row.className = "empty-row";
+  const cell = document.createElement("td");
+  cell.colSpan = 4;
+  cell.textContent = "暂无日志";
+  row.append(cell);
+  return row;
 }
 
 function connectResultStream() {
@@ -432,7 +540,15 @@ async function refreshEstimate(reportInvalid = true) {
 function tableRow(values) { const row = document.createElement("tr"); values.forEach((value) => appendTextCell(row, value)); return row; }
 function emptyRow() { const row = document.createElement("tr"); row.className = "empty-row"; const cell = document.createElement("td"); cell.colSpan = 5; cell.textContent = "暂无命中"; row.append(cell); return row; }
 
-async function stopJob() { try { mode === "parallel" ? renderParallel(await api("/api/parallel/job/stop", { method: "POST", body: "{}" })) : renderSource(await api("/api/job/stop", { method: "POST", body: "{}" })); } catch (error) { toast(error.message); } }
+async function stopJob() {
+  try {
+    const targetMode = activeTaskMode || mode;
+    const job = await api(targetMode === "parallel" ? "/api/parallel/job/stop" : "/api/job/stop", { method: "POST", body: "{}" });
+    targetMode === "parallel" ? renderParallel(job) : renderSource(job);
+    if (targetMode !== mode) toast(`已停止${targetMode === "parallel" ? "单曲并行" : "用户来源"}任务`);
+    void refresh();
+  } catch (error) { toast(error.message); }
+}
 async function refreshAuth() { try { const auth = await api("/api/auth"); el.connection.innerHTML = `<span class="status-dot"></span>${auth.cookiePresent ? "会话已登录" : "本地服务"}`; el.login.querySelector("span").textContent = auth.cookiePresent ? "更新登录" : "二维码登录"; if (el.qrDialog.open) renderAuth(auth); } catch {} }
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
@@ -522,7 +638,7 @@ function renderWindowsUpdate(state) {
   } else if (state.phase === "downloaded") {
     el.updateAsset.textContent = "安装包下载并校验完成。重启客户端后将静默安装并自动打开新版。";
     renderUpdateProgress(state);
-    setNativeUpdateAction("重启并安装");
+    setNativeUpdateAction(activeTaskMode ? "保存进度并重启" : "重启并安装");
     if (!el.updateDialog.open) el.updateDialog.showModal();
   } else if (state.phase === "error") {
     el.updateAsset.textContent = `更新失败：${state.error || "未知错误"}`;
@@ -566,14 +682,34 @@ async function activateUpdate(event) {
     if (nativeUpdateState.phase === "available") {
       renderWindowsUpdate(await window.ncmDesktop.downloadUpdate());
     } else if (nativeUpdateState.phase === "downloaded") {
+      await prepareTaskForUpdate();
       setNativeUpdateAction("正在重启…", true);
       await window.ncmDesktop.installUpdate();
     } else {
       renderWindowsUpdate(await window.ncmDesktop.checkForUpdates());
     }
   } catch (error) {
+    if (nativeUpdateState) renderWindowsUpdate(nativeUpdateState);
     toast(`更新失败：${error.message}`);
   }
+}
+
+async function prepareTaskForUpdate() {
+  const taskMode = activeTaskMode;
+  if (!taskMode) return;
+  setNativeUpdateAction("正在保存扫描进度…", true);
+  const base = taskMode === "parallel" ? "/api/parallel/job" : "/api/job";
+  await api(`${base}/stop`, { method: "POST", body: "{}" });
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    const job = await api(base);
+    if (!["running", "stopping"].includes(job.status)) {
+      activeTaskMode = undefined;
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error("等待扫描检查点落盘超时，已取消安装；请稍后重试。");
 }
 
 async function setupDesktopUpdates() {
@@ -583,6 +719,42 @@ async function setupDesktopUpdates() {
   if (!state?.supported) return;
   renderWindowsUpdate(state);
   desktop.onUpdateState((next) => renderWindowsUpdate(next));
+}
+
+async function restoreResumeTask() {
+  try {
+    const descriptor = (await api("/api/resume")).task;
+    if (!descriptor || !["parallel", "source"].includes(descriptor.mode)) return false;
+    const form = descriptor.mode === "parallel" ? el.parallelForm : el.sourceForm;
+    const allowed = descriptor.mode === "parallel"
+      ? new Set(["uid", "songId", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs"])
+      : new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy"]);
+    for (const [savedName, value] of Object.entries(descriptor.input || {})) {
+      if (!allowed.has(savedName)) continue;
+      const name = savedName === "maxCommentPagesPerSong" ? "maxPages" : savedName;
+      const control = form.elements.namedItem(name);
+      if (!control) continue;
+      if (control instanceof RadioNodeList) {
+        for (const item of control) item.checked = item.value === String(value);
+      } else {
+        control.value = String(value);
+      }
+    }
+    mode = descriptor.mode;
+    document.body.dataset.mode = mode;
+    for (const input of $$('input[name="mode"]')) input.checked = input.value === mode;
+    el.parallelForm.hidden = mode !== "parallel";
+    el.parallelForm.setAttribute("aria-hidden", String(mode !== "parallel"));
+    el.sourceForm.hidden = mode !== "source";
+    el.sourceForm.setAttribute("aria-hidden", String(mode !== "source"));
+    $("#parallelFresh").checked = false;
+    $("#fresh").checked = false;
+    const source = el.sourceForm.elements.namedItem("source")?.value;
+    $("#recordScopeField").hidden = source === "likes";
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function switchMode(value) {
@@ -596,6 +768,7 @@ async function switchMode(value) {
   knownMatches = -1;
   void refresh(); void refreshResults();
   if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
+  if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
 }
 async function switchPoolSource(value) {
   if (value === poolSource) return;
@@ -696,7 +869,7 @@ async function setupDesktopWindowControls() {
   renderMaximized(await desktop.isMaximized());
 }
 
-function setBusy(value) { el.parallelStart.disabled = value; el.sourceStart.disabled = value; el.dryRun.disabled = value; }
+function setBusy(value) { const disabled = value || Boolean(activeTaskMode); el.parallelStart.disabled = disabled; el.sourceStart.disabled = disabled; el.dryRun.disabled = disabled; }
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
@@ -704,7 +877,7 @@ function dateOnly(value) { return new Intl.DateTimeFormat("zh-CN", { year: "nume
 function duration(seconds) { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [days ? `${days}天` : "", hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", rest && !days ? `${rest}秒` : ""].filter(Boolean).join(" ") || "0秒"; }
 function fileSize(bytes) { return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`; }
 function shortPath(value) { if (!value) return ""; const parts = value.split(/[\\/]/); return parts.slice(-3).join("/"); }
-function panelForTab(value) { return $({ results: "#resultsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
+function panelForTab(value) { return $({ results: "#resultsPanel", logs: "#logsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value; return node.innerHTML; }
 function toast(message) { clearTimeout(toastTimer); el.toast.textContent = message; el.toast.hidden = false; toastTimer = setTimeout(() => { el.toast.hidden = true; }, 4500); }
 
@@ -719,10 +892,12 @@ function dismissSplash() {
 }
 
 async function boot() {
-  connectResultStream();
   await setupDesktopUpdates();
+  const restored = await restoreResumeTask();
+  connectResultStream();
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
   dismissSplash();
+  if (restored) toast("已恢复上次任务参数；保持“新建状态”关闭即可从检查点继续。");
   void checkUpdates(false);
 }
 
@@ -737,6 +912,9 @@ $$('[data-open-uid-help]').forEach((button) => button.addEventListener("click", 
 $("#closeUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
 $("#gotUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
+$("#closeSettlementButton").addEventListener("click", () => el.settlementDialog.close());
+$("#viewSettlementLogsButton").addEventListener("click", () => { el.settlementDialog.close(); openTaskTab("logs"); void refreshLogs(); });
+$("#viewSettlementResultsButton").addEventListener("click", () => { el.settlementDialog.close(); openTaskTab("results"); });
 el.updateButton.addEventListener("click", () => void checkUpdates(true));
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
 $("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
@@ -744,7 +922,7 @@ el.updateDownload.addEventListener("click", (event) => void activateUpdate(event
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
-$$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) return; const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); }));
+$$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) { if (tab.dataset.tab === "logs") void refreshLogs(); return; } const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); if (tab.dataset.tab === "logs") void refreshLogs(); }));
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
 void boot(); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);
 addEventListener("pagehide", () => { resultStream?.close(); stopPoolRotation(); });

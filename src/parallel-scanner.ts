@@ -7,6 +7,8 @@ import {
 } from "./errors";
 import { RequestGovernor } from "./governor";
 import { JsonlResultWriter } from "./results";
+import { nextDescendingCursor } from "./cursor-pagination";
+import { AsyncWorkQueue } from "./work-queue";
 import type {
   CommentTimeShard,
   FoundComment,
@@ -70,9 +72,11 @@ export async function runParallelSongScan(
     );
   }
 
-  const queue = state.shards
-    .filter((shard) => !shard.done)
-    .sort((left, right) => right.endTime - left.endTime);
+  const queue = new AsyncWorkQueue(
+    state.shards
+      .filter((shard) => !shard.done)
+      .sort((left, right) => right.endTime - left.endTime),
+  );
   const blockedLanes = new Set<string>();
   const failedLanes = new Map<string, string>();
   const initialPages = state.pagesProcessed;
@@ -82,156 +86,237 @@ export async function runParallelSongScan(
   let budgetReached = false;
   let cancelled = false;
   let fatalError: unknown;
+  let nextShardId = state.shards.reduce((maximum, shard) => Math.max(maximum, shard.id), -1) + 1;
+
+  const stopScheduling = (): void => {
+    stopRequested = true;
+    queue.stop();
+  };
 
   const reserveRequest = (): boolean => {
     if (stopRequested) return false;
     if (options.maxPages > 0 && initialPages + scheduledRequests >= options.maxPages) {
       budgetReached = true;
-      stopRequested = true;
+      stopScheduling();
       return false;
     }
     if (options.requestBudget > 0 && scheduledRequests >= options.requestBudget) {
       budgetReached = true;
-      stopRequested = true;
+      stopScheduling();
       return false;
     }
     scheduledRequests += 1;
     return true;
   };
 
-  const scanShard = async (
+  const scanShardPage = async (
     lane: ParallelCommentLane,
     shard: CommentTimeShard,
-  ): Promise<void> => {
-    while (!stopRequested && !shard.done) {
-      if (!reserveRequest()) return;
+  ): Promise<CommentTimeShard[]> => {
+    if (stopRequested || shard.done || !reserveRequest()) return [];
 
-      const requestedCursor = shard.cursor;
-      let page;
-      try {
-        page = await lane.governor.execute(
-          `comment_new:${options.songId}:shard-${shard.id}`,
-          () => lane.client.getSongCommentsByCursor(
-            options.songId,
-            options.pageSize,
-            shard.pageNo,
-            requestedCursor,
-          ),
-        );
-      } catch (error) {
-        if (
-          error instanceof CooldownRequired ||
-          error instanceof RequestBudgetExhausted ||
-          error instanceof RunCancelled
-        ) {
-          throw error;
-        }
-        throw new LaneRequestFailure(lane.name, error);
-      }
-
-      shard.pagesProcessed += 1;
-      shard.pageNo += 1;
-      state.pagesProcessed += 1;
-
-      const rangedComments = page.comments.filter((comment) =>
-        comment.time !== undefined &&
-        comment.time >= shard.startTime &&
-        comment.time < shard.endTime
+    const requestedCursor = shard.cursor;
+    const requestStartedAt = Date.now();
+    const requestActivity = {
+      lane: lane.name,
+      operation: "comment-page" as const,
+      songId: options.songId,
+      page: shard.pageNo,
+      shardId: shard.id,
+    };
+    publishRequestActivity(options, { ...requestActivity, phase: "start" });
+    let page;
+    try {
+      page = await lane.governor.execute(
+        `comment_new:${options.songId}:shard-${shard.id}`,
+        () => lane.client.getSongCommentsByCursor(
+          options.songId,
+          options.pageSize,
+          shard.pageNo,
+          requestedCursor,
+        ),
       );
-      state.commentsInspected += rangedComments.length;
-
-      for (const comment of rangedComments) {
-        if (comment.userId !== options.uid) continue;
-        if (options.stopAfterFirst && matched) break;
-        if (seenCommentIds.has(comment.commentId)) {
-          if (options.stopAfterFirst) {
-            matched = true;
-            stopRequested = true;
-          }
-          continue;
-        }
-        if (writer.has(comment.commentId)) {
-          state.seenCommentIds.push(comment.commentId);
-          seenCommentIds.add(comment.commentId);
-          state.matchCount += 1;
-          if (options.stopAfterFirst) {
-            matched = true;
-            stopRequested = true;
-          }
-          continue;
-        }
-        if (options.stopAfterFirst) matched = true;
-        const record: FoundComment = {
-          ...comment,
-          songId: options.songId,
-          songName: options.songName,
-          route: "song-comments",
-          capturedAt: new Date().toISOString(),
-        };
-        if (await writer.append(record)) {
-          state.seenCommentIds.push(comment.commentId);
-          seenCommentIds.add(comment.commentId);
-          state.matchCount += 1;
-        }
-        if (options.stopAfterFirst) {
-          stopRequested = true;
-          break;
-        }
-      }
-
-      const times = page.comments
-        .map((comment) => comment.time)
-        .filter((time): time is number => time !== undefined);
-      const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
-      const nextCursor = Number(page.nextCursor);
-      const cursorAdvanced = Number.isFinite(nextCursor) && nextCursor < Number(requestedCursor);
+    } catch (error) {
+      const status = remoteStatus(error);
+      publishRequestActivity(options, {
+        ...requestActivity,
+        phase: "failure",
+        elapsedMs: Date.now() - requestStartedAt,
+        status,
+        rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
+        error: errorMessage(error),
+      });
       if (
-        !page.hasMore ||
-        page.comments.length === 0 ||
-        (oldestTime !== undefined && oldestTime < shard.startTime) ||
-        !cursorAdvanced
+        error instanceof CooldownRequired ||
+        error instanceof RequestBudgetExhausted ||
+        error instanceof RunCancelled
       ) {
-        shard.done = true;
-      } else {
-        shard.cursor = String(nextCursor);
+        throw error;
       }
-      await checkpoint();
+      throw new LaneRequestFailure(lane.name, error);
     }
+    publishRequestActivity(options, {
+      ...requestActivity,
+      phase: "success",
+      elapsedMs: Date.now() - requestStartedAt,
+      comments: page.comments.length,
+      hasMore: page.hasMore,
+    });
+
+    const times = page.comments
+      .map((comment) => comment.time)
+      .filter((time): time is number => time !== undefined);
+    const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
+    const crossedShardStart = oldestTime !== undefined && oldestTime < shard.startTime;
+    const nextCursor = crossedShardStart
+      ? undefined
+      : nextDescendingCursor(
+        page.hasMore,
+        page.nextCursor,
+        requestedCursor,
+        `parallel shard ${shard.id} for song ${options.songId}`,
+      );
+
+    shard.pagesProcessed += 1;
+    shard.pageNo += 1;
+    state.pagesProcessed += 1;
+
+    const rangedComments = page.comments.filter((comment) =>
+      comment.time !== undefined &&
+      comment.time >= shard.startTime &&
+      comment.time < shard.endTime
+    );
+    state.commentsInspected += rangedComments.length;
+
+    for (const comment of rangedComments) {
+      if (comment.userId !== options.uid) continue;
+      if (options.stopAfterFirst && matched) break;
+      if (seenCommentIds.has(comment.commentId)) {
+        if (options.stopAfterFirst) {
+          matched = true;
+          stopScheduling();
+        }
+        continue;
+      }
+      if (writer.has(comment.commentId)) {
+        state.seenCommentIds.push(comment.commentId);
+        seenCommentIds.add(comment.commentId);
+        state.matchCount += 1;
+        if (options.stopAfterFirst) {
+          matched = true;
+          stopScheduling();
+        }
+        continue;
+      }
+      if (options.stopAfterFirst) matched = true;
+      const record: FoundComment = {
+        ...comment,
+        songId: options.songId,
+        songName: options.songName,
+        route: "song-comments",
+        capturedAt: new Date().toISOString(),
+      };
+      if (await writer.append(record)) {
+        state.seenCommentIds.push(comment.commentId);
+        seenCommentIds.add(comment.commentId);
+        state.matchCount += 1;
+      }
+      if (options.stopAfterFirst) {
+        stopScheduling();
+        break;
+      }
+    }
+
+    const numericNextCursor = nextCursor === undefined ? undefined : Number(nextCursor);
+    const cursorPassedShardStart = numericNextCursor !== undefined && numericNextCursor <= shard.startTime;
+    let nextWork: CommentTimeShard[] = [];
+    if (crossedShardStart || nextCursor === undefined || cursorPassedShardStart) {
+      shard.done = true;
+    } else {
+      shard.cursor = nextCursor;
+      const waitingWorkers = queue.waitingCount();
+      const splitAt = Math.floor((shard.startTime + numericNextCursor!) / 2);
+      if (waitingWorkers > 0 && splitAt > shard.startTime && splitAt < numericNextCursor!) {
+        const remainingStart = shard.startTime;
+        const remainingEnd = numericNextCursor!;
+        const sibling: CommentTimeShard = {
+          id: nextShardId,
+          startTime: remainingStart,
+          endTime: splitAt,
+          cursor: String(splitAt),
+          pageNo: 2,
+          pagesProcessed: 0,
+          done: false,
+        };
+        nextShardId += 1;
+        shard.startTime = splitAt;
+        shard.endTime = remainingEnd;
+        shard.cursor = String(remainingEnd);
+        shard.pageNo = 2;
+        state.shards.push(sibling);
+        publishSchedulerActivity(options, {
+          type: "adaptive-split",
+          originalShardId: shard.id,
+          newShardId: sibling.id,
+          splitAt,
+          remainingStart,
+          remainingEnd,
+          waitingWorkers,
+        });
+        nextWork = [shard, sibling];
+      } else {
+        nextWork = [shard];
+      }
+    }
+    await checkpoint();
+    return stopRequested ? [] : nextWork;
   };
 
   const runWorker = async (lane: ParallelCommentLane): Promise<void> => {
     while (!stopRequested && !blockedLanes.has(lane.name) && !failedLanes.has(lane.name)) {
-      const shard = queue.shift();
+      const shard = await queue.take();
       if (!shard) return;
+      let requeue: CommentTimeShard[] = [];
       try {
-        await scanShard(lane, shard);
-        if (!shard.done && !stopRequested) queue.push(shard);
+        if (blockedLanes.has(lane.name) || failedLanes.has(lane.name)) {
+          requeue = stopRequested ? [] : [shard];
+          return;
+        }
+        requeue = await scanShardPage(lane, shard);
       } catch (error) {
         if (error instanceof CooldownRequired) {
           blockedLanes.add(lane.name);
-          if (!shard.done) queue.push(shard);
-          if (blockedLanes.size + failedLanes.size === lanes.length) stopRequested = true;
+          requeue = shard.done ? [] : [shard];
+          if (blockedLanes.size + failedLanes.size === lanes.length) {
+            requeue = [];
+            stopScheduling();
+          }
           return;
         }
         if (error instanceof LaneRequestFailure) {
           failedLanes.set(lane.name, errorMessage(error.original));
-          if (!shard.done) queue.push(shard);
-          if (blockedLanes.size + failedLanes.size === lanes.length) stopRequested = true;
+          requeue = shard.done ? [] : [shard];
+          if (blockedLanes.size + failedLanes.size === lanes.length) {
+            requeue = [];
+            stopScheduling();
+          }
           return;
         }
         if (error instanceof RequestBudgetExhausted) {
           budgetReached = true;
-          stopRequested = true;
+          stopScheduling();
           return;
         }
         if (error instanceof RunCancelled) {
           cancelled = true;
-          stopRequested = true;
+          stopScheduling();
           return;
         }
         fatalError = error;
-        stopRequested = true;
+        stopScheduling();
         return;
+      } finally {
+        queue.complete(requeue.length > 0 ? requeue : undefined);
       }
     }
   };
@@ -251,7 +336,7 @@ export async function runParallelSongScan(
     ? "complete"
     : cancelled
     ? "stopped"
-    : blockedLanes.size > 0 && blockedLanes.size === lanes.length
+    : blockedLanes.size > 0 && blockedLanes.size + failedLanes.size === lanes.length
     ? "cooldown"
     : "paused";
   const note = budgetReached
@@ -268,6 +353,36 @@ export async function runParallelSongScan(
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function publishRequestActivity(
+  options: ParallelSongScanOptions,
+  activity: Parameters<NonNullable<ParallelSongScanOptions["onRequestActivity"]>>[0],
+): void {
+  try {
+    options.onRequestActivity?.(activity);
+  } catch {
+    // Diagnostic logging must never interrupt the scan.
+  }
+}
+
+function publishSchedulerActivity(
+  options: ParallelSongScanOptions,
+  activity: Parameters<NonNullable<ParallelSongScanOptions["onSchedulerActivity"]>>[0],
+): void {
+  try {
+    options.onSchedulerActivity?.(activity);
+  } catch {
+    // Diagnostic logging must never interrupt the scan.
+  }
+}
+
+function remoteStatus(error: unknown): number | undefined {
+  if (error instanceof CooldownRequired) return error.status;
+  if (!error || typeof error !== "object") return undefined;
+  const value = error as { status?: unknown; body?: { code?: unknown } };
+  if (typeof value.status === "number") return value.status;
+  return typeof value.body?.code === "number" ? value.body.code : undefined;
 }
 
 export function createTimeShards(

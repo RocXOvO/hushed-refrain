@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { dirname, extname, join, resolve, sep } from "node:path";
 import { EnhancedNcmClient, type NcmUserProfile } from "./api";
@@ -28,6 +28,8 @@ import {
 } from "./parallel-scanner";
 import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
 import { loadState } from "./state";
+import { taskElapsedMs, TaskCoordinator } from "./task-coordinator";
+import { readTaskLog, TaskLogger } from "./task-log";
 import type {
   FoundComment,
   ParallelSongScanReport,
@@ -57,6 +59,14 @@ interface RuntimePaths {
   qr: string;
   pool: string;
   poolWork: string;
+  resumeTask: string;
+}
+
+interface ResumeTaskDescriptor {
+  version: 1;
+  mode: "source" | "parallel";
+  updatedAt: string;
+  input: Record<string, string | number | boolean>;
 }
 
 type JobStatus = "idle" | "running" | "stopping" | RunReport["status"] | "error";
@@ -76,6 +86,8 @@ interface JobSnapshot {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  elapsedMs: number;
+  logPath?: string;
   lanes: number;
   workers: number;
   coverageComplete: boolean;
@@ -103,6 +115,7 @@ interface ParallelJobSnapshot {
   matches: number;
   requestsTotal: number;
   elapsedMs: number;
+  logPath?: string;
   note?: string;
   error?: string;
 }
@@ -188,12 +201,17 @@ class JobManager {
   private outputPath?: string;
   private readonly matchSubscribers = new Set<MatchSubscriber>();
 
-  constructor(private readonly paths: RuntimePaths) {}
+  constructor(
+    private readonly paths: RuntimePaths,
+    private readonly coordinator: TaskCoordinator,
+  ) {}
 
   async start(input: StartJobInput): Promise<JobSnapshot> {
-    if (["running", "stopping"].includes(this.snapshotValue.status)) {
-      throw new HttpError(409, "已有任务正在运行。");
-    }
+    const lease = this.coordinator.acquire("source");
+    if (!lease) throw new HttpError(409, busyTaskMessage(this.coordinator));
+    const startedAt = new Date().toISOString();
+    let launched = false;
+    try {
     const uid = numericId(input.uid, "UID");
     const source = selection(input.source, ["record", "likes", "both"] as const, "source");
     const recordScope = selection(input.recordScope ?? "all", ["all", "week"] as const, "recordScope");
@@ -225,6 +243,11 @@ class JobManager {
       }),
     }));
     const activeId = randomUUID();
+    const logger = new TaskLogger(
+      join(this.paths.data, "logs", `source-${activeId}.jsonl`),
+      "source",
+      activeId,
+    );
     const options: ScanOptions = {
       uid,
       strategy: "scan",
@@ -241,6 +264,7 @@ class JobManager {
       fresh: bool(input.fresh),
       dryRun: bool(input.dryRun),
       onMatch: (comment) => this.publishMatch(comment),
+      onRequestActivity: (activity) => logger.request(activity),
       onSongProgress: (activity) => {
         if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
         this.snapshotValue = {
@@ -255,12 +279,55 @@ class JobManager {
     };
     this.snapshotValue = {
       ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
-      startedAt: new Date().toISOString(), proxyEnabled: poolEntries.length > 0 || Boolean(proxy),
+      startedAt, proxyEnabled: poolEntries.length > 0 || Boolean(proxy),
       lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
+      logPath: logger.path,
     };
+    await logger.write("info", "task_started", "用户来源扫描已启动。", {
+      uid,
+      source,
+      recordScope,
+      pageSize: commentPageSize,
+      lanes: this.lanes.length,
+      workers: this.lanes.length * workersPerLane,
+      requestBudget,
+    });
+    try {
+      await saveResumeTask(this.paths.resumeTask, {
+        version: 1,
+        mode: "source",
+        updatedAt: new Date().toISOString(),
+        input: {
+          uid,
+          source,
+          recordScope,
+          pageSize: commentPageSize,
+          requestBudget,
+          minDelayMs,
+          jitterMs,
+          forbiddenCooldownMs,
+          maxCommentPagesPerSong,
+          maxSongs,
+          workersPerProxy: workersPerLane,
+        },
+      });
+    } catch (error) {
+      await logger.write("warn", "resume_descriptor_failure", "未能保存任务参数；扫描检查点仍会正常写入。", {
+        error: message(error),
+      });
+    }
     void runPooledCommentFinder(this.lanes, { ...options, workersPerLane, requestBudget })
-      .then((report) => {
+      .then(async (report) => {
         if (this.snapshotValue.id !== activeId) return;
+        await logger.write("info", "task_finished", `用户来源扫描结束：${report.status}。`, {
+          status: report.status,
+          matches: report.matches,
+          requestsTotal: report.requestsTotal,
+          pagesProcessed: report.pagesProcessed ?? 0,
+          coverageComplete: report.coverageComplete,
+          sourceErrors: report.sourceErrors,
+          note: report.note,
+        });
         this.snapshotValue = {
           ...this.snapshotValue, status: report.status, finishedAt: new Date().toISOString(),
           songs: report.songs, songsProcessed: report.songsProcessed, matches: report.matches,
@@ -271,9 +338,19 @@ class JobManager {
           currentSong: undefined,
         };
       })
-      .catch((error) => this.fail(activeId, error))
-      .finally(() => { if (this.snapshotValue.id === activeId) this.lanes = []; });
+      .catch(async (error) => {
+        await logger.write("error", "task_error", `用户来源扫描异常结束：${message(error)}`, { error: message(error) });
+        this.fail(activeId, error);
+      })
+      .finally(() => {
+        if (this.snapshotValue.id === activeId) this.lanes = [];
+        lease.release();
+      });
+    launched = true;
     return this.status();
+    } finally {
+      if (!launched) lease.release();
+    }
   }
 
   async stop(): Promise<JobSnapshot> {
@@ -310,10 +387,17 @@ class JobManager {
         };
       }
     }
+    this.snapshotValue.elapsedMs = taskElapsedMs(
+      this.snapshotValue.startedAt,
+      this.snapshotValue.finishedAt,
+    );
     return { ...this.snapshotValue, sourceErrors: [...this.snapshotValue.sourceErrors] };
   }
 
   results(limit: number): Promise<FoundComment[]> { return readJsonl(this.outputPath, limit); }
+  async logs(limit: number): Promise<{ path?: string; entries: Awaited<ReturnType<typeof readTaskLog>> }> {
+    return { path: this.snapshotValue.logPath, entries: await readTaskLog(this.snapshotValue.logPath, limit) };
+  }
 
   subscribeMatches(subscriber: MatchSubscriber): () => void {
     this.matchSubscribers.add(subscriber);
@@ -339,12 +423,17 @@ class ParallelJobManager {
   private outputPath?: string;
   private readonly matchSubscribers = new Set<MatchSubscriber>();
 
-  constructor(private readonly paths: RuntimePaths) {}
+  constructor(
+    private readonly paths: RuntimePaths,
+    private readonly coordinator: TaskCoordinator,
+  ) {}
 
   async start(input: StartParallelInput): Promise<ParallelJobSnapshot> {
-    if (["running", "stopping"].includes(this.snapshotValue.status)) {
-      throw new HttpError(409, "已有单曲并行任务正在运行。");
-    }
+    const lease = this.coordinator.acquire("parallel");
+    if (!lease) throw new HttpError(409, busyTaskMessage(this.coordinator));
+    const startedAt = new Date().toISOString();
+    let launched = false;
+    try {
     const uid = numericId(input.uid, "UID");
     const songId = numericId(input.songId, "歌曲 ID");
     const workersPerLane = integer(input.workersPerProxy ?? 3, "workersPerProxy", 1, 16);
@@ -371,29 +460,87 @@ class ParallelJobManager {
     const previous = bool(input.fresh) ? undefined : await loadParallelState(previousPath);
     this.statePath = previousPath;
     this.outputPath = join(this.paths.data, `parallel-comments-${uid}-${songId}.jsonl`);
+    const activeId = randomUUID();
+    const logger = new TaskLogger(
+      join(this.paths.data, "logs", `parallel-${activeId}.jsonl`),
+      "parallel",
+      activeId,
+    );
     this.snapshotValue = {
-      ...emptyParallelSnapshot(), id: randomUUID(), status: "running", uid, songId,
-      songName: song.name, startedAt: new Date().toISOString(), lanes: this.lanes.length,
+      ...emptyParallelSnapshot(), id: activeId, status: "running", uid, songId,
+      songName: song.name, startedAt, lanes: this.lanes.length,
       workers: this.lanes.length * workersPerLane, shards: shardCount,
+      logPath: logger.path,
     };
-    const activeId = this.snapshotValue.id;
+    await logger.write("info", "task_started", "单曲并行扫描已启动。", {
+      uid,
+      songId,
+      songName: song.name,
+      pageSize,
+      shards: shardCount,
+      lanes: this.lanes.length,
+      workers: this.lanes.length * workersPerLane,
+      requestBudget,
+    });
+    try {
+      await saveResumeTask(this.paths.resumeTask, {
+        version: 1,
+        mode: "parallel",
+        updatedAt: new Date().toISOString(),
+        input: {
+          uid,
+          songId,
+          workersPerProxy: workersPerLane,
+          shards: shardCount,
+          pageSize,
+          requestBudget,
+          maxPages,
+          minDelayMs,
+          jitterMs,
+          forbiddenCooldownMs,
+        },
+      });
+    } catch (error) {
+      await logger.write("warn", "resume_descriptor_failure", "未能保存任务参数；扫描检查点仍会正常写入。", {
+        error: message(error),
+      });
+    }
     void runParallelSongScan(this.lanes, {
       uid, songId, songName: song.name, startTime: previous?.startTime ?? song.publishTime ?? Date.UTC(2000, 0, 1),
       endTime: previous?.endTime ?? Date.now(), shardCount, pageSize, workersPerLane,
       requestBudget, maxPages, stopAfterFirst: false,
       fresh: bool(input.fresh), statePath: this.statePath, outputPath: this.outputPath,
       onMatch: (comment) => this.publishMatch(comment),
-    }).then((report) => {
+      onRequestActivity: (activity) => logger.request(activity),
+      onSchedulerActivity: (activity) => logger.scheduler(activity),
+    }).then(async (report) => {
       if (this.snapshotValue.id !== activeId) return;
+      await logger.write("info", "task_finished", `单曲并行扫描结束：${report.status}。`, {
+        status: report.status,
+        matches: report.matches,
+        requestsTotal: report.requestsTotal,
+        pagesProcessed: report.pagesProcessed,
+        commentsInspected: report.commentsInspected,
+        shardsComplete: report.shardsComplete,
+        note: report.note,
+      });
       this.snapshotValue = {
         ...this.snapshotValue, ...report, status: report.status,
         finishedAt: new Date().toISOString(), note: report.note,
       };
-    }).catch((error) => {
+    }).catch(async (error) => {
+      await logger.write("error", "task_error", `单曲并行扫描异常结束：${message(error)}`, { error: message(error) });
       if (this.snapshotValue.id !== activeId) return;
       this.snapshotValue = { ...this.snapshotValue, status: "error", finishedAt: new Date().toISOString(), error: message(error) };
-    }).finally(() => { if (this.snapshotValue.id === activeId) this.lanes = []; });
+    }).finally(() => {
+      if (this.snapshotValue.id === activeId) this.lanes = [];
+      lease.release();
+    });
+    launched = true;
     return this.status();
+    } finally {
+      if (!launched) lease.release();
+    }
   }
 
   async stop(): Promise<ParallelJobSnapshot> {
@@ -412,14 +559,20 @@ class ParallelJobManager {
           shardsComplete: state.shards.filter((item) => item.done).length,
           pagesProcessed: state.pagesProcessed, commentsInspected: state.commentsInspected,
           matches: state.matchCount, requestsTotal: state.requestCount,
-          elapsedMs: this.snapshotValue.startedAt ? Date.now() - Date.parse(this.snapshotValue.startedAt) : 0,
         };
       }
     }
+    this.snapshotValue.elapsedMs = taskElapsedMs(
+      this.snapshotValue.startedAt,
+      this.snapshotValue.finishedAt,
+    );
     return { ...this.snapshotValue };
   }
 
   results(limit: number): Promise<FoundComment[]> { return readJsonl(this.outputPath, limit); }
+  async logs(limit: number): Promise<{ path?: string; entries: Awaited<ReturnType<typeof readTaskLog>> }> {
+    return { path: this.snapshotValue.logPath, entries: await readTaskLog(this.snapshotValue.logPath, limit) };
+  }
 
   subscribeMatches(subscriber: MatchSubscriber): () => void {
     this.matchSubscribers.add(subscriber);
@@ -443,12 +596,13 @@ class PoolManager {
     private readonly paths: RuntimePaths,
     private readonly refreshIntervalMs: number,
     private readonly refresher: typeof refreshProxyPool,
+    private readonly coordinator: TaskCoordinator,
   ) {}
 
   async status(): Promise<PoolSnapshot> {
     const pool = await readProxyPool(this.paths.pool);
     const running = proxyPoolRunning(pool);
-    if (!this.starting && running && pool) this.scheduleRefresh(pool);
+    if (!this.starting && !this.coordinator.isBusy() && running && pool) this.scheduleRefresh(pool);
     return {
       status: this.starting ? "starting" : running ? "running" : "not-running",
       poolPath: this.paths.pool,
@@ -465,7 +619,12 @@ class PoolManager {
   }
 
   async start(input: Record<string, unknown>): Promise<PoolSnapshot> {
-    if (this.starting) throw new HttpError(409, "代理池正在构建。");
+    const lease = this.coordinator.acquire("pool");
+    if (!lease) throw new HttpError(409, "检索任务运行时不能更改代理池，请先停止任务。");
+    if (this.starting) {
+      lease.release();
+      throw new HttpError(409, "代理池正在构建。");
+    }
     this.starting = true;
     try {
       const defaults = defaultMihomoPoolOptions(this.paths.root);
@@ -481,11 +640,16 @@ class PoolManager {
       this.nextRefreshAt = Date.now() + this.refreshIntervalMs;
       this.refreshError = undefined;
       return this.status();
-    } finally { this.starting = false; }
+    } finally { this.starting = false; lease.release(); }
   }
 
   async import(input: Record<string, unknown>): Promise<PoolSnapshot> {
-    if (this.starting) throw new HttpError(409, "代理池正在验证。");
+    const lease = this.coordinator.acquire("pool");
+    if (!lease) throw new HttpError(409, "检索任务运行时不能更改代理池，请先停止任务。");
+    if (this.starting) {
+      lease.release();
+      throw new HttpError(409, "代理池正在验证。");
+    }
     this.starting = true;
     try {
       const endpoints = proxyEndpoints(input.proxies);
@@ -494,14 +658,18 @@ class PoolManager {
       this.nextRefreshAt = Date.now() + this.refreshIntervalMs;
       this.refreshError = undefined;
       return this.status();
-    } finally { this.starting = false; }
+    } finally { this.starting = false; lease.release(); }
   }
 
   async stop(): Promise<PoolSnapshot> {
-    await stopMihomoPool(this.paths.pool);
-    this.nextRefreshAt = 0;
-    this.refreshError = undefined;
-    return this.status();
+    const lease = this.coordinator.acquire("pool");
+    if (!lease) throw new HttpError(409, "检索任务运行时不能更改代理池，请先停止任务。");
+    try {
+      await stopMihomoPool(this.paths.pool);
+      this.nextRefreshAt = 0;
+      this.refreshError = undefined;
+      return this.status();
+    } finally { lease.release(); }
   }
 
   private scheduleRefresh(pool: ProxyPoolFile): void {
@@ -513,13 +681,19 @@ class PoolManager {
     const now = Date.now();
     if (now < Math.max(this.nextRefreshAt, persistedDueAt)) return;
 
+    const lease = this.coordinator.acquire("pool");
+    if (!lease) return;
+
     this.nextRefreshAt = now + this.refreshIntervalMs;
     this.refreshPromise = this.refresher(this.paths.pool)
       .then(() => { this.refreshError = undefined; })
       .catch(() => {
         this.refreshError = "代理池后台复测暂时失败，将在下个周期重试。";
       })
-      .finally(() => { this.refreshPromise = undefined; });
+      .finally(() => {
+        this.refreshPromise = undefined;
+        lease.release();
+      });
   }
 }
 
@@ -554,12 +728,14 @@ class AuthManager {
 
 export async function startDashboard(options: DashboardOptions): Promise<Server> {
   const paths = runtimePaths(options.runtimeRoot ?? projectRoot);
-  const jobs = new JobManager(paths);
-  const parallel = new ParallelJobManager(paths);
+  const coordinator = new TaskCoordinator();
+  const jobs = new JobManager(paths, coordinator);
+  const parallel = new ParallelJobManager(paths, coordinator);
   const pool = new PoolManager(
     paths,
     options.poolRefreshIntervalMs ?? 60_000,
     options.poolRefresher ?? refreshProxyPool,
+    coordinator,
   );
   const auth = new AuthManager(paths);
   const currentVersion = options.currentVersion ?? await applicationVersion();
@@ -588,6 +764,7 @@ async function route(
   const url = new URL(request.url ?? "/", "http://localhost");
   if (method === "GET" && url.pathname === "/api/health") return json(response, 200, { ok: true, time: new Date().toISOString() });
   if (method === "GET" && url.pathname === "/api/update") return json(response, 200, await updateChecker());
+  if (method === "GET" && url.pathname === "/api/resume") return json(response, 200, { task: await readResumeTask(paths.resumeTask) ?? null });
   if (method === "GET" && url.pathname === "/api/job") return json(response, 200, await jobs.status());
   if (method === "POST" && url.pathname === "/api/job") return json(response, 202, await jobs.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/job/stop") return json(response, 200, await jobs.stop());
@@ -598,6 +775,11 @@ async function route(
   if (method === "POST" && url.pathname === "/api/parallel/job/stop") return json(response, 200, await parallel.stop());
   if (method === "GET" && url.pathname === "/api/parallel/results/stream") return streamMatches(request, response, (subscriber) => parallel.subscribeMatches(subscriber));
   if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, { results: await parallel.results(limit(url)) });
+  if (method === "GET" && url.pathname === "/api/logs") {
+    return json(response, 200, url.searchParams.get("mode") === "parallel"
+      ? await parallel.logs(limit(url))
+      : await jobs.logs(limit(url)));
+  }
   if (method === "GET" && url.pathname === "/api/pool") return json(response, 200, await pool.status());
   if (method === "POST" && url.pathname === "/api/pool/start") return json(response, 202, await pool.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/pool/import") return json(response, 202, await pool.import(await body(request)));
@@ -640,7 +822,45 @@ async function route(
 function runtimePaths(root: string): RuntimePaths {
   const normalized = resolve(root);
   const ncm = join(normalized, ".ncm");
-  return { root: normalized, data: join(normalized, "data"), ncm, cookie: join(ncm, "cookie.txt"), qr: join(ncm, "login-qr.png"), pool: join(ncm, "proxy-pool.json"), poolWork: join(ncm, "mihomo-pool") };
+  const data = join(normalized, "data");
+  return {
+    root: normalized,
+    data,
+    ncm,
+    cookie: join(ncm, "cookie.txt"),
+    qr: join(ncm, "login-qr.png"),
+    pool: join(ncm, "proxy-pool.json"),
+    poolWork: join(ncm, "mihomo-pool"),
+    resumeTask: join(data, "resume-task.json"),
+  };
+}
+
+async function saveResumeTask(path: string, descriptor: ResumeTaskDescriptor): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp`;
+  await writeFile(temporary, `${JSON.stringify(descriptor, null, 2)}\n`, "utf8");
+  await rename(temporary, path);
+}
+
+async function readResumeTask(path: string): Promise<ResumeTaskDescriptor | undefined> {
+  try {
+    const value = JSON.parse(await readFile(path, "utf8")) as Partial<ResumeTaskDescriptor>;
+    if (
+      value.version !== 1 ||
+      (value.mode !== "source" && value.mode !== "parallel") ||
+      typeof value.updatedAt !== "string" ||
+      !value.input ||
+      typeof value.input !== "object" ||
+      Array.isArray(value.input) ||
+      !Object.values(value.input).every((item) =>
+        typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+      )
+    ) return undefined;
+    return value as ResumeTaskDescriptor;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return undefined;
+    throw error;
+  }
 }
 
 async function body(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -764,8 +984,14 @@ async function readJsonl(path: string | undefined, max: number): Promise<FoundCo
 
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, matches: 0, requestsTotal: 0, pagesProcessed: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, matches: 0, requestsTotal: 0, pagesProcessed: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", lanes: 0, workers: 0, shards: 0, shardsComplete: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
+function busyTaskMessage(coordinator: TaskCoordinator): string {
+  if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
+  return coordinator.activeMode() === "parallel"
+    ? "已有单曲并行任务正在运行，请先停止该任务。"
+    : "已有用户来源任务正在运行，请先停止该任务。";
+}
 function numericId(value: unknown, name: string): string { const id = String(value ?? "").trim(); if (!/^\d+$/.test(id)) throw new HttpError(400, `${name} 应为纯数字。`); return id; }
 function selection<const T extends readonly string[]>(value: unknown, choices: T, name: string): T[number] { if (typeof value === "string" && choices.includes(value)) return value as T[number]; throw new HttpError(400, `${name} 参数错误。`); }
 function integer(value: unknown, name: string, minimum: number, maximum: number): number { const parsed = Number(value); if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new HttpError(400, `${name} 应为 ${minimum} 到 ${maximum} 之间的整数。`); return parsed; }

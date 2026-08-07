@@ -1,318 +1,203 @@
-# 网易云用户评论查找器
+<div align="center">
+  <img src="web/app-icon.png" width="96" alt="云评检索台图标">
+  <h1>云评检索台</h1>
+  <p>通过网易云音乐用户 UID 定位其在公开歌曲下发布的评论。</p>
+  <p>
+    <a href="https://github.com/RocXOvO/ncm-comment-finder/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RocXOvO/ncm-comment-finder?style=flat-square"></a>
+    <a href="https://github.com/RocXOvO/ncm-comment-finder/actions/workflows/windows-package.yml"><img alt="Windows package" src="https://img.shields.io/github/actions/workflow/status/RocXOvO/ncm-comment-finder/windows-package.yml?style=flat-square&label=Windows%20package"></a>
+    <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-43853d?style=flat-square">
+    <img alt="Windows and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-59636e?style=flat-square">
+  </p>
+</div>
 
-按用户 UID 收集候选歌曲，再逐页检查歌曲评论并输出该 UID 发布的评论。项目采用
-[NeteaseCloudMusicApiEnhanced](https://github.com/NeteaseCloudMusicApiEnhanced/api-enhanced)
-作为请求与 `weapi/eapi/xeapi` 加解密底座。
+---
 
-## 路径设计
+云评检索台会先从目标用户的公开听歌排行和喜欢列表收集候选歌曲，再使用时间游标逐页读取评论，按 `comment.user.userId` 精确匹配目标 UID。它同时提供桌面客户端、本地 Web 控制台和 CLI，并支持断点续跑、多出口并发、实时结果与结构化调试日志。
 
-1. `auto`：登录 Cookie 对应的 UID 与目标 UID 相同时，使用用户评论历史接口；否则进入歌曲扫描。
-2. `record`：按用户全部时间或最近一周听歌排行的返回顺序扫描。
-3. `likes`：扫描用户喜欢音乐 ID 列表。
-4. `both`：先听歌排行，再补入喜欢列表中尚未出现的歌曲。
+> [!IMPORTANT]
+> 请只在合法、合理的场景中查询公开数据，尊重用户隐私、平台规则与请求频率。该工具不能绕过私密的听歌排行或喜欢列表，也不保证找到用户的全部历史评论。
 
-评论历史接口只适合查询当前登录账号自己。查询其他公开用户时，工具使用其公开的听歌排行或喜欢列表作为候选集，然后在歌曲评论中按 `comment.user.userId` 精确匹配。
+## 功能一览
 
-## 安装
+- **两种检索路径**：按用户来源扫描多首歌，或对已知歌曲做时间分片并行扫描。
+- **断点续跑**：歌曲游标、分片进度、请求数和冷却时间都会原子化写入 JSON 检查点。
+- **自适应页级调度**：Worker 每次只处理一页；出现空闲 Worker 时会继续拆分剩余大分片，减少扫描后期的并发长尾。
+- **独立出口代理池**：可从 Clash Verge 配置中自动优选，或导入其他 HTTP/HTTPS 代理。
+- **实时可观测**：展示当前歌曲/页数、累计请求、命中数、出口延迟与实时评论。
+- **任务结算**：完成、暂停、冷却、停止或失败后，统一展示本轮耗时、累计命中、页数和请求数。
+- **结构化日志**：逐页记录请求开始、成功、耗时、读取条数、失败以及 `403/429` 风控/限流。
+- **Windows 应用内更新**：启动时检查最新 Release，下载后校验 SHA-512；安装前先保存扫描检查点，新版可继续未完成任务。
 
-Windows 用户可直接运行：
+## 下载
+
+从 [GitHub Releases](https://github.com/RocXOvO/ncm-comment-finder/releases/latest) 下载与设备匹配的最新正式版：
+
+| 平台 | 文件 | 说明 |
+| --- | --- | --- |
+| Windows 10/11 x64 | `NCM-Comment-Finder-Setup-<version>.exe` | NSIS 安装器，支持应用内自动更新 |
+| macOS 11+ Apple Silicon | `NCM-Comment-Finder-<version>-arm64.dmg` | M1/M2/M3/M4 等 Apple 芯片 |
+| macOS 11+ Intel | `NCM-Comment-Finder-<version>-x64.dmg` | Intel Mac |
+
+macOS 包目前使用 ad-hoc 签名，未经 Apple Developer ID 公证；这与 Windows 的应用内更新能力不同。Windows Release 必须同时包含安装器、`.exe.blockmap` 和 `latest.yml`，缺少任一文件都不应发布。
+
+## 快速开始
+
+1. 安装并启动“云评检索台”。
+2. 如需读取受登录态影响的来源，点击右上角“二维码登录”。
+3. 从网易云音乐用户主页链接中复制 `id=` 后的纯数字 UID。
+4. 选择“用户来源”，先点击 UID 右侧的查询按钮，确认听歌排行/喜欢列表可读。
+5. 选择歌曲来源并开始扫描。新命中会立即出现在“实时结果”。
+
+UID 是用户主页的数字 ID，不是昵称。例如：
 
 ```text
-release/NCM-Comment-Finder-Setup-0.7.1.exe
+https://music.163.com/#/user/home?id=123456789
+                                      └─ UID
 ```
 
-安装器支持选择目录，并使用应用的多尺寸 Windows 图标创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
+### 扫描模式怎么选
 
-Windows 桌面版使用与应用顶栏融合的无边框窗口，最小化、最大化/还原和关闭按钮位于右上角；深色顶栏的空白区域可拖动窗口。Windows 下顶栏在页面滚动时固定在窗口顶部。启动时会显示一段简短的轨道式动画，参数折叠区、模式切换、页签和弹窗也带过渡效果；所有动画都遵循系统的“减少动态效果”设置。
+| 模式 | 适用场景 | 调度方式 |
+| --- | --- | --- |
+| 用户来源 · 听歌排行 | 不知道具体歌曲，优先查用户常听内容 | 候选歌曲按页公平轮转 |
+| 用户来源 · 喜欢歌曲 | 听歌排行不可读或需要补充范围 | 喜欢列表去重后逐页扫描 |
+| 用户来源 · 两者 | 希望扩大候选歌曲覆盖 | 先排行，再补入喜欢列表 |
+| 单曲并行 | 已知歌曲 ID，且评论区很大 | 时间分片 + 多出口 + 页级重新入队 |
 
-桌面客户端每次启动会后台检查 GitHub 最新正式 Release。Windows 安装版发现更高版本后，可直接在客户端内下载并查看进度；安装包通过 `latest.yml` 中的 SHA-512 摘要校验，下载完成后点击“重启并安装”即可静默升级并重新打开。浏览器模式和 macOS 继续匹配对应安装包并打开下载页面。也可点击顶部版本按钮手动复查。公开仓库可匿名检查，检查失败不会影响扫描功能。
+用户评论历史接口只适合查询当前登录账号本人。CLI 的 `--strategy auto` 只在登录 UID 与目标 UID 相同时转入该路径；查询其他用户时使用公开歌曲评论精确匹配。
 
-Windows 自动更新从 `v0.3.1` 开始提供。更早的客户端需要先手动安装一次 `v0.3.1` 或更高版本；此后的版本只要随 GitHub Release 同时上传 `.exe`、`.exe.blockmap` 和 `latest.yml`，即可使用应用内更新。
+## 并发、后期降速与风控
 
-macOS Apple Silicon 用户可打开：
+每个代理出口是一个 Lane，同一 Lane 上的所有 Worker 共享一个 `RequestGovernor`。例如“4 个 IP × 每 IP 3 并发”会创建 12 个 Worker，但每个 IP 的起始间隔仍由共享限速器统一管理。
 
-```text
-release/NCM-Comment-Finder-0.7.1-arm64.dmg
+早期版本会让 Worker 一直扫完一首歌或一个时间分片。评论密度不均时，后期只剩少数“大分片”，其他 Worker 会提前退出，看起来像请求被风控。当前版本改为**一页一个工作项**：处理完一页后重新入队；单曲扫描检测到空闲 Worker 时，还会把未读完的大范围动态拆成两个互不重叠的半开时间区间，让空闲线程重新投入工作。
+
+仍可能出现合理降速：
+
+- 未完成页面已少于 Worker 数，任务正在自然收尾。
+- 某些出口网络失败，未完成工作已转移给健康出口。
+- 远端返回 `403/429`，对应出口进入持久化冷却。
+- 实际网络延迟高于请求起始间隔。
+
+打开“运行日志”可以直接区分这些情况。`page_success` 表示成功读取；`page_failure` 表示网络/业务失败；`rate_limited` 表示明确收到风控或限流信号；`adaptive_split` 表示调度器发现空闲线程并拆分剩余任务，它不是风控。
+
+## 代理池
+
+桌面界面可以自动发现 Clash Verge 的配置和 Mihomo 内核，默认从 48 个候选节点中优选 8 个出口。也可切换到“其他代理池”，每行导入一个 HTTP/HTTPS 代理。
+
+优选不只比较完整 IP，还会限制网络前缀：
+
+- IPv4：同一 `/24` 只保留延迟最低的一个出口。
+- IPv6：同一 `/48` 只保留延迟最低的一个出口。
+- 每个入选出口都必须通过公网 IP 检查和网易云评论接口实测。
+
+如果不同网段的可用出口不足，工具会取消构建，不会用同网段 IP 强行补齐。代理池在空闲时每约 60 秒重新验证出口和延迟；扫描任务运行时暂停后台复测，避免额外请求绕过当前限速。
+
+CLI 示例：
+
+```powershell
+# 从 Clash Verge 配置构建 8 个网络前缀互异的出口
+npm run start -- proxy-pool start --size 8 --candidates 48
+
+# 查看或停止工具管理的代理池
+npm run start -- proxy-pool status
+npm run start -- proxy-pool stop
 ```
 
-将“云评检索台”拖入 Applications 即可安装。当前本地包使用 ad-hoc 签名；向其他用户公开分发时，应使用 Apple Developer ID 证书签名并公证。
+> [!NOTE]
+> 代理池文件会保存在本地并被 Git 忽略。含账号密码的代理 URL 不会通过 GUI API 原样返回。已托管 Mihomo 进程在停止前会校验命令行与配置路径，避免 PID 复用时误杀其他进程。
 
-从源码运行需要 Node.js 20 或更高版本：
+## 结算、日志与本地数据
+
+每个 GUI 任务都有独立 UUID。开始时间从服务端接受任务起计算，结束后 `elapsedMs` 会冻结，后续轮询不会让耗时继续增长。结算画面按“检索模式 + 任务 UUID”只展示一次，覆盖 `complete`、`matched`、`paused`、`cooldown`、`dry-run`、`stopped` 和 `error`。
+
+需要注意两个口径：
+
+- **累计命中**：来自当前检查点，包含前几次续跑已保存的结果。
+- **本轮耗时**：只属于当前任务 UUID，不累加过往运行时间。
+
+日志以 JSONL 存储，每行一个结构化事件。内容不记录 Cookie 或代理密码。桌面客户端将数据写入 Electron `userData` 目录；从源码运行 Web/CLI 时使用项目内的以下目录：
+
+| 路径 | 内容 |
+| --- | --- |
+| `data/*.json` | 用户来源或单曲分片检查点 |
+| `data/*.jsonl` | 命中评论，按 `commentId` 去重 |
+| `data/logs/<mode>-<uuid>.jsonl` | 任务调试日志 |
+| `data/resume-task.json` | 最近一次 GUI 任务的非敏感表单参数 |
+| `.ncm/cookie.txt` | 二维码登录会话 |
+| `.ncm/proxy-pool.json` | 当前代理池状态与验证结果 |
+
+这些路径都不应提交到 Git。
+
+### 更新时如何保留扫描进度
+
+Windows 客户端下载完更新后，如果扫描仍在运行，“重启并安装”会变为“保存进度并重启”。客户端会先停止新的页面调度，等待当前任务写完强制检查点，再交给安装器重启；45 秒内无法确认落盘时会取消安装，避免带着不确定状态退出。
+
+任务参数和扫描状态都保存在 Electron 的同一个 `userData` 目录，不随应用版本替换。新版启动后会自动恢复上次模式、UID、歌曲 ID 与并行参数；保持“新建状态”关闭并再次开始，即可从相同检查点继续。极端退出情况下可能重复少量尚未确认的在途页面，JSONL 仍按 `commentId` 去重，不会重新扫描已标记完成的歌曲或分片。
+
+## 分页与检查点语义
+
+- 歌曲评论使用 `comment_new` 降序时间游标，默认每页 1000 条，可配置范围为 `1..2000`。
+- `hasMore=true` 时，下一游标必须严格向过去推进。空页但游标有效时会继续；游标缺失或不前进时保留可续跑状态，不会误报完成。
+- 修改每页条数后不能直接恢复旧游标；请勾选“新建状态”或使用 `--fresh`。
+- 从旧 `comment_music` offset 检查点迁移时，已完成歌曲保留，未完成歌曲从任务创建时间重扫，JSONL 继续去重。
+
+## CLI
+
+需要 Node.js 20 或更高版本：
 
 ```powershell
 npm install
 npm run build
 ```
 
-macOS 安装包构建：
-
-```bash
-# Apple Silicon
-npm run dist:mac
-
-# 同时生成 Apple Silicon 和 Intel 版本
-npm run dist:mac:all
-```
-
-构建脚本会先在系统临时目录中签名和生成 DMG，再把安装包复制到 `release/`，避免 Documents/iCloud 文件提供器的扩展属性干扰 macOS 签名。
-
-底座依赖固定为 `@neteasecloudmusicapienhanced/api@4.39.0`，避免上游接口变更直接影响一次正在续跑的任务。
-
-## 登录
-
-公开歌曲评论本身通常不要求登录；听歌排行、喜欢列表的可见范围由用户隐私设置和登录态决定。需要登录时使用二维码：
+常用命令：
 
 ```powershell
-npm run start -- auth-qr
-```
-
-二维码保存到 `.ncm/login-qr.png`，确认后 Cookie 保存到 `.ncm/cookie.txt`。也可通过当前进程的 `NCM_COOKIE` 环境变量提供 Cookie。
-
-## 使用
-
-### 本地控制台
-
-```powershell
+# 本地 Web 控制台：http://127.0.0.1:4173
 npm run web
+
+# 二维码登录
+npm run start -- auth-qr
+
+# 只收集候选歌曲，不读取评论
+npm run start -- scan --uid 123456789 --source both --dry-run
+
+# 扫描听歌排行 + 喜欢歌曲
+npm run start -- scan --uid 123456789 --source both
+
+# 已知歌曲 ID，使用当前代理池做时间分片并行扫描
+npm run start -- scan-song --uid 123456789 --song-id 186016
 ```
 
-浏览器打开 `http://127.0.0.1:4173`，输入 UID 后可点击选择：
+CLI `scan` 的默认单次请求预算为 250，`scan-song` 为 5000；达到预算后保存检查点并返回 `paused`。GUI 默认预算为 `0`，表示不因本地预算自动暂停。请求预算是评论页的逻辑调度限制，来源发现、歌曲详情和内部重试可能带来额外远端尝试，不应把它视为所有 HTTP 尝试的绝对硬上限。
 
-- `听歌排行`：按全部时间或最近一周的听歌次数顺序查询。
-- `喜欢歌曲`：查询该 UID 的喜欢音乐列表。
-- `两者`：先听歌排行，再补入未出现过的喜欢歌曲。
-
-UID 输入框右侧的用户查询按钮会先读取昵称、等级、累计听歌数，并分别探测听歌排行和喜欢列表是否可读。来源显示“受限”时，先检查二维码登录状态和该用户的公开设置，再决定是否启动评论扫描。
-
-控制台默认进入“单曲并行”，可直接构建 Clash Verge 多 IP 池、查询歌曲、启动/停止分片任务，并查看每个出口 IP 与网易云实测延迟。代理池位于两种检索模式共用区域，可在“Clash Verge”自动优选和“其他代理池”手动导入之间切换。Clash Verge 存在多个远程/本地订阅时，构建前可从下拉框选择当前合并配置或某一套具体配置。优选过程使用原地轮换指示，结果列表只在节点真正变化时更新，关闭代理池后会同步停止动画和清除旧出口。
-
-GUI 任务不再“首条命中后停止”：默认请求预算为 `0`（不限），扫描会持续到当前范围完成、远端要求冷却，或用户点击“停止”。每条新命中在写入 JSONL 后会通过服务端事件即时推送到“实时结果”，不需要等待状态轮询。结果会按 `commentId` 去重，并提供携带歌曲 ID 和评论 ID 的网易云评论页链接。
-
-实时结果中的时间包含完整年份；来源扫描状态条会持续显示最近正在请求的歌曲和该歌曲页数，多出口并发时以最近开始请求的 Worker 为准。
-
-### 命令行
-
-先只获取候选歌曲并估算范围，不读取评论：
+查看全部参数：
 
 ```powershell
-npm run start -- scan --uid 目标UID --source both --dry-run
+npm run start -- --help
 ```
-
-按听歌排行顺序查找：
-
-```powershell
-npm run start -- scan --uid 目标UID --source record
-```
-
-通过喜欢歌曲查找：
-
-```powershell
-npm run start -- scan --uid 目标UID --source likes
-```
-
-两种来源合并、去重后查找：
-
-```powershell
-npm run start -- scan --uid 目标UID --source both
-```
-
-每次运行默认最多发出 250 个请求。触及预算后状态为 `paused`，原命令再次执行会从当前歌曲和评论时间游标继续。`403/429` 会立即保存检查点并写入 15 分钟冷却时间；冷却期内重复启动只读取本地状态。
-
-常用的范围控制：
-
-```powershell
-# 先测试前 10 首歌，每首最多 3 页
-npm run start -- scan --uid 目标UID --source both --max-songs 10 --max-comment-pages-per-song 3
-
-# 使用独立状态和输出文件
-npm run start -- scan --uid 目标UID --state data/task-a.json --output data/task-a.jsonl
-```
-
-用户来源扫描使用 `comment_new` 降序时间游标，默认每页请求 `1000` 条，允许范围为 `1..2000`。`--max-comment-pages-per-song 0` 表示逐页走到接口返回 `hasMore=false`，这是默认值。对评论量很大的歌曲，完整遍历可能需要多次续跑。
-
-### 单曲高并行扫描
-
-已知歌曲 ID 时使用 `scan-song`。该路径不使用数据库，而是通过 `comment_new` 时间游标把评论区切成多个互不重叠的时间片，由多个 Worker 同时读取并在内存中匹配目标 UID：
-
-```powershell
-npm run start -- scan-song `
-  --uid 目标UID `
-  --song-id 歌曲ID `
-  --proxy http://127.0.0.1:17891 `
-  --proxy http://127.0.0.1:17892 `
-  --workers-per-proxy 3 `
-  --shards 96 `
-  --comment-page-size 1000
-```
-
-- `--proxy` 可重复传入，每个地址对应一个固定 Clash/Mihomo Listener。
-- 每个代理入口有独立且由所有 Worker 共享的 `RequestGovernor`；请求可以重叠执行，起始时刻按“线程间隔 ÷ 该入口 Worker 数”预约。
-- 时间片按 `[startTime, endTime)` 过滤，从最新区间向最旧区间调度。
-- 页面处理完成后立即释放；只把目标 UID 的命中写入 JSONL。
-- `data/parallel-state-UID-SONG.json` 保存各时间片的 cursor，可从中断位置续跑。
-- `403/429` 会熔断对应入口；其他入口已在处理的时间片继续执行。
-- 普通网络错误只禁用对应入口，其未完成时间片会重新入队，由健康入口继续处理。
-- 检查点写入按 500ms 合并，减少高并发时的磁盘争用；任务结束时强制落盘。
 
 ## 代码结构
 
 | 模块 | 职责 |
 | --- | --- |
-| `src/api.ts` | 网易云接口适配、响应归一化和加解密底座调用 |
-| `src/mihomo-pool.ts` | Clash Verge 配置读取、Listener 生成、出口去重与网易云连通验证 |
-| `src/parallel-scanner.ts` | 时间分片队列、多入口 Worker、故障转移和断点状态 |
-| `src/scanner.ts` | 听歌排行/喜欢列表的游标分页、代理池并行调度和断点恢复 |
-| `src/server.ts` | GUI 服务 API、任务/代理池/登录管理器和运行目录隔离 |
-| `src/electron-main.ts` | 桌面窗口、内置服务生命周期和进程安全边界 |
-| `src/electron-preload.ts` | Windows 窗口控制的隔离桥接层 |
-| `src/window-shell.ts` | Windows 无边框窗口策略与桌面 URL 标记 |
-| `src/windows-updater.ts` | Windows Release 检查、下载进度、完整性校验与重启安装状态机 |
-| `web/` | 响应式操作界面 |
+| `src/api.ts` | 网易云请求适配、响应归一化和加解密底座 |
+| `src/scanner.ts` | 听歌排行/喜欢列表收集、多 Lane 页级调度和断点恢复 |
+| `src/parallel-scanner.ts` | 单曲时间分片、自适应尾部拆分、页级队列和出口故障转移 |
+| `src/work-queue.ts` | 可等待重新入队的异步工作队列，避免 Worker 过早退出 |
+| `src/cursor-pagination.ts` | 两种扫描器共用的降序游标推进规则 |
+| `src/task-coordinator.ts` | 全局单任务租约、代理池互斥与耗时计算 |
+| `src/task-log.ts` | 按任务 UUID 串行写入结构化调试日志 |
+| `src/mihomo-pool.ts` | Clash Verge 发现、Mihomo 生命周期、网段去重与连通验证 |
+| `src/server.ts` | 本地 API、任务/登录/代理池编排和结算快照 |
+| `src/electron-main.ts` | 桌面窗口、内置服务生命周期与运行目录隔离 |
+| `src/windows-updater.ts` | Windows 更新检查、下载、校验和重启安装状态机 |
+| `web/` | 本地操作界面、实时结果、日志和结算画面 |
 
-项目不使用数据库。扫描过程只在内存中保留分片状态和目标命中，检查点使用 JSON，结果使用逐行 JSONL。
+项目不使用数据库。评论结果是追加写入的 JSONL，扫描状态是 JSON，实时 UI 失败不得中断结果持久化。底层依赖固定为 `@neteasecloudmusicapienhanced/api@4.39.0`，避免上游变更直接影响正在续跑的任务。
 
-## 单账户与请求控制
-
-- 一条串行任务使用一个普通登录会话即可；歌曲评论通常走匿名接口，Cookie 主要用于读取来源列表。
-- `scan` 在无代理池时使用单入口；代理池开启后按出口建立独立 Lane，并允许每个出口配置多个 Worker。`scan-song` 使用多入口、多 Worker 时间分片并行。
-- 网络错误和 `5xx` 最多指数退避 3 次；`403/429` 不做连续重放，而是进入持久化冷却。
-- 结果按 `commentId` 去重，状态采用临时文件加原子重命名，进程中断后可续跑。
-- 不建议同时启动多个进程共享同一 Cookie。需要拆分任务时，使用不同状态文件并保持总请求频率不高于单进程默认值。
-
-粗略请求量为：
-
-```text
-来源接口请求 + 所有候选歌曲的评论页数
-```
-
-例如 100 首歌、平均每首 4 页，大约 401 到 402 个请求，默认要分两次运行。先用 `--dry-run` 查看去重后的歌曲数，再决定 `--max-songs` 或单曲页数上限。
-
-## 输出与状态
-
-- `data/comments-UID.jsonl`：每行一条命中，包含评论 ID、UID、正文、时间、歌曲 ID、来源和抓取路径。
-- `data/state-UID-SOURCE.json`：候选歌曲、当前时间游标、分页协议与页大小、请求数、已见评论 ID、冷却截止时间和覆盖状态。
-- `coverageComplete=true`：所有选定来源歌曲及其全部可分页评论均已处理。
-- `sourceErrors`：选择 `both` 时某个来源的业务错误；另一路仍会继续，完整覆盖标记为 `false`。
-- `sourceTruncated` 或 `truncatedSongIds` 非空：命令设置的上限缩小了覆盖范围。
-
-更换 UID、来源或周榜/总榜时应使用新的 `--state` 路径。`--fresh` 会忽略已有状态，但结果文件仍按评论 ID 去重；要保留不同实验批次，给 `--output` 指定新文件。
-登录态更新后如需重试先前失败的来源，也使用 `--fresh` 或新的状态文件。
-
-从旧版 `comment_music` 偏移量检查点升级时，已完整处理的歌曲会保留；未完成或被页数上限截断的歌曲会从该任务的创建时间重新按游标扫描，现有 JSONL 继续按 `commentId` 去重，避免迁移时跳页或重复输出。游标检查点创建后若修改每页条数，需要勾选“重新开始”或使用 `--fresh`，因为页码与游标必须保持同一分页配置。
-
-## 代理配置
-
-网页和普通 `scan` 路径使用单个静态 HTTP/HTTPS 代理：
-
-```powershell
-npm run start -- scan --uid 目标UID --source both --proxy http://127.0.0.1:7890
-```
-
-高并行 `scan-song` 路径使用多个固定本地代理入口。推荐在 Mihomo 中为每个节点建立一个 Listener：
-
-```yaml
-listeners:
-  - name: ncm-egress-1
-    type: mixed
-    listen: 127.0.0.1
-    port: 17891
-    proxy: NODE_A
-    users: []
-  - name: ncm-egress-2
-    type: mixed
-    listen: 127.0.0.1
-    port: 17892
-    proxy: NODE_B
-    users: []
-```
-
-然后重复传入 `--proxy http://127.0.0.1:PORT`。程序按入口建立客户端池，不在请求过程中随机切换节点，因此可以分别记录请求数、错误和冷却状态。TUN 可以继续开启，但高并行路径以显式 Listener 为准。
-
-也可以让工具直接从 Clash Verge 当前合并配置构建独立的 Mihomo 池：
-
-```powershell
-# 抽取订阅节点，启动独立 Mihomo，并筛选 8 个不同公网出口网段
-npm run start -- proxy-pool start --size 8 --candidates 48
-
-# 查看 PID、Listener、节点和实测出口 IP
-npm run start -- proxy-pool status
-
-# 停止工具创建的独立 Mihomo
-npm run start -- proxy-pool stop
-```
-
-代理池不仅去重完整出口 IP，还会按网络前缀隔离：IPv4 的同一 `/24`、IPv6 的同一 `/48`
-最多保留延迟最低的一个节点。如果不同网段的可用出口不足 `--size`，构建会停止并提示增加不同地区或
-服务商的节点，不会使用同网段地址补足并发出口。
-
-客户端默认从 48 个候选节点中优选 8 个独立出口，也可在代理池区域直接调整“独立出口数”和“候选节点数”。独立出口允许 `1..32`，候选节点允许 `1..128`，且候选数不能少于出口数。
-
-GUI 保持打开且代理池在线时，会约每 60 秒在后台重新验证出口 IP、网易云连通性和延迟。同一时刻只会
-运行一轮复测；整轮成功后才更新池文件，临时失败会保留上次可用结果并在下个周期重试。
-
-程序会按平台自动发现 Clash Verge：
-
-- macOS：`~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml` 和 `/Applications/Clash Verge.app/Contents/MacOS/verge-mihomo`
-- Windows：`%APPDATA%/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml` 和 Clash Verge 安装目录中的 `verge-mihomo.exe`
-- Linux：XDG 配置目录和常见的 `mihomo`/`verge-mihomo` 可执行路径
-
-除当前合并配置外，GUI 也会安全读取 Clash Verge `profiles.yaml` 中的 `remote`/`local` 配置索引，只接受位于其 `profiles` 目录内的 YAML 文件，防止任意路径被当作代理配置读取。
-
-可通过 `NCM_CLASH_CONFIG` 和 `NCM_MIHOMO_PATH` 环境变量覆盖自动发现结果。
-
-使用其他 HTTP/HTTPS 代理池时，可在 GUI 中每行粘贴一个代理，或使用 CLI：
-
-```bash
-npm run start -- proxy-pool import \
-  --proxy http://127.0.0.1:17891 \
-  --proxy http://user:password@proxy.example:8080
-```
-
-所有导入代理都会检查真实出口 IP，按 IPv4 `/24` 或 IPv6 `/48` 网段去重，再用网易云评论接口实测并按总延迟排序。带账号密码的代理 URL 保存在本地代理池文件中，该文件在 macOS/Linux 上使用 `0600` 权限，GUI API 返回时会隐去凭据。
-
-池配置写入 `.ncm/mihomo-pool/config.yaml`，验证结果写入 `.ncm/proxy-pool.json`。这两个路径都被 Git 忽略。构建过程执行两级检查：
-
-1. 每个 Listener 访问公网 IP 查询接口，按出口 IP 去重。
-2. 每个不同出口请求网易云真实评论接口，按总延迟排序，只保留最快且成功的节点。
-
-未显式传入 `--proxy` 时，`scan-song` 会自动加载 `.ncm/proxy-pool.json`，并在任务启动前重新确认所有入口仍对应不同出口 IP 且评论接口可读。
-
-## 速度估算
-
-普通 `scan` 默认参数为每页 1000 条、请求起始间隔 `2500ms + 0..800ms`。接口往返时间低于该间隔时，请求间隔决定主要耗时：
-
-| 评论数 | 请求页数 | 理想耗时 | 常规耗时 | 保守耗时 |
-| ---: | ---: | ---: | ---: | ---: |
-| 10 万 | 100 | 4 分 10 秒 | 4 分 50 秒 | 5 分 30 秒 |
-| 30 万 | 300 | 12 分 30 秒 | 14 分 30 秒 | 16 分 30 秒 |
-| 50 万 | 500 | 20 分 50 秒 | 24 分 10 秒 | 27 分 30 秒 |
-| 100 万 | 1,000 | 41 分 40 秒 | 48 分 20 秒 | 55 分 |
-
-常规值使用平均 `2900ms/页`。实际完成时间还要叠加来源列表请求、网络慢请求、接口业务错误和冷却期。把间隔设为 `0` 时，按 `400ms` 往返估计的协议侧上限约为 2500 条/秒，即 10 万条约 40 秒；这是计算下界，不代表连续运行可维持该频率。
-
-网页“速度估算”页签会读取当前检索模式的实际分页大小、线程间隔、抖动、代理池出口数、每出口并发以及网易云实测延迟实时重算。每个出口会把线程间隔均摊到已配置的工作线程，因此在请求间隔或网络延迟占主导时，提高“每 IP 并发”都会同步提高实际调度吞吐；估算器与运行时限速器使用同一个并发模型。GUI 默认请求预算为 `0`，表示不因本地预算自动暂停；如手动设为正数，达到预算后仍可以同一 UID 和来源从检查点续跑。
-
-### 加快定位
-
-目标是快速观察高概率范围时，可先扫描每首歌的前 3 页：
-
-```powershell
-npm run start -- scan --uid 目标UID --source record `
-  --max-comment-pages-per-song 3 `
-  --min-delay-ms 1200 --jitter-ms 300 --request-budget 1000
-```
-
-这会优先覆盖听歌排行中每首歌最近最多约 3000 条评论，所有命中仍会逐条写入，`coverageComplete` 会保持 `false`。后续可扩大每首页数或切换喜欢歌曲来源。
-
-目标是完整遍历时，先用默认参数跑 250 页观察是否出现冷却；状态稳定后可将单次预算调到 `5000`，并逐步把间隔降至 `1500ms + 0..500ms`。该组合平均约 `1750ms/页`，理论约 571 条/秒，10 万条约 2 分 55 秒。实际出现 `403/429` 时，冷却时间会抵消更短间隔带来的收益。
-
-若 UID 正好是当前登录账号本人，CLI 的 `--strategy auto` 会改走用户评论历史接口，省去逐首枚举歌曲评论：
-
-```powershell
-npm run start -- scan --uid 本人UID --strategy auto
-```
-
-## 开发验证
+## 开发与验证
 
 ```powershell
 npm run check
@@ -320,4 +205,13 @@ npm test
 npm run build
 ```
 
-自动化测试使用内存 API 桩。真实接口验收需显式执行 `scan-song` 或从桌面界面启动任务。
+macOS 打包：
+
+```bash
+npm run dist:mac       # Apple Silicon
+npm run dist:mac:all   # Apple Silicon + Intel
+```
+
+Windows 安装器应在 GitHub Actions 的真实 Windows 环境中执行类型检查、全部测试、打包应用启动冒烟测试和 NSIS 资产验证。发布前还应确认 Git tag、Release commit 和远端 `main` 指向同一提交。
+
+自动化测试使用内存 API 桩，不会默认向网易云发送真实扫描请求。
