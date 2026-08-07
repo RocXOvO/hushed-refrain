@@ -27,7 +27,9 @@ jobs:
           npm test
 
       - name: Build unpacked Windows application
-        run: npx electron-builder --win dir --x64
+        run: |
+          npm run build
+          npx electron-builder --win dir --x64 --publish never
 
       - name: Smoke test packaged Windows application
         shell: pwsh
@@ -52,7 +54,7 @@ jobs:
           }
 
       - name: Build NSIS installer
-        run: npm run dist:win
+        run: npx electron-builder --win nsis --x64 --publish never
 
       - name: Verify update assets
         shell: pwsh
