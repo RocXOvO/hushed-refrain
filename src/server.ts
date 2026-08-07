@@ -20,6 +20,7 @@ import {
   discoverClashVerge,
   importExternalProxyPool,
   proxyPoolRunning,
+  proxyPoolStatusRunning,
   readProxyPool,
   refreshProxyPool,
   startMihomoPool,
@@ -57,6 +58,8 @@ export interface DashboardOptions {
   updateChecker?: () => Promise<UpdateSnapshot>;
   poolRefreshIntervalMs?: number;
   poolRefresher?: typeof refreshProxyPool;
+  poolDiscoveryIntervalMs?: number;
+  poolDiscoverer?: typeof discoverClashVerge;
 }
 
 interface RuntimePaths {
@@ -221,6 +224,7 @@ class JobManager {
   private transportGate?: ProxyTransportGate;
   private statePath?: string;
   private outputPath?: string;
+  private terminalStateSyncedId?: string;
   private readonly matchSubscribers = new Set<MatchSubscriber>();
 
   constructor(
@@ -319,6 +323,7 @@ class JobManager {
       proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
       logPath: logger.path,
     };
+    this.terminalStateSyncedId = undefined;
     await logger.write("info", "task_started", "用户来源扫描已启动。", {
       uid,
       source,
@@ -376,6 +381,7 @@ class JobManager {
           sourceErrors: report.sourceErrors, blockedUntil: report.resumeAfter, note: report.note,
           currentSong: undefined,
         };
+        this.terminalStateSyncedId = activeId;
       })
       .catch(async (error) => {
         await logger.write("error", "task_error", `用户来源扫描异常结束：${message(error)}`, { error: message(error) });
@@ -409,7 +415,11 @@ class JobManager {
   }
 
   async status(): Promise<JobSnapshot> {
-    if (this.statePath && this.snapshotValue.status !== "idle") {
+    const active = ["running", "stopping"].includes(this.snapshotValue.status);
+    const needsTerminalSync = Boolean(
+      this.snapshotValue.id && this.terminalStateSyncedId !== this.snapshotValue.id,
+    );
+    if (this.statePath && (active || needsTerminalSync)) {
       const state = await loadState(this.statePath);
       if (state && state.uid === this.snapshotValue.uid) {
         const progress = state.songProgress ?? [];
@@ -436,6 +446,7 @@ class JobManager {
           blockedUntil: state.blockedUntil,
         };
       }
+      if (!active) this.terminalStateSyncedId = this.snapshotValue.id;
     }
     this.snapshotValue.elapsedMs = taskElapsedMs(
       this.snapshotValue.startedAt,
@@ -472,6 +483,7 @@ class ParallelJobManager {
   private transportGate?: ProxyTransportGate;
   private statePath?: string;
   private outputPath?: string;
+  private terminalStateSyncedId?: string;
   private readonly matchSubscribers = new Set<MatchSubscriber>();
 
   constructor(
@@ -530,6 +542,7 @@ class ParallelJobManager {
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
       logPath: logger.path,
     };
+    this.terminalStateSyncedId = undefined;
     await logger.write("info", "task_started", "单曲并行扫描已启动。", {
       uid,
       songId,
@@ -588,6 +601,7 @@ class ParallelJobManager {
         ...this.snapshotValue, ...report, status: report.status,
         finishedAt: new Date().toISOString(), note: report.note,
       };
+      this.terminalStateSyncedId = activeId;
     }).catch(async (error) => {
       await logger.write("error", "task_error", `单曲并行扫描异常结束：${message(error)}`, { error: message(error) });
       if (this.snapshotValue.id !== activeId) return;
@@ -620,7 +634,11 @@ class ParallelJobManager {
   }
 
   async status(): Promise<ParallelJobSnapshot> {
-    if (this.statePath && this.snapshotValue.status !== "idle") {
+    const active = ["running", "stopping"].includes(this.snapshotValue.status);
+    const needsTerminalSync = Boolean(
+      this.snapshotValue.id && this.terminalStateSyncedId !== this.snapshotValue.id,
+    );
+    if (this.statePath && (active || needsTerminalSync)) {
       const state = await loadParallelState(this.statePath);
       if (state && state.uid === this.snapshotValue.uid && state.songId === this.snapshotValue.songId) {
         this.snapshotValue = {
@@ -632,6 +650,7 @@ class ParallelJobManager {
           matches: state.matchCount, requestsTotal: state.requestCount,
         };
       }
+      if (!active) this.terminalStateSyncedId = this.snapshotValue.id;
     }
     this.snapshotValue.elapsedMs = taskElapsedMs(
       this.snapshotValue.startedAt,
@@ -662,17 +681,23 @@ class PoolManager {
   private refreshPromise?: Promise<void>;
   private nextRefreshAt = 0;
   private refreshError?: string;
+  private discoveryCache?: {
+    expiresAt: number;
+    value: ReturnType<typeof discoverClashVerge>;
+  };
 
   constructor(
     private readonly paths: RuntimePaths,
     private readonly refreshIntervalMs: number,
     private readonly refresher: typeof refreshProxyPool,
     private readonly coordinator: TaskCoordinator,
+    private readonly discoveryIntervalMs: number,
+    private readonly discoverer: typeof discoverClashVerge,
   ) {}
 
   async status(): Promise<PoolSnapshot> {
     const pool = await readProxyPool(this.paths.pool);
-    const running = proxyPoolRunning(pool);
+    const running = proxyPoolStatusRunning(pool);
     if (!this.starting && !this.coordinator.isBusy() && running && pool) this.scheduleRefresh(pool);
     return {
       status: this.starting ? "starting" : running ? "running" : "not-running",
@@ -685,7 +710,7 @@ class PoolManager {
       refreshError: this.refreshError,
       sourceConfigPath: pool?.sourceConfigPath,
       entries: publicPoolEntries(pool?.entries ?? []),
-      discovery: discoverClashVerge(),
+      discovery: this.discovery(),
     };
   }
 
@@ -766,6 +791,17 @@ class PoolManager {
         lease.release();
       });
   }
+
+  private discovery(): ReturnType<typeof discoverClashVerge> {
+    const now = Date.now();
+    if (!this.discoveryCache || this.discoveryCache.expiresAt <= now) {
+      this.discoveryCache = {
+        expiresAt: now + this.discoveryIntervalMs,
+        value: this.discoverer(),
+      };
+    }
+    return this.discoveryCache.value;
+  }
 }
 
 class AuthManager {
@@ -807,6 +843,8 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
     options.poolRefreshIntervalMs ?? 60_000,
     options.poolRefresher ?? refreshProxyPool,
     coordinator,
+    options.poolDiscoveryIntervalMs ?? 30_000,
+    options.poolDiscoverer ?? discoverClashVerge,
   );
   const auth = new AuthManager(paths);
   const currentVersion = options.currentVersion ?? await applicationVersion();

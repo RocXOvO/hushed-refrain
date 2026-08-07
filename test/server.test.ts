@@ -50,6 +50,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /prepareTaskForUpdate/);
   assert.match(appText, /\/api\/resume/);
   assert.match(appText, /保存进度并重启/);
+  assert.match(appText, /if \(refreshInFlight\) return refreshInFlight/);
+  assert.match(appText, /scheduleResultsRender/);
+  assert.match(appText, /Date\.now\(\) - lastLogsRefreshAt < 3_000/);
+  assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
@@ -220,6 +224,37 @@ test("dashboard keeps proxy-pool state under the configured runtime root", async
   assert.equal(pool.status, "not-running");
   assert.equal(pool.poolPath, join(runtimeRoot, ".ncm", "proxy-pool.json"));
   assert.deepEqual(pool.entries, []);
+});
+
+test("dashboard caches Clash discovery across frequent pool status polls", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-discovery-cache-"));
+  let discoveryCalls = 0;
+  const server = await startDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    runtimeRoot,
+    poolDiscoveryIntervalMs: 25,
+    poolDiscoverer: () => {
+      discoveryCalls += 1;
+      return {
+        platform: process.platform,
+        installed: false,
+        configCandidates: [],
+        mihomoCandidates: [],
+        profiles: [],
+      };
+    },
+  });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const endpoint = `http://127.0.0.1:${address.port}/api/pool`;
+
+  await Promise.all([fetch(endpoint), fetch(endpoint), fetch(endpoint)]);
+  assert.equal(discoveryCalls, 1);
+
+  await new Promise((done) => setTimeout(done, 30));
+  await fetch(endpoint);
+  assert.equal(discoveryCalls, 2);
 });
 
 test("dashboard periodically refreshes active proxy latency", async (context) => {

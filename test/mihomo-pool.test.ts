@@ -10,6 +10,7 @@ import {
   egressNetworkKey,
   managedMihomoCommandMatches,
   proxyPoolRunning,
+  proxyPoolStatusRunning,
   readClashVergeProfiles,
   readProxyPool,
   refreshProxyPool,
@@ -120,6 +121,23 @@ test("treats an active external pool as running without a managed PID", () => {
     active: false,
     entries: [entry("external", "8.8.8.8", 20, 30)],
   }), false);
+});
+
+test("uses a cheap PID liveness hint for frequently polled managed-pool status", () => {
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    source: "clash-verge",
+    active: true,
+    mihomoConfigPath: "/not/the/current/process/config.yaml",
+    mihomoExecutablePath: "/not/the/current/process/mihomo",
+    pid: process.pid,
+    entries: [entry("managed", "8.8.8.8", 20, 30)],
+  };
+
+  assert.equal(proxyPoolStatusRunning(pool), true);
+  assert.equal(proxyPoolRunning(pool), false);
+  assert.equal(proxyPoolStatusRunning({ ...pool, active: false }), false);
 });
 
 test("matches a managed Mihomo process by executable and config path", () => {

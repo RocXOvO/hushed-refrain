@@ -33,16 +33,26 @@ let knownMatches = -1;
 let toastTimer;
 let estimateTimer;
 let estimateRequest = 0;
-let refreshRequest = 0;
+let refreshInFlight;
+let authRefreshInFlight;
 let clashConfigSignature = "";
 let poolEntriesSignature = "";
-let poolRotationTimer;
-let poolRotationIndex = -1;
+let renderedJobSignature = "";
+let logsSignature = "";
+let logsRefreshInFlight;
+let lastLogsRefreshAt = 0;
 let resultStream;
 let resultMode = mode;
+let resultRenderTimer;
+let pendingLiveCommentId;
+let resultsRenderPending = false;
+let resultsNeedRefresh = false;
 let nativeUpdateState;
 let activeTaskMode;
 let runtimeClock;
+let runtimeClockText = "";
+let refreshTimer;
+let authRefreshTimer;
 const settlementPending = { parallel: undefined, source: undefined };
 const visibleResults = new Map();
 const disclosureAnimations = new WeakMap();
@@ -134,11 +144,18 @@ async function togglePool() {
   } catch (error) { toast(error.message); } finally { el.poolToggle.disabled = false; }
 }
 
-async function refresh() {
-  const request = ++refreshRequest;
+function refresh() {
+  if (refreshInFlight) return refreshInFlight;
+  const pending = performRefresh().finally(() => {
+    if (refreshInFlight === pending) refreshInFlight = undefined;
+  });
+  refreshInFlight = pending;
+  return pending;
+}
+
+async function performRefresh() {
   try {
     const [parallelJob, sourceJob, pool] = await Promise.all([api("/api/parallel/job"), api("/api/job"), api("/api/pool")]);
-    if (request !== refreshRequest) return;
     activeTaskMode = ["running", "stopping"].includes(parallelJob.status)
       ? "parallel"
       : ["running", "stopping"].includes(sourceJob.status)
@@ -164,15 +181,19 @@ async function refresh() {
     el.stop.disabled = !globallyActive;
     renderPool(pool);
     el.connection.classList.add("ready");
-    if (job.matches !== knownMatches) { knownMatches = job.matches; await refreshResults(); }
-    if ($('.tab.active')?.dataset.tab === "logs") await refreshLogs();
+    if (job.matches !== knownMatches) {
+      knownMatches = job.matches;
+      if ($("#resultsPanel").hidden) resultsNeedRefresh = true;
+      else await refreshResults();
+    }
+    if ($('.tab.active')?.dataset.tab === "logs") await refreshLogs(false);
   } catch (error) {
-    if (request !== refreshRequest) return;
     el.connection.classList.remove("ready"); toast(error.message);
   }
 }
 
 function renderParallel(job) {
+  if (!shouldRenderJob("parallel", job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "分片进度"; el.progress.textContent = `${fmt(job.shardsComplete)} / ${fmt(job.shards)}`;
@@ -199,6 +220,7 @@ function renderParallel(job) {
 }
 
 function renderSource(job) {
+  if (!shouldRenderJob("source", job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
@@ -232,6 +254,14 @@ function renderSource(job) {
   });
   el.stop.disabled = !active; el.sourceStart.disabled = active; el.dryRun.disabled = active;
   observeTaskSettlement(job, "source");
+}
+
+function shouldRenderJob(jobMode, job) {
+  const { elapsedMs: _elapsedMs, ...view } = job;
+  const signature = JSON.stringify([jobMode, view]);
+  if (signature === renderedJobSignature) return false;
+  renderedJobSignature = signature;
+  return true;
 }
 
 function renderProgress({ globalPercent, globalContext, songTitle, songPercent, songActive, songMeta, note }) {
@@ -277,6 +307,7 @@ function songProgressMeta(processed, total, pages, pageInSong) {
 function syncRuntimeTimer(job) {
   if (!job?.id || job.status === "idle") {
     runtimeClock = undefined;
+    runtimeClockText = "";
     el.runtimeTimer.hidden = true;
     return;
   }
@@ -295,7 +326,11 @@ function syncRuntimeTimer(job) {
 function renderRuntimeTimer() {
   if (!runtimeClock || el.runtimeTimer.hidden) return;
   const elapsedMs = runtimeClock.elapsedMs + (runtimeClock.active ? performance.now() - runtimeClock.syncedAt : 0);
-  el.runtimeTimerValue.textContent = clockDuration(elapsedMs);
+  const value = clockDuration(elapsedMs);
+  if (value !== runtimeClockText) {
+    runtimeClockText = value;
+    el.runtimeTimerValue.textContent = value;
+  }
 }
 
 function observeTaskSettlement(job, jobMode) {
@@ -375,7 +410,6 @@ function renderPool(pool) {
 
 function renderPoolEntries(entries, status) {
   if (status === "starting") {
-    stopPoolRotation();
     if (poolEntriesSignature !== "starting") {
       poolEntriesSignature = "starting";
       el.poolEntries.innerHTML = '<div class="pool-selecting"><span class="pool-selecting-ring" aria-hidden="true"></span><span>正在轮换测速并优选出口</span></div>';
@@ -384,7 +418,6 @@ function renderPoolEntries(entries, status) {
     return;
   }
   if (status !== "running" || entries.length === 0) {
-    stopPoolRotation();
     if (poolEntriesSignature !== "stopped") {
       poolEntriesSignature = "stopped";
       el.poolEntries.innerHTML = '<div class="pool-empty">等待代理节点</div>';
@@ -395,7 +428,6 @@ function renderPoolEntries(entries, status) {
   const signature = JSON.stringify(entries.map((entry) => [entry.name, entry.endpoint, entry.egressIp, entry.ncmLatencyMs, entry.ncmVerified]));
   if (signature !== poolEntriesSignature) {
     poolEntriesSignature = signature;
-    poolRotationIndex = -1;
     el.poolEntries.replaceChildren(...entries.map((entry, index) => {
       const row = document.createElement("div");
       row.className = "pool-entry";
@@ -404,28 +436,6 @@ function renderPoolEntries(entries, status) {
     }));
     el.poolTable.replaceChildren(...entries.map((entry) => tableRow([entry.name, entry.endpoint, entry.egressIp, `${fmt(entry.ncmLatencyMs)} ms`, entry.ncmVerified ? "已验证" : "待验证"])));
   }
-  startPoolRotation();
-}
-
-function startPoolRotation() {
-  if (poolRotationTimer || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-  advancePoolRotation();
-  poolRotationTimer = setInterval(advancePoolRotation, 1800);
-}
-
-function advancePoolRotation() {
-  const rows = [...el.poolEntries.querySelectorAll(".pool-entry")];
-  if (!rows.length) return;
-  rows.forEach((row) => row.classList.remove("is-current"));
-  poolRotationIndex = (poolRotationIndex + 1) % rows.length;
-  rows[poolRotationIndex].classList.add("is-current");
-}
-
-function stopPoolRotation() {
-  clearInterval(poolRotationTimer);
-  poolRotationTimer = undefined;
-  poolRotationIndex = -1;
-  el.poolEntries.querySelectorAll(".pool-entry").forEach((row) => row.classList.remove("is-current"));
 }
 
 function renderClashConfigs(discovery, activePoolPath, poolStatus) {
@@ -468,16 +478,38 @@ async function refreshResults() {
     if (requestedMode !== mode) return;
     if (resultMode !== mode) resetVisibleResults();
     data.results.forEach((item) => visibleResults.set(String(item.commentId), item));
-    renderResults();
+    clearTimeout(resultRenderTimer);
+    resultRenderTimer = undefined;
+    pendingLiveCommentId = undefined;
+    resultsNeedRefresh = false;
+    if ($("#resultsPanel").hidden) resultsRenderPending = true;
+    else {
+      resultsRenderPending = false;
+      renderResults();
+    }
   }
   catch (error) { toast(error.message); }
 }
 
-async function refreshLogs() {
+function refreshLogs(force = true) {
+  if (!force && Date.now() - lastLogsRefreshAt < 3_000) return Promise.resolve();
+  if (logsRefreshInFlight) return logsRefreshInFlight;
+  lastLogsRefreshAt = Date.now();
+  const pending = performLogsRefresh().finally(() => {
+    if (logsRefreshInFlight === pending) logsRefreshInFlight = undefined;
+  });
+  logsRefreshInFlight = pending;
+  return pending;
+}
+
+async function performLogsRefresh() {
   const requestedMode = mode;
   try {
     const data = await api(`/api/logs?mode=${encodeURIComponent(requestedMode)}&limit=200`);
     if (requestedMode !== mode) return;
+    const signature = JSON.stringify([requestedMode, data.path, data.entries]);
+    if (signature === logsSignature) return;
+    logsSignature = signature;
     el.logPath.textContent = data.path || "任务启动后将在本地生成结构化日志。";
     el.logs.replaceChildren(...(data.entries.length ? data.entries.map(logRow) : [emptyLogRow()]));
   } catch (error) {
@@ -522,7 +554,9 @@ function connectResultStream() {
       const id = String(item.commentId);
       const isNew = !visibleResults.has(id);
       visibleResults.set(id, item);
-      renderResults(isNew ? id : undefined);
+      if (visibleResults.size > 120) pruneVisibleResults(100);
+      if (isNew) pendingLiveCommentId = id;
+      scheduleResultsRender();
       knownMatches = Math.max(knownMatches, visibleResults.size);
     } catch { /* The next status refresh remains a safe fallback. */ }
   });
@@ -532,6 +566,11 @@ function connectResultStream() {
 function resetVisibleResults() {
   resultMode = mode;
   visibleResults.clear();
+  pendingLiveCommentId = undefined;
+  resultsRenderPending = false;
+  resultsNeedRefresh = false;
+  clearTimeout(resultRenderTimer);
+  resultRenderTimer = undefined;
 }
 
 function renderResults(liveCommentId) {
@@ -543,6 +582,29 @@ function renderResults(liveCommentId) {
     items.forEach((item) => visibleResults.set(String(item.commentId), item));
   }
   el.results.replaceChildren(...(items.length ? items.map((item) => resultRow(item, String(item.commentId) === liveCommentId)) : [emptyRow()]));
+}
+
+function scheduleResultsRender() {
+  resultsRenderPending = true;
+  if (resultRenderTimer || document.hidden || $("#resultsPanel").hidden) return;
+  resultRenderTimer = setTimeout(flushResultsRender, 120);
+}
+
+function flushResultsRender() {
+  clearTimeout(resultRenderTimer);
+  resultRenderTimer = undefined;
+  resultsRenderPending = false;
+  const liveCommentId = pendingLiveCommentId;
+  pendingLiveCommentId = undefined;
+  renderResults(liveCommentId);
+}
+
+function pruneVisibleResults(limit) {
+  const items = [...visibleResults.values()]
+    .sort((left, right) => resultTimestamp(right) - resultTimestamp(left))
+    .slice(0, limit);
+  visibleResults.clear();
+  items.forEach((item) => visibleResults.set(String(item.commentId), item));
 }
 
 function resultRow(item, live) {
@@ -669,7 +731,26 @@ async function stopJob() {
     void refresh();
   } catch (error) { toast(error.message); }
 }
-async function refreshAuth() { try { const auth = await api("/api/auth"); el.connection.innerHTML = `<span class="status-dot"></span>${auth.cookiePresent ? "会话已登录" : "本地服务"}`; el.login.querySelector("span").textContent = auth.cookiePresent ? "更新登录" : "二维码登录"; if (el.qrDialog.open) renderAuth(auth); } catch {} }
+function refreshAuth() {
+  if (authRefreshInFlight) return authRefreshInFlight;
+  const pending = performAuthRefresh().finally(() => {
+    if (authRefreshInFlight === pending) authRefreshInFlight = undefined;
+  });
+  authRefreshInFlight = pending;
+  return pending;
+}
+async function performAuthRefresh() {
+  try {
+    const auth = await api("/api/auth");
+    const connectionText = auth.cookiePresent ? "会话已登录" : "本地服务";
+    if (el.connection.dataset.label !== connectionText) {
+      el.connection.dataset.label = connectionText;
+      el.connection.innerHTML = `<span class="status-dot"></span>${connectionText}`;
+      el.login.querySelector("span").textContent = auth.cookiePresent ? "更新登录" : "二维码登录";
+    }
+    if (el.qrDialog.open) renderAuth(auth);
+  } catch { /* Connection state is reflected by the main status poll. */ }
+}
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
 
@@ -1045,16 +1126,69 @@ el.updateDownload.addEventListener("click", (event) => void activateUpdate(event
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
-$$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) { if (tab.dataset.tab === "logs") void refreshLogs(); return; } const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); if (tab.dataset.tab === "logs") void refreshLogs(); }));
+$$('.tab').forEach((tab) => tab.addEventListener("click", () => void activateTaskTab(tab)));
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
-void boot();
-const runtimeTimerInterval = setInterval(renderRuntimeTimer, 250);
-const refreshInterval = setInterval(() => void refresh(), 1500);
-const authRefreshInterval = setInterval(() => void refreshAuth(), 3000);
+void boot().finally(() => {
+  scheduleRefreshLoop();
+  scheduleAuthRefreshLoop();
+});
+const runtimeTimerInterval = setInterval(renderRuntimeTimer, 1_000);
+
+function scheduleRefreshLoop(delay = document.hidden ? 10_000 : 1_500) {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(async () => {
+    if (!document.hidden) await refresh();
+    scheduleRefreshLoop();
+  }, delay);
+}
+
+function scheduleAuthRefreshLoop(delay = el.qrDialog.open ? 1_500 : document.hidden ? 15_000 : 10_000) {
+  clearTimeout(authRefreshTimer);
+  authRefreshTimer = setTimeout(async () => {
+    if (!document.hidden || el.qrDialog.open) await refreshAuth();
+    scheduleAuthRefreshLoop();
+  }, delay);
+}
+
+addEventListener("visibilitychange", () => {
+  scheduleRefreshLoop();
+  scheduleAuthRefreshLoop();
+  if (!document.hidden) {
+    void refresh();
+    void refreshAuth();
+    if (resultsRenderPending) scheduleResultsRender();
+  }
+});
 addEventListener("pagehide", () => {
   resultStream?.close();
-  stopPoolRotation();
+  clearTimeout(resultRenderTimer);
+  clearTimeout(refreshTimer);
+  clearTimeout(authRefreshTimer);
   clearInterval(runtimeTimerInterval);
-  clearInterval(refreshInterval);
-  clearInterval(authRefreshInterval);
 });
+
+async function activateTaskTab(tab) {
+  const current = $('.tab.active');
+  if (current === tab) {
+    if (tab.dataset.tab === "logs") await refreshLogs();
+    if (tab.dataset.tab === "results") {
+      if (resultsNeedRefresh) await refreshResults();
+      else if (resultsRenderPending) flushResultsRender();
+    }
+    return;
+  }
+  const tabs = $$('.tab');
+  const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1;
+  tabs.forEach((item) => {
+    const active = item === tab;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+  });
+  await slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction);
+  if (tab.dataset.tab === "estimate") await refreshEstimate();
+  if (tab.dataset.tab === "logs") await refreshLogs();
+  if (tab.dataset.tab === "results") {
+    if (resultsNeedRefresh) await refreshResults();
+    else if (resultsRenderPending) flushResultsRender();
+  }
+}

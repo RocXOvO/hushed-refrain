@@ -383,8 +383,7 @@ button:disabled {
   padding: 26px 24px;
   position: relative;
   overflow: hidden;
-  background: rgb(255 255 255 / 94%);
-  backdrop-filter: blur(18px);
+  background: #fff;
   border-right: 1px solid var(--line);
   box-shadow: 8px 0 30px rgb(28 33 38 / 4%);
 }
@@ -508,11 +507,9 @@ h2 {
 .pool-heading strong { font-size: 0.9rem; }
 .compact-button { min-height: 34px !important; padding: 0 10px !important; font-size: 0.78rem; }
 .pool-entries { margin-top: 10px; display: grid; gap: 6px; }
-.pool-entry { min-height: 32px; padding: 4px 7px; display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 8px; color: var(--muted); background: rgb(255 255 255 / 72%); border: 1px solid transparent; border-radius: 8px; font-size: 0.74rem; transition: transform 320ms cubic-bezier(.2,.8,.2,1), border-color 320ms ease, background-color 320ms ease, box-shadow 320ms ease; }
-.pool-entry.is-current { transform: translateX(3px); border-color: rgb(8 127 140 / 24%); background: #fff; box-shadow: 0 5px 15px rgb(8 127 140 / 8%); }
+.pool-entry { min-height: 32px; padding: 4px 7px; display: grid; grid-template-columns: 9px minmax(0, 1fr) auto; align-items: center; gap: 8px; color: var(--muted); background: rgb(255 255 255 / 72%); border: 1px solid transparent; border-radius: 8px; font-size: 0.74rem; }
 .pool-entry strong { color: #343a40; font-size: 0.78rem; overflow-wrap: anywhere; }
-.lane-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--teal); transition: transform 320ms ease, box-shadow 320ms ease; }
-.pool-entry.is-current .lane-swatch { transform: rotate(45deg) scale(1.08); box-shadow: 0 0 0 3px rgb(8 127 140 / 12%); }
+.lane-swatch { width: 8px; height: 8px; border-radius: 2px; background: var(--teal); }
 .lane-1 { background: #d9363e; }
 .lane-2 { background: #b96b00; }
 .lane-3 { background: #6f52a2; }

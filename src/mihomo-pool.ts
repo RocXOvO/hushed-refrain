@@ -255,6 +255,20 @@ export function proxyPoolRunning(pool: ProxyPoolFile | undefined): boolean {
   return pool.source === "external" || managedMihomoProcessAlive(pool);
 }
 
+/**
+ * Cheap health hint for the frequently-polled dashboard status route.
+ *
+ * A full managed-process identity check shells out to `ps` on Unix and
+ * PowerShell on Windows. Doing that on every dashboard poll blocks Electron's
+ * main process and makes the window visibly stutter. Mutating and scan-start
+ * paths still use `proxyPoolRunning`, which performs the full PID identity
+ * check before trusting or terminating a managed process.
+ */
+export function proxyPoolStatusRunning(pool: ProxyPoolFile | undefined): boolean {
+  if (!pool?.active || pool.entries.length === 0) return false;
+  return pool.source === "external" || Boolean(pool.pid && isProcessAlive(pool.pid));
+}
+
 export async function importExternalProxyPool(
   endpoints: string[],
   poolPath: string,
