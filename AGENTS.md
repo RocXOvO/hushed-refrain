@@ -12,7 +12,7 @@ The app finds NetEase Cloud Music comments authored by a numeric user UID. It ha
 
 There is no database. Durable scan state is JSON; matches are append-only JSONL. Generated/runtime directories (`dist/`, `release/`, `.ncm/`, `data/`, `tmp/`) are ignored and must not be committed.
 
-The code version is authoritative in `package.json` and `package-lock.json`. The current work is for the next, not-yet-published release; do not record a tentative version here or infer a successful GitHub Release from local files. Verify the live tag, commit, and assets only when releasing or evaluating an update.
+The code version is authoritative in `package.json` and `package-lock.json`. Do not infer a successful GitHub Release from local files; verify the live tag, commit, and assets when releasing or evaluating an update.
 
 ## Architecture and data flow
 
@@ -24,7 +24,10 @@ Two scan engines exist and must not be conflated:
    - Page each song through `comment_new` with a descending time cursor, match `comment.user.userId` exactly, and write results. The default page size is 1000 and the accepted range is 1..2000.
    - When `hasMore` is true, the next cursor must be strictly older than the prior cursor. An empty page may still continue when `hasMore` is true and the cursor advances; non-progress or an exception remains recoverable work and must not be reported as complete.
    - `auto` in the CLI may select `user_comment_history` only when the logged-in account UID equals the target. The GUI deliberately uses `strategy: "scan"`.
-   - With a verified pool, one lane is created per distinct egress IP. A song page is one queue item; after a successful page, unfinished songs are requeued so Workers fairly rotate instead of one Worker monopolizing a long song.
+   - With a verified pool, one lane is created per distinct egress IP. A song page is initially one queue item; after a successful page, unfinished songs are requeued so Workers fairly rotate instead of one Worker monopolizing a long song.
+   - If Workers are waiting after a song cursor advances, that song's unread `[2000-01-01, nextCursor)` range is promoted to non-overlapping half-open `commentShards`. This keeps a one-song source scan and the few-song tail parallel across lanes. Further unread shard ranges use the same adaptive split math as the single-song engine.
+   - Source shard IDs are local to a song, so scheduler events include `songId`. `pageInSong` is the aggregate successful-page count across all shards; the UI never substitutes a shard-local `pageNo` for it.
+   - `maxCommentPagesPerSong` is an aggregate successful-page cap across a song's cursor and all shards. Per-song permits include in-flight requests; a failed request releases its permit and cannot prematurely mark the song truncated. The global request budget is reserved separately before dispatch.
 
 2. Single-song parallel scan (`scan-song`, `/api/parallel/job`, `runParallelSongScan`)
    - Read the song metadata, split `[startTime, endTime)` into non-overlapping time shards, newest first, and paginate `comment_new` using descending cursors. One shard page is one queue item.
@@ -35,7 +38,7 @@ Two scan engines exist and must not be conflated:
 
 Common result flow:
 
-`EnhancedNcmClient` -> scanner -> `JsonlResultWriter` -> JSONL on disk -> optional `onMatch` callback -> server SSE -> `web/app.js` live table. Alongside it, source/parallel request activity and parallel scheduler activity feed a best-effort `TaskLogger` and the dashboard log view.
+`EnhancedNcmClient` -> scanner -> `JsonlResultWriter` -> JSONL on disk -> optional `onMatch` callback -> server SSE -> `web/app.js` live table. Alongside it, source/parallel request and scheduler activity feed a best-effort `TaskLogger` and the dashboard log view.
 
 During a user-source scan, every worker reports its latest song/page through `onSongProgress`; `JobManager` keeps the most recently active song in its in-memory snapshot so dashboard polling does not confuse the first unfinished checkpoint entry with the song currently being requested.
 
@@ -44,6 +47,8 @@ The writer serializes concurrent appends and de-duplicates by `commentId`, inclu
 ## Task snapshots, live progress, and terminal settlement
 
 The dashboard keeps separate in-memory snapshots for source and parallel history, but a shared `TaskCoordinator` permits only one active source scan, parallel scan, or pool mutation at a time. Every accepted `POST .../job` receives a new UUID. The renderer polls both snapshots about every 1.5 seconds while result rows arrive independently over SSE. Status polling is single-flight (never overlapping), slows while the document is hidden, and resumes immediately when visible.
+
+Renderer button disabling during pool selection is only UX. `TaskCoordinator` leases and HTTP 409 responses are the authoritative mutual-exclusion boundary. Every renderer path that changes task availability must converge through `syncTaskStartAvailability`; individual render functions must not independently re-enable a start button.
 
 - Source live activity comes from `ScanOptions.onSongProgress`. It describes the latest request started by any Worker, so `currentSong` is an activity indicator, not the first unfinished checkpoint item and not a promise that other Workers are idle. Page numbering shown to users is one-based.
 - Checkpoint counters remain authoritative for durable progress (`songsProcessed`, pages/shards, requests, and matches). In-memory activity may be newer than the latest coalesced checkpoint, but must never mutate checkpoint cursor semantics.
@@ -76,11 +81,11 @@ The dashboard keeps separate in-memory snapshots for source and parallel history
 ## State, checkpoints, and coverage
 
 - `src/state.ts` owns source-scan state. State is written to a sibling `.tmp` and atomically renamed.
-- Current source state records `commentPagination: "cursor-v1"` and `commentPageSize`, plus UID, strategy/source/scope, candidates, per-song cursors/page counts, seen IDs, request/match totals, truncation, source errors, cooldown, and coverage. Changing its page size requires `--fresh` (or a new state path).
+- Current source state is version 2 and records `commentPagination: "cursor-v1"` and `commentPageSize`, plus UID, strategy/source/scope, candidates, per-song cursors/page counts/optional `commentShards`, seen IDs, request/match totals, truncation, source errors, cooldown, and coverage. Version-1 cursor state is upgraded on read; changing page size requires `--fresh` (or a new state path). Writing version 2 makes older clients reject shard-aware state instead of silently ignoring it.
 - Legacy offset checkpoints are migrated only by safely rescanning songs that were unfinished or truncated: each starts at the task's immutable `createdAt` cursor, and JSONL `commentId` de-duplication makes the intentional overlap idempotent. Completed, non-truncated songs are not rescanned merely for migration.
 - `src/parallel-scanner.ts` owns `kind: "parallel-song"`, version 1 state with immutable scan range/shard/page-size identity plus per-shard cursor and counters. Writes are coalesced to about 500 ms and forced at task end.
 - Adaptive child shards are appended to and persisted in the same parallel checkpoint with fresh monotonically increasing IDs. Resume loads that expanded shard list; it must not reconstruct only the original configured shard count.
-- Source song progress and parallel state may persist optional `totalComments`; old version-1 checkpoints without it remain valid. The parallel `coveragePercent` is derived from persisted shard bounds/cursors at status time rather than stored as a compatibility field.
+- Source song progress and parallel state may persist optional `totalComments`. Pooled and serial source runners both consume unfinished source shards, so changing entry shape never silently restarts the pre-split cursor range. Comments without a usable `time` stay with the shard response that returned them and rely on `commentId` de-duplication rather than being silently dropped. The parallel `coveragePercent` is derived from persisted shard bounds/cursors at status time rather than stored as a compatibility field.
 - Reusing state with a different UID/source/scope/strategy, source cursor page size, or parallel range/shard/page-size is rejected. Use `--fresh` or a new state path.
 - `--fresh` ignores the checkpoint; it does not clear the JSONL output, which still de-duplicates existing comment IDs.
 - `coverageComplete` is true only when all selected work finished without source failures or configured truncation. A task may have status `complete` while coverage remains incomplete.
@@ -99,25 +104,25 @@ The dashboard keeps separate in-memory snapshots for source and parallel history
 
 `src/mihomo-pool.ts` supports two pool sources:
 
-- Clash Verge: discover its merged config/profile YAML and `verge-mihomo`, choose region-diverse candidates, generate one loopback mixed listener per node, start a detached dedicated Mihomo process, then verify it.
+- Clash Verge: discover its merged config/profile YAML and `verge-mihomo`; accept one or more allowlisted profiles; validate, fairly interleave, de-duplicate, and conflict-rename inline leaf nodes; generate one config/process/controller with one loopback mixed listener per candidate; then verify it. Provider-backed or chained nodes are rejected explicitly because their relative/cache/reference semantics cannot be safely flattened.
 - External: normalize supplied HTTP/HTTPS proxy URLs and verify them directly; no managed PID is required.
 
 Verification has two gates: query the public egress IP, then call a real NetEase comment endpoint. Entries are sorted by combined IP-check and NetEase latency, de-duplicated by real egress IP, and only verified distinct IPs survive. Scans re-verify an active pool at task start.
 
 Dashboard scan starts are fail-closed for proxies. Parallel mode requires a running, fully reverified pool. Source mode requires that pool or an explicit static proxy; without either it rejects the start unless the user explicitly enables `allowDirect`, which is saved in the non-secret resume descriptor. An expected pool that fails verification never silently falls back to direct. This boundary applies to scan jobs: `/api/song` and `/api/user` remain direct when no optional proxy is supplied, and CLI proxy behavior remains explicit to each command.
 
-Pool selection treats an IPv4 `/24` or IPv6 `/48` as one network: only the fastest verified entry from each network may be selected. A managed or external pool that cannot fill its requested size with separate networks fails rather than using concentrated substitutes. While a pool is running and no coordinator lease is active, dashboard status schedules a non-overlapping background recheck about every 60 seconds; successful full rounds persist fresh latency/IP data and a temporary failure keeps the last known-good entries for a later retry.
+Managed pool selection treats an IPv4 `/24` or IPv6 `/48` as one network: only the fastest verified entry from each network may be selected, and a requested managed size must be filled. External import treats `size` as an upper bound and succeeds with at least one verified entry. While a pool is running and no coordinator lease is active, dashboard status schedules a non-overlapping background recheck about every 60 seconds; successful full rounds persist fresh latency/IP data and a temporary failure keeps the last known-good entries for a later retry.
 
-The frequently-polled pool status route uses only the managed PID's cheap liveness signal and caches Clash Verge discovery for about 30 seconds. It must not spawn `ps`/PowerShell or reparse profile YAML on every renderer poll. Security-sensitive scan-start, verification, and stop paths still use the full executable-plus-config process identity check before trusting or killing a managed PID.
+The frequently-polled pool status route uses only the managed PID's cheap liveness signal and caches Clash Verge discovery for about 30 seconds. It must not spawn `ps`/PowerShell or reparse profile YAML on every renderer poll. Scan start and refresh first attempt the full executable-plus-config identity check; if OS command-line lookup is temporarily unavailable, they may accept a still-live PID only after every listener is reverified and every real egress IP exactly matches its saved entry. Stop/kill always requires the full identity check. Windows command-line lookup writes raw PowerShell console output so long AppData paths cannot be wrapped into a false mismatch.
 
 Default managed pool: 8 selected exits from 48 candidates, listeners beginning at port 17891, controller on 19097. The dashboard exposes both counts (selected exits 1..32, candidates 1..128); these are defaults, not assumptions for scan logic.
 
 Security rules:
 
 - Generated listeners bind only to `127.0.0.1`; LAN, TUN, IPv6, and DNS are disabled in the generated Mihomo config.
-- Clash profile paths accepted by the dashboard must be in the discovered allowlist. `readClashVergeProfiles` additionally confines profile files to the profile directory and accepts only YAML remote/local entries.
+- Clash profile paths accepted by the dashboard must be in one cached discovery allowlist; one to 32 paths may be selected. `readClashVergeProfiles` additionally confines profile files to the profile directory and accepts only YAML remote/local entries. All selected YAML and a staging `mihomo -t` validation must pass before replacing a live managed process.
 - Proxy URLs may contain credentials. Pool/config files use mode `0600` off Windows, dashboard responses mask credentials, and logs/errors must not expose them.
-- The 8-request/80-ms transport gate reduces aggregate bursts but cannot hide the host IP from the upstream proxy provider or guarantee that a provider will never rate-limit the account.
+- Scan traffic uses an 8-request/80-ms task-wide transport gate. Pool build/import/verify/refresh uses a separate 4-request/80-ms gate. These reduce aggregate bursts but cannot hide the host IP from the upstream proxy provider or guarantee that a provider will never rate-limit the account.
 - Never commit or print `.ncm/cookie.txt`, QR images, proxy-pool files, profile contents, tokens, `.env`, or user result/state data.
 
 ## Desktop and updates
@@ -145,6 +150,8 @@ Security rules:
 | `src/lane-recovery.ts` | Recoverable per-lane failure backoff and success reset. |
 | `src/scanner.ts`, `src/state.ts` | User-source/history scans, pooled workers, checkpoints, coverage. |
 | `src/parallel-scanner.ts` | Cursor time shards, adaptive splitting, lane failover, parallel checkpoints. |
+| `src/time-shards.ts` | Shared half-open time-shard creation and adaptive split state transitions. |
+| `src/clash-profile-merge.ts` | Pure multi-profile validation, fair candidate ordering, de-duplication, and conflict naming. |
 | `src/progress.ts` | Comment-total reconciliation and split-stable parallel time coverage. |
 | `src/work-queue.ts` | Waitable, requeueable async work queue and completion detection. |
 | `src/cursor-pagination.ts` | Shared strict descending-cursor validation. |
@@ -164,8 +171,8 @@ Security rules:
 | `web/styles.css` | Responsive/desktop styling, integrated thin transparent-track scrollbars, and reduced-motion handling. |
 | `test/` | Node test-runner coverage by source module; upstream and network behavior are stubbed. |
 | `build/` | Icons and electron-builder macOS metadata hook. |
-| `scripts/build-mac.cjs` | Builds signed DMGs in a temp directory, then copies artifacts to `release/`. |
-| `.github/workflows/windows-package.yml` | Runs tests, launches the packaged Windows app in smoke mode, builds NSIS assets, and uploads them for release. |
+| `scripts/build-mac.cjs` | Builds ad-hoc-signed, non-notarized DMGs in a temp directory, then copies artifacts to `release/`. |
+| `.github/workflows/windows-package.yml` | Manual validation workflow: runs tests and packaged smoke, builds NSIS assets, and uploads a short-lived Actions artifact; release publication is a separate explicit step. |
 
 ## Dashboard HTTP surface
 
@@ -185,9 +192,9 @@ The README may be reorganized or shortened, but a rewrite must preserve these us
 
 - The target is a numeric NetEase user UID. The dashboard has an adjacent UID tutorial; the ID comes from the user's profile URL, not the nickname.
 - For another user, the app discovers candidate songs from public listening rank and/or likes, then matches normalized comment author IDs exactly. Logged-in self lookup may use comment history. Source visibility still depends on privacy settings and login state.
-- User-source and single-song paths both use descending `comment_new` cursors now, but source scheduling/checkpoints and parallel half-open time shards remain different. Source comment pages default to 1000 and accept 1..2000.
+- User-source and single-song paths both use descending `comment_new` cursors and shared half-open shard math, but retain different state/report/source-discovery lifecycles. Source comment pages default to 1000 and accept 1..2000; source state promotes a remaining per-song cursor range into persisted shards only after Workers become idle.
 - The GUI defaults to continuous scanning (`requestBudget=0`, no stop-after-first); CLI `scan` retains its finite per-run default and resumes from JSON checkpoints. `403/429`, explicit truncation, partial source failure, and operator stop affect status/coverage exactly as documented in this memory.
-- Pooled scheduling is page-granular; parallel mode adaptively bisects unread ranges when Workers are waiting. Structured events distinguish ordinary failures, explicit rate limits, and scheduler splits.
+- Pooled scheduling is page-granular; both source and parallel modes adaptively bisect unread ranges when Workers are waiting. Structured events distinguish ordinary failures, explicit rate limits, and scheduler splits.
 - The dashboard shows global and current-song progress separately. Source global progress counts completed songs; parallel global progress is cursor-weighted time coverage. Comment totals are optional live API estimates, not completion authority, and the runtime timer freezes at the server's terminal elapsed value.
 - There is no database. Results are de-duplicated JSONL and durable state is atomic JSON. CLI/web defaults use repository-local `.ncm/` and `data/`; packaged Electron uses its `userData` directory.
 - Cross-version GUI recovery uses both `data/resume-task.json` (form parameters only) and the mode-specific scan checkpoint (progress). Restore does not auto-start and must leave `fresh` disabled. Windows installation stops the active scan, waits for terminal status/final checkpoint, and aborts on timeout before calling the updater.
@@ -197,7 +204,7 @@ The README may be reorganized or shortened, but a rewrite must preserve these us
 - Speed figures are estimates based on page size, thread spacing/jitter, verified lanes, Worker count, and measured latency. Cooldowns, source discovery, retries, and remote behavior can make reality slower.
 - Windows packaged clients support in-app updates only from updater-capable versions onward and a valid Release needs `.exe`, `.exe.blockmap`, and `latest.yml`. Web/macOS use the manual-release path; public macOS distribution still needs proper Developer ID signing/notarization beyond the local ad-hoc build.
 - Source requires Node.js 20+ and keeps `@neteasecloudmusicapienhanced/api` pinned. The documented check/test/build commands and Windows package-validation workflow are release gates.
-- Concrete version numbers, filenames, tags, download links, and "latest release" statements must match `package.json` and live GitHub state at publication time. The current work is an upcoming release, not evidence of publication; prefer version-neutral instructions in long-lived prose.
+- Concrete version numbers, filenames, tags, download links, and "latest release" statements must match `package.json` and live GitHub state at publication time; prefer version-neutral instructions in long-lived prose.
 
 ## Development and verification
 
@@ -222,9 +229,9 @@ Before handing off a code change, run at least `npm run check && npm test && npm
 
 1. Before the next release, choose its semantic version and set the same value in `package.json` and `package-lock.json`. Update README statements that name a concrete artifact/version; source changes alone do not mean the release exists.
 2. Run the full verification above and build platform artifacts from the final source/version.
-3. For Windows, dispatch `Windows package validation`, require its packaged-app smoke test to pass, and use its uploaded artifacts. Inspect `latest.yml` and ensure the final `.exe`, `.exe.blockmap`, and `latest.yml` all exist. Do not rename one without regenerating metadata.
+3. For Windows, dispatch `Windows package validation`, require its packaged-app smoke test to pass, and use its uploaded Actions artifact. Inspect `latest.yml` and ensure its version/path/size/SHA-512 match the final `.exe`, and that the matching `.exe.blockmap` exists. Do not rename one without regenerating metadata.
 4. Commit/push the source, create tag `vX.Y.Z` on that exact commit, and publish a **stable** GitHub Release with the platform assets. The repository configured in `package.json` and `src/update.ts` is `RocXOvO/ncm-comment-finder`.
-5. Verify the public Release assets and hashes after upload, and confirm the latest stable Release points to the intended version. Do not mark a broken build as latest; preserve an explicit upgrade path for users whose updater cannot start.
+5. Verify the public Release assets and hashes after upload, and confirm the latest stable Release points to the intended version. `release/` is non-authoritative and may contain historical artifacts; upload only exact current-version files from a clean staging set, never a wildcard over that directory. Do not mark a broken build as latest; preserve an explicit upgrade path for users whose updater cannot start.
 
 Local verification, the Windows workflow, and post-upload checks are all release gates; one does not replace the others.
 
@@ -252,3 +259,15 @@ Local verification, the Windows workflow, and post-upload checks are all release
 ## Maintaining this memory
 
 Update this file in the same commit whenever a change alters module ownership, entry points, routes, state schema/compatibility, concurrency/rate semantics, proxy validation, security boundaries, build commands, artifacts, or release/update behavior. Verify claims against current code and tests, remove stale statements instead of appending history, and keep user instructions in `README.md` synchronized. If only implementation details change without affecting how a future agent navigates or reasons about the system, no memory edit is needed.
+
+## Deferred GUI direction (confirmation required)
+
+The user has approved recording, but not implementing, a future “Replit layout + v0 visual language” redesign. Do not expand an unrelated feature/release into this redesign. Before changing the production UI, first produce a complete effect mockup or runnable static prototype and obtain a new explicit user confirmation.
+
+- Use a modern desktop productivity layout: collapsible left navigation, central work area, and a collapsible right runtime/node-detail pane.
+- Left navigation targets: search tasks, live results, proxy pool, runtime logs, and settings. A top task bar should concentrate UID, source mode, worker/exit counts, and start/pause/stop actions.
+- The center should emphasize current song, overall progress, scanned count, and matches; live results and logs should use switchable compact tables/panels.
+- Keep proxy nodes in a compact list showing name, latency, status, egress IP, and in-use/checking state; avoid full-screen card grids.
+- Visual direction: neutral surfaces, one accent color, thin borders, moderate radii, clear typography, small state labels, and collapsed advanced settings by default.
+- Avoid purple gradients, heavy glass effects, pervasive rounded cards, and long blur/animation work. Preserve the integrated scrollbars, polling/render throttles, and other low-cost performance protections.
+- Reference intent supplied by the user: Replit Project Editor for the split workspace and v0/shadcn-style restrained neutral visuals. Treat the references as inspiration, not authorization to copy or to bypass the prototype review gate.

@@ -5,6 +5,7 @@ import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-
 import { mergeCommentTotal } from "./progress";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { JsonlResultWriter } from "./results";
+import { createTimeShards, SOURCE_SCAN_START_TIME, splitRemainingTimeShard } from "./time-shards";
 import { AsyncWorkQueue } from "./work-queue";
 import {
   assertCompatibleState,
@@ -14,6 +15,7 @@ import {
 } from "./state";
 import type {
   FoundComment,
+  CommentTimeShard,
   NcmClient,
   RunReport,
   ScanOptions,
@@ -38,6 +40,11 @@ class SourceLaneFailure extends Error {
     super(`Source lane ${lane} failed.`);
     this.name = "SourceLaneFailure";
   }
+}
+
+interface SourceScanWork {
+  songIndex: number;
+  shardId?: number;
 }
 
 export async function runCommentFinder(
@@ -177,11 +184,15 @@ export async function runPooledCommentFinder(
     }
     if (state.finished) return pooledReport(state, lanes, options, initialRequests, "complete");
 
-    const queue = new AsyncWorkQueue(
-      state.songs.map((_, index) => index).filter((index) => !state.songProgress![index].done),
+    const queue = new AsyncWorkQueue<SourceScanWork>(
+      prepareSourceWork(state),
     );
     const blockedLanes = new Map<string, number>();
     const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
+    const reservedSongPages = new Map(
+      state.songProgress!.map((progress, index) => [index, progress.pageInSong]),
+    );
+    const songPermitWaiters = new Map<number, Set<() => void>>();
     let reservedRequests = pooledRequestsUsed(lanes);
     let stopRequested = false;
     let budgetReached = false;
@@ -192,48 +203,95 @@ export async function runPooledCommentFinder(
     const stopScheduling = (): void => {
       stopRequested = true;
       queue.stop();
+      for (const waiters of songPermitWaiters.values()) {
+        for (const resolveWaiter of waiters) resolveWaiter();
+        waiters.clear();
+      }
     };
 
-    const reserveRequest = (): boolean => {
-      if (stopRequested) return false;
+    const notifySongPermit = (songIndex: number): void => {
+      const waiters = songPermitWaiters.get(songIndex);
+      if (!waiters) return;
+      for (const resolveWaiter of waiters) resolveWaiter();
+      waiters.clear();
+    };
+
+    const waitForSongPermit = (songIndex: number): Promise<void> => new Promise((resolveWaiter) => {
+      const waiters = songPermitWaiters.get(songIndex) ?? new Set<() => void>();
+      waiters.add(resolveWaiter);
+      songPermitWaiters.set(songIndex, waiters);
+      const progress = state.songProgress![songIndex];
+      const reservedPages = reservedSongPages.get(songIndex) ?? progress.pageInSong;
+      if (
+        stopRequested ||
+        progress.done ||
+        options.maxCommentPagesPerSong === 0 ||
+        reservedPages < options.maxCommentPagesPerSong
+      ) {
+        waiters.delete(resolveWaiter);
+        resolveWaiter();
+      }
+    });
+
+    const reserveRequest = (songIndex: number): "reserved" | "wait" | "stopped" => {
+      if (stopRequested) return "stopped";
+      const progress = state.songProgress![songIndex];
+      const reservedPages = reservedSongPages.get(songIndex) ?? progress.pageInSong;
+      if (options.maxCommentPagesPerSong > 0 && reservedPages >= options.maxCommentPagesPerSong) {
+        if (progress.pageInSong >= options.maxCommentPagesPerSong) {
+          markSongTruncated(state, songIndex);
+          notifySongPermit(songIndex);
+          return "stopped";
+        }
+        return "wait";
+      }
       if (options.requestBudget > 0 && reservedRequests >= options.requestBudget) {
         budgetReached = true;
         stopScheduling();
-        return false;
+        return "stopped";
       }
       reservedRequests += 1;
-      return true;
+      reservedSongPages.set(songIndex, reservedPages + 1);
+      return "reserved";
     };
 
-    const scanSongPage = async (lane: SourceScanLane, index: number): Promise<void> => {
-      const song = state.songs[index];
-      const progress = state.songProgress![index];
-      if (stopRequested || progress.done) return;
-      if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
-        if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
-        progress.done = true;
-        syncSongCursor(state);
-        await checkpoint();
-        return;
+    const scanSongPage = async (lane: SourceScanLane, work: SourceScanWork): Promise<SourceScanWork[]> => {
+      const { songIndex } = work;
+      const song = state.songs[songIndex];
+      const progress = state.songProgress![songIndex];
+      const shard = work.shardId === undefined
+        ? undefined
+        : progress.commentShards?.find((candidate) => candidate.id === work.shardId);
+      if (stopRequested || progress.done || (work.shardId !== undefined && (!shard || shard.done))) return [];
+      while (true) {
+        const reservation = reserveRequest(songIndex);
+        if (reservation === "reserved") break;
+        if (reservation === "stopped") {
+          syncSongCursor(state);
+          await checkpoint();
+          return [];
+        }
+        await waitForSongPermit(songIndex);
+        if (stopRequested || progress.done || shard?.done) return [];
       }
-      if (!reserveRequest()) return;
-      const requestedCursor = progress.commentCursor!;
-      const requestedPageNo = progress.commentPageNo!;
+      const requestedCursor = shard?.cursor ?? progress.commentCursor!;
+      const requestedPageNo = shard?.pageNo ?? progress.commentPageNo!;
       const requestStartedAt = Date.now();
       const requestActivity = {
         lane: lane.name,
         operation: "comment-page" as const,
         songId: song.id,
         page: requestedPageNo,
+        shardId: shard?.id,
       };
       publishRequestActivity(options, { ...requestActivity, phase: "start" });
       let page;
       try {
-        page = await executeProxyRequest(lane, `comment_new:${song.id}`, () => {
+        page = await executeProxyRequest(lane, `comment_new:${song.id}${shard ? `:shard-${shard.id}` : ""}`, () => {
           publishSongProgress(
             options,
             song,
-            requestedPageNo,
+            progress.pageInSong + 1,
             progress.commentOffset,
             progress.totalComments,
           );
@@ -245,6 +303,9 @@ export async function runPooledCommentFinder(
           );
         });
       } catch (error) {
+        const reservedPages = reservedSongPages.get(songIndex) ?? progress.pageInSong;
+        reservedSongPages.set(songIndex, Math.max(progress.pageInSong, reservedPages - 1));
+        notifySongPermit(songIndex);
         const status = remoteStatus(error);
         publishRequestActivity(options, {
           ...requestActivity,
@@ -266,13 +327,28 @@ export async function runPooledCommentFinder(
         hasMore: page.hasMore,
       });
 
-      const nextCursor = nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}`);
+      const times = shard
+        ? page.comments.map((comment) => comment.time).filter((time): time is number => time !== undefined)
+        : [];
+      const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
+      const crossedShardStart = Boolean(shard && oldestTime !== undefined && oldestTime < shard.startTime);
+      const nextCursor = crossedShardStart
+        ? undefined
+        : nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}${shard ? ` shard ${shard.id}` : ""}`);
+      const scannedComments = shard
+        ? page.comments.filter((comment) => comment.time === undefined || (comment.time >= shard.startTime && comment.time < shard.endTime))
+        : page.comments;
       progress.pageInSong += 1;
-      progress.commentOffset += page.comments.length;
+      progress.commentOffset += scannedComments.length;
       progress.totalComments = mergeCommentTotal(progress.totalComments, page.total, progress.commentOffset);
-      progress.commentPageNo = requestedPageNo + 1;
+      if (shard) {
+        shard.pagesProcessed += 1;
+        shard.pageNo = requestedPageNo + 1;
+      } else {
+        progress.commentPageNo = requestedPageNo + 1;
+      }
       state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
-      const matches = page.comments
+      const matches = scannedComments
         .filter((comment) => comment.userId === options.uid)
         .map<FoundComment>((comment) => ({
           ...comment,
@@ -285,19 +361,47 @@ export async function runPooledCommentFinder(
           capturedAt: new Date().toISOString(),
         }));
       const added = await appendMatches(writer, state, seenCommentIds, matches);
-      if (nextCursor === undefined) {
-        progress.done = true;
-      } else if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
-        if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
+      let nextWork: SourceScanWork[] = [];
+      if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
+        markSongTruncated(state, songIndex);
+      } else if (shard) {
+        const numericNextCursor = nextCursor === undefined ? undefined : Number(nextCursor);
+        const cursorPassedStart = numericNextCursor !== undefined && numericNextCursor <= shard.startTime;
+        if (nextCursor === undefined || cursorPassedStart) {
+          shard.done = true;
+        } else {
+          shard.cursor = nextCursor;
+          nextWork = splitSourceShardIfUseful(
+            progress,
+            shard,
+            songIndex,
+            song.id,
+            queue.waitingCount(),
+            options,
+          );
+        }
+        progress.done = progress.commentShards!.every((candidate) => candidate.done);
+        if (!progress.done && nextWork.length === 0 && !shard.done) nextWork = [work];
+      } else if (nextCursor === undefined) {
         progress.done = true;
       } else {
         progress.commentCursor = nextCursor;
+        const shardWorks = queue.waitingCount() > 0
+          ? shardRemainingSong(
+            progress,
+            songIndex,
+            queue.waitingCount() + 1,
+            options.maxCommentPagesPerSong,
+          )
+          : [];
+        nextWork = shardWorks.length > 0 ? shardWorks : [work];
       }
+      notifySongPermit(songIndex);
       syncSongCursor(state);
       publishSongProgress(
         options,
         song,
-        requestedPageNo,
+        progress.pageInSong,
         progress.commentOffset,
         progress.totalComments,
       );
@@ -306,6 +410,7 @@ export async function runPooledCommentFinder(
         matched = true;
         stopScheduling();
       }
+      return stopRequested || progress.done ? [] : nextWork;
     };
 
     const runWorker = async (lane: SourceScanLane): Promise<void> => {
@@ -313,30 +418,29 @@ export async function runPooledCommentFinder(
       while (!stopRequested && !blockedLanes.has(lane.name)) {
         await recovery.waitUntilReady();
         if (stopRequested || blockedLanes.has(lane.name)) return;
-        const index = await queue.take();
-        if (index === undefined) return;
-        let requeue = false;
+        const work = await queue.take();
+        if (work === undefined) return;
+        let requeue: SourceScanWork[] = [];
         try {
           if (blockedLanes.has(lane.name)) {
-            requeue = !stopRequested;
+            requeue = stopRequested ? [] : [work];
             return;
           }
-          await scanSongPage(lane, index);
+          requeue = await scanSongPage(lane, work);
           recovery.recordSuccess();
-          requeue = !state.songProgress![index].done && !stopRequested;
         } catch (error) {
           if (error instanceof CooldownRequired) {
             blockedLanes.set(lane.name, error.retryAfterMs);
-            requeue = !state.songProgress![index].done;
+            requeue = state.songProgress![work.songIndex].done ? [] : [work];
             if (blockedLanes.size === lanes.length) {
-              requeue = false;
+              requeue = [];
               stopScheduling();
             }
             return;
           }
           if (error instanceof SourceLaneFailure) {
             recovery.recordFailure();
-            requeue = !state.songProgress![index].done;
+            requeue = state.songProgress![work.songIndex].done ? [] : [work];
             return;
           }
           if (error instanceof RequestBudgetExhausted) {
@@ -353,7 +457,7 @@ export async function runPooledCommentFinder(
           stopScheduling();
           return;
         } finally {
-          queue.complete(requeue ? index : undefined);
+          queue.complete(requeue.length > 0 ? requeue : undefined);
         }
       }
     };
@@ -516,19 +620,25 @@ async function runSongScan(
       options.maxCommentPagesPerSong > 0 &&
       state.pageInSong >= options.maxCommentPagesPerSong
     ) {
-      if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
-      advanceSong(state);
+      markSongTruncated(state, state.songIndex);
+      syncSongCursor(state);
       await checkpoint();
       continue;
     }
 
-    const requestedCursor = songProgress.commentCursor!;
-    const requestedPageNo = songProgress.commentPageNo!;
+    const shard = songProgress.commentShards?.find((candidate) => !candidate.done);
+    if (songProgress.commentShards?.length && !shard) {
+      advanceSong(state);
+      await checkpoint();
+      continue;
+    }
+    const requestedCursor = shard?.cursor ?? songProgress.commentCursor!;
+    const requestedPageNo = shard?.pageNo ?? songProgress.commentPageNo!;
     const page = await governor.execute(`comment_new:${song.id}`, () => {
       publishSongProgress(
         options,
         song,
-        requestedPageNo,
+        songProgress.pageInSong + 1,
         songProgress.commentOffset,
         songProgress.totalComments,
       );
@@ -539,9 +649,19 @@ async function runSongScan(
         requestedCursor,
       );
     });
-    const nextCursor = nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}`);
+    const times = shard
+      ? page.comments.map((comment) => comment.time).filter((time): time is number => time !== undefined)
+      : [];
+    const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
+    const crossedShardStart = Boolean(shard && oldestTime !== undefined && oldestTime < shard.startTime);
+    const nextCursor = crossedShardStart
+      ? undefined
+      : nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}${shard ? ` shard ${shard.id}` : ""}`);
+    const scannedComments = shard
+      ? page.comments.filter((comment) => comment.time === undefined || (comment.time >= shard.startTime && comment.time < shard.endTime))
+      : page.comments;
 
-    const matches = page.comments
+    const matches = scannedComments
       .filter((comment) => comment.userId === options.uid)
       .map<FoundComment>((comment) => ({
         ...comment,
@@ -556,14 +676,27 @@ async function runSongScan(
     const added = await appendMatches(writer, state, seenCommentIds, matches);
 
     songProgress.pageInSong += 1;
-    songProgress.commentOffset += page.comments.length;
+    songProgress.commentOffset += scannedComments.length;
     songProgress.totalComments = mergeCommentTotal(songProgress.totalComments, page.total, songProgress.commentOffset);
-    songProgress.commentPageNo = requestedPageNo + 1;
+    if (shard) {
+      shard.pagesProcessed += 1;
+      shard.pageNo = requestedPageNo + 1;
+    } else {
+      songProgress.commentPageNo = requestedPageNo + 1;
+    }
     state.pageInSong = songProgress.pageInSong;
     state.commentOffset = songProgress.commentOffset;
     state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
 
-    if (nextCursor === undefined) {
+    if (shard) {
+      const numericNextCursor = nextCursor === undefined ? undefined : Number(nextCursor);
+      if (nextCursor === undefined || (numericNextCursor !== undefined && numericNextCursor <= shard.startTime)) {
+        shard.done = true;
+      } else {
+        shard.cursor = nextCursor;
+      }
+      if (songProgress.commentShards!.every((candidate) => candidate.done)) advanceSong(state);
+    } else if (nextCursor === undefined) {
       advanceSong(state);
     } else {
       songProgress.commentCursor = nextCursor;
@@ -571,7 +704,7 @@ async function runSongScan(
     publishSongProgress(
       options,
       song,
-      requestedPageNo,
+      songProgress.pageInSong,
       songProgress.commentOffset,
       songProgress.totalComments,
     );
@@ -792,6 +925,80 @@ function ensureSongProgress(state: ScanState): void {
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
 }
 
+function prepareSourceWork(state: ScanState): SourceScanWork[] {
+  ensureSongProgress(state);
+  return state.songProgress!.flatMap((progress, songIndex) => {
+    if (progress.done) return [];
+    if (progress.commentShards?.length) {
+      return progress.commentShards
+        .filter((shard) => !shard.done)
+        .sort((left, right) => right.endTime - left.endTime)
+        .map((shard) => ({ songIndex, shardId: shard.id }));
+    }
+    return [{ songIndex }];
+  });
+}
+
+function shardRemainingSong(
+  progress: NonNullable<ScanState["songProgress"]>[number],
+  songIndex: number,
+  desiredShards: number,
+  maxPages: number,
+): SourceScanWork[] {
+  if (progress.commentShards?.length) {
+    return progress.commentShards
+      .filter((shard) => !shard.done)
+      .map((shard) => ({ songIndex, shardId: shard.id }));
+  }
+  const endTime = Number(progress.commentCursor);
+  if (!Number.isInteger(endTime) || endTime <= SOURCE_SCAN_START_TIME) return [];
+  const availablePages = maxPages > 0 ? maxPages - progress.pageInSong : 64;
+  if (availablePages <= 1) return [];
+  const shardCount = Math.max(2, Math.min(64, desiredShards, availablePages));
+  progress.commentShards = createTimeShards(SOURCE_SCAN_START_TIME, endTime, shardCount);
+  return progress.commentShards.map((shard) => ({ songIndex, shardId: shard.id }));
+}
+
+function splitSourceShardIfUseful(
+  progress: NonNullable<ScanState["songProgress"]>[number],
+  shard: CommentTimeShard,
+  songIndex: number,
+  songId: string,
+  waitingWorkers: number,
+  options: ScanOptions,
+): SourceScanWork[] {
+  const currentWork = { songIndex, shardId: shard.id };
+  if (waitingWorkers <= 0) return [currentWork];
+  const nextShardId = progress.commentShards!.reduce(
+    (maximum, candidate) => Math.max(maximum, candidate.id),
+    -1,
+  ) + 1;
+  const split = splitRemainingTimeShard(shard, nextShardId);
+  if (!split) return [currentWork];
+  const { sibling, splitAt, remainingStart, remainingEnd } = split;
+  Object.assign(shard, split.current);
+  progress.commentShards!.push(sibling);
+  publishSchedulerActivity(options, {
+    type: "adaptive-split",
+    songId,
+    originalShardId: shard.id,
+    newShardId: sibling.id,
+    splitAt,
+    remainingStart,
+    remainingEnd,
+    waitingWorkers,
+  });
+  return [currentWork, { songIndex, shardId: sibling.id }];
+}
+
+function markSongTruncated(state: ScanState, songIndex: number): void {
+  const song = state.songs[songIndex];
+  const progress = state.songProgress![songIndex];
+  if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
+  for (const shard of progress.commentShards ?? []) shard.done = true;
+  progress.done = true;
+}
+
 function syncSongCursor(state: ScanState): void {
   ensureSongProgress(state);
   const index = state.songProgress!.findIndex((progress) => !progress.done);
@@ -845,6 +1052,17 @@ function publishRequestActivity(
 ): void {
   try {
     options.onRequestActivity?.(activity);
+  } catch {
+    // Diagnostic logging must never interrupt the scan.
+  }
+}
+
+function publishSchedulerActivity(
+  options: ScanOptions,
+  activity: Parameters<NonNullable<ScanOptions["onSchedulerActivity"]>>[0],
+): void {
+  try {
+    options.onSchedulerActivity?.(activity);
   } catch {
     // Diagnostic logging must never interrupt the scan.
   }

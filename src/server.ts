@@ -19,7 +19,6 @@ import {
   defaultMihomoPoolOptions,
   discoverClashVerge,
   importExternalProxyPool,
-  proxyPoolRunning,
   proxyPoolStatusRunning,
   readProxyPool,
   refreshProxyPool,
@@ -208,6 +207,7 @@ interface PoolSnapshot {
   refreshing: boolean;
   refreshError?: string;
   sourceConfigPath?: string;
+  sourceConfigPaths?: string[];
   entries: ProxyPoolEntry[];
   discovery: ReturnType<typeof discoverClashVerge>;
 }
@@ -255,7 +255,7 @@ class JobManager {
     this.statePath = join(this.paths.data, `web-state-${jobKey}.json`);
     this.outputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
     const activePool = await readProxyPool(this.paths.pool);
-    const activePoolExpected = Boolean(activePool && proxyPoolRunning(activePool));
+    const activePoolExpected = proxyPoolStatusRunning(activePool);
     const poolEntries = activePoolExpected ? await verifyProxyPool(activePool!) : [];
     if (activePoolExpected && poolEntries.length === 0) {
       throw new HttpError(409, "代理池复核后没有可用出口；已阻止回退到本机直连，请重新构建代理池。");
@@ -301,6 +301,7 @@ class JobManager {
       dryRun: bool(input.dryRun),
       onMatch: (comment) => this.publishMatch(comment),
       onRequestActivity: (activity) => logger.request(activity),
+      onSchedulerActivity: (activity) => logger.scheduler(activity),
       onSongProgress: (activity) => {
         if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
         this.snapshotValue = {
@@ -508,7 +509,7 @@ class ParallelJobManager {
     const jitterMs = integer(input.jitterMs ?? 100, "jitterMs", 0, 600_000);
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const pool = await readProxyPool(this.paths.pool);
-    if (!pool || !proxyPoolRunning(pool)) throw new HttpError(409, "代理池尚未运行。");
+    if (!pool || !proxyPoolStatusRunning(pool)) throw new HttpError(409, "代理池尚未运行。");
     const entries = await verifyProxyPool(pool);
     if (entries.length === 0) {
       throw new HttpError(409, "代理池复核后没有可用出口；已阻止回退到本机直连，请重新构建代理池。");
@@ -709,6 +710,7 @@ class PoolManager {
       refreshing: Boolean(this.refreshPromise),
       refreshError: this.refreshError,
       sourceConfigPath: pool?.sourceConfigPath,
+      sourceConfigPaths: pool?.sourceConfigPaths,
       entries: publicPoolEntries(pool?.entries ?? []),
       discovery: this.discovery(),
     };
@@ -726,7 +728,10 @@ class PoolManager {
       const defaults = defaultMihomoPoolOptions(this.paths.root);
       await startMihomoPool({
         ...defaults,
-        sourceConfigPath: selectedClashConfigPath(input.sourceConfigPath) ?? defaults.sourceConfigPath,
+        sourceConfigPaths: validateClashConfigSelection(
+          input.sourceConfigPaths ?? input.sourceConfigPath,
+          this.discovery(),
+        ) ?? defaults.sourceConfigPaths,
         mihomoPath: optionalPath(input.mihomoPath) ?? defaults.mihomoPath,
         workDirectory: this.paths.poolWork,
         poolPath: this.paths.pool,
@@ -735,8 +740,8 @@ class PoolManager {
       });
       this.nextRefreshAt = Date.now() + this.refreshIntervalMs;
       this.refreshError = undefined;
-      return this.status();
     } finally { this.starting = false; lease.release(); }
+    return this.status();
   }
 
   async import(input: Record<string, unknown>): Promise<PoolSnapshot> {
@@ -753,8 +758,8 @@ class PoolManager {
       await importExternalProxyPool(endpoints, this.paths.pool, size);
       this.nextRefreshAt = Date.now() + this.refreshIntervalMs;
       this.refreshError = undefined;
-      return this.status();
     } finally { this.starting = false; lease.release(); }
+    return this.status();
   }
 
   async stop(): Promise<PoolSnapshot> {
@@ -1123,16 +1128,24 @@ function optionalPath(value: unknown): string | undefined {
   if (typeof value !== "string") throw new HttpError(400, "路径格式错误。");
   return resolve(value.trim());
 }
-function selectedClashConfigPath(value: unknown): string | undefined {
-  const path = optionalPath(value);
-  if (!path) return undefined;
-  const discovery = discoverClashVerge();
+export function validateClashConfigSelection(
+  value: unknown,
+  discovery: ReturnType<typeof discoverClashVerge>,
+): string[] | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const values = Array.isArray(value) ? value : [value];
+  if (values.length === 0 || values.length > 32) throw new HttpError(400, "请选择 1 至 32 套 Clash Verge 代理配置。");
+  const paths = values.map((item) => optionalPath(item));
+  if (paths.some((path) => !path)) throw new HttpError(400, "路径格式错误。");
   const allowed = new Set([
     ...discovery.configCandidates,
     ...discovery.profiles.map((profile) => profile.path),
   ].map((candidate) => resolve(candidate)));
-  if (!allowed.has(path)) throw new HttpError(400, "请选择 Clash Verge 已发现的代理配置。");
-  return path;
+  const selected = [...new Set(paths as string[])];
+  if (selected.some((path) => !allowed.has(path))) {
+    throw new HttpError(400, "请选择 Clash Verge 已发现的代理配置。");
+  }
+  return selected;
 }
 function publicPoolEntries(entries: ProxyPoolEntry[]): ProxyPoolEntry[] {
   return entries.map((entry) => ({ ...entry, endpoint: maskProxyCredentials(entry.endpoint) }));

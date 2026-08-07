@@ -27,6 +27,8 @@ let mode = "parallel";
 let poolSource = "clash-verge";
 let poolSourceInitialized = false;
 let poolRunning = false;
+let poolStatus = "not-running";
+let poolChangeInFlight = false;
 let poolLaneCount = 1;
 let poolNetworkMs = 400;
 let knownMatches = -1;
@@ -49,6 +51,7 @@ let resultsRenderPending = false;
 let resultsNeedRefresh = false;
 let nativeUpdateState;
 let activeTaskMode;
+let startSubmissionBusy = false;
 let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
@@ -71,6 +74,10 @@ function payload(form) {
 
 async function startParallel() {
   if (!el.parallelForm.reportValidity()) return;
+  if (poolChangeInFlight || poolStatus === "starting") {
+    toast("代理池正在自动优选，请等待出口验证完成后再启动");
+    return;
+  }
   setBusy(true);
   try {
     const value = payload(el.parallelForm);
@@ -86,6 +93,10 @@ async function startParallel() {
 
 async function startSource(dryRun) {
   if (!el.sourceForm.reportValidity()) return;
+  if (poolChangeInFlight || poolStatus === "starting") {
+    toast("代理池正在自动优选，请等待出口验证完成后再启动");
+    return;
+  }
   setBusy(true);
   try {
     const value = payload(el.sourceForm);
@@ -124,24 +135,41 @@ function probe(target, label, value) { target.className = value.status; target.t
 async function togglePool() {
   if (!poolRunning && poolSource === "clash-verge") {
     if (!el.poolSize.reportValidity() || !el.poolCandidates.reportValidity()) return;
+    if (selectedClashConfigPaths().length === 0) {
+      toast("请至少勾选一套 Clash Verge 代理配置");
+      return;
+    }
     if (Number(el.poolCandidates.value) < Number(el.poolSize.value)) {
       toast("候选节点数不能少于独立出口数");
       return;
     }
   }
   el.poolToggle.disabled = true;
+  poolChangeInFlight = true;
+  syncTaskStartAvailability();
   const stopping = poolRunning;
-  if (!stopping) renderPoolEntries([], "starting");
+  if (!stopping) {
+    poolStatus = "starting";
+    renderPoolEntries([], "starting");
+  }
   try {
     const path = stopping ? "/api/pool/stop" : poolSource === "external" ? "/api/pool/import" : "/api/pool/start";
     const value = stopping
       ? {}
       : poolSource === "external"
       ? { proxies: el.externalProxies.value, size: 0 }
-      : { size: Number(el.poolSize.value), candidates: Number(el.poolCandidates.value), sourceConfigPath: el.clashConfig.value || undefined };
+      : { size: Number(el.poolSize.value), candidates: Number(el.poolCandidates.value), sourceConfigPaths: selectedClashConfigPaths() };
     renderPool(await api(path, { method: "POST", body: JSON.stringify(value) }));
     toast(stopping ? "代理池已停止" : "已选出可用的最优出口");
-  } catch (error) { toast(error.message); } finally { el.poolToggle.disabled = false; }
+  } catch (error) {
+    poolStatus = poolRunning ? "running" : "not-running";
+    toast(error.message);
+    void refresh();
+  } finally {
+    poolChangeInFlight = false;
+    el.poolToggle.disabled = false;
+    syncTaskStartAvailability();
+  }
 }
 
 function refresh() {
@@ -175,11 +203,9 @@ async function performRefresh() {
       : undefined;
     syncRuntimeTimer(activeJob ?? job);
     const globallyActive = Boolean(activeTaskMode);
-    el.parallelStart.disabled = globallyActive;
-    el.sourceStart.disabled = globallyActive;
-    el.dryRun.disabled = globallyActive;
     el.stop.disabled = !globallyActive;
     renderPool(pool);
+    syncTaskStartAvailability();
     el.connection.classList.add("ready");
     if (job.matches !== knownMatches) {
       knownMatches = job.matches;
@@ -215,7 +241,8 @@ function renderParallel(job) {
       : "开始读取后显示当前歌曲完成度",
     note: job.note || job.error,
   });
-  el.stop.disabled = !active; el.parallelStart.disabled = active;
+  el.stop.disabled = !active;
+  syncTaskStartAvailability();
   observeTaskSettlement(job, "parallel");
 }
 
@@ -252,7 +279,8 @@ function renderSource(job) {
       : "开始读取后显示最近活跃歌曲的完成度",
     note: [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "),
   });
-  el.stop.disabled = !active; el.sourceStart.disabled = active; el.dryRun.disabled = active;
+  el.stop.disabled = !active;
+  syncTaskStartAvailability();
   observeTaskSettlement(job, "source");
 }
 
@@ -387,6 +415,7 @@ function renderPool(pool) {
   }
   const previousLaneCount = poolLaneCount;
   const previousNetworkMs = poolNetworkMs;
+  poolStatus = pool.status;
   poolRunning = pool.status === "running";
   poolLaneCount = poolRunning ? Math.max(1, pool.entries.length) : 1;
   const latencies = poolRunning ? pool.entries.map((entry) => Number(entry.ncmLatencyMs)).filter(Number.isFinite) : [];
@@ -397,15 +426,16 @@ function renderPool(pool) {
     : { starting: "正在测速与验证", "not-running": "未运行" }[pool.status] || pool.status;
   el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : poolSource === "external" ? "验证并使用" : "自动优选";
   const discovery = pool.discovery;
-  const configCount = renderClashConfigs(discovery, pool.sourceConfigPath, pool.status);
+  const configCount = renderClashConfigs(discovery, pool.sourceConfigPaths || (pool.sourceConfigPath ? [pool.sourceConfigPath] : []), pool.status);
   el.poolSize.disabled = pool.status !== "not-running";
   el.poolCandidates.disabled = pool.status !== "not-running";
   el.poolDiscovery.textContent = discovery?.installed
     ? configCount > 1
-      ? `已找到 ${fmt(configCount)} 套可选配置与 Mihomo 内核，构建前请选择。`
+      ? `已找到 ${fmt(configCount)} 套可选配置与 Mihomo 内核，可勾选一套或多套合并优选。`
       : `已找到 Clash Verge 配置与 Mihomo 内核 · ${shortPath(discovery.configPath)}`
     : "未自动找到 Clash Verge，可切换到“其他代理池”手动接入。";
   renderPoolEntries(poolRunning ? pool.entries : [], pool.status);
+  syncTaskStartAvailability();
 }
 
 function renderPoolEntries(entries, status) {
@@ -438,7 +468,11 @@ function renderPoolEntries(entries, status) {
   }
 }
 
-function renderClashConfigs(discovery, activePoolPath, poolStatus) {
+function selectedClashConfigPaths() {
+  return $$('input[name="clashConfig"]:checked').map((input) => input.value);
+}
+
+function renderClashConfigs(discovery, activePoolPaths, poolStatus) {
   if (!discovery) { el.clashConfigField.hidden = true; return 0; }
   const profilePaths = new Set((discovery.profiles || []).map((profile) => profile.path));
   const choices = [];
@@ -451,23 +485,37 @@ function renderClashConfigs(discovery, activePoolPath, poolStatus) {
   }));
   const uniqueChoices = [...new Map(choices.map((choice) => [choice.path, choice])).values()];
   const signature = JSON.stringify(uniqueChoices);
-  const previous = el.clashConfig.value;
+  const previous = new Set(selectedClashConfigPaths());
+  const active = new Set(activePoolPaths || []);
   if (signature !== clashConfigSignature) {
     clashConfigSignature = signature;
     el.clashConfig.replaceChildren(...uniqueChoices.map((choice) => {
-      const option = document.createElement("option");
-      option.value = choice.path;
-      option.textContent = choice.label;
-      return option;
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = "clashConfig";
+      input.value = choice.path;
+      const text = document.createElement("span");
+      text.textContent = choice.label;
+      label.append(input, text);
+      return label;
     }));
-    const preferred = [previous, activePoolPath, discovery.configPath, uniqueChoices.find((choice) => choice.label.includes("当前订阅"))?.path]
-      .find((path) => path && uniqueChoices.some((choice) => choice.path === path));
-    if (preferred) el.clashConfig.value = preferred;
-  } else if (poolStatus === "running" && activePoolPath && uniqueChoices.some((choice) => choice.path === activePoolPath)) {
-    el.clashConfig.value = activePoolPath;
   }
+  const available = new Set(uniqueChoices.map((choice) => choice.path));
+  const preferred = poolStatus === "running" && active.size > 0
+    ? active
+    : previous.size > 0
+    ? previous
+    : new Set([
+      uniqueChoices.find((choice) => choice.label.includes("当前订阅"))?.path,
+      discovery.configPath,
+      uniqueChoices[0]?.path,
+    ].filter((path) => path && available.has(path)).slice(0, 1));
+  $$('input[name="clashConfig"]').forEach((input) => {
+    input.checked = preferred.has(input.value);
+    input.disabled = poolStatus !== "not-running";
+  });
   el.clashConfigField.hidden = uniqueChoices.length <= 1;
-  el.clashConfig.disabled = poolStatus !== "not-running";
   return uniqueChoices.length;
 }
 
@@ -1072,7 +1120,13 @@ async function setupDesktopWindowControls() {
   renderMaximized(await desktop.isMaximized());
 }
 
-function setBusy(value) { const disabled = value || Boolean(activeTaskMode); el.parallelStart.disabled = disabled; el.sourceStart.disabled = disabled; el.dryRun.disabled = disabled; }
+function syncTaskStartAvailability() {
+  const disabled = startSubmissionBusy || Boolean(activeTaskMode) || poolChangeInFlight || poolStatus === "starting";
+  el.parallelStart.disabled = disabled;
+  el.sourceStart.disabled = disabled;
+  el.dryRun.disabled = disabled;
+}
+function setBusy(value) { startSubmissionBusy = value; syncTaskStartAvailability(); }
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }

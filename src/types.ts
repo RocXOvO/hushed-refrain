@@ -178,11 +178,12 @@ export interface SongScanProgress {
   pageInSong: number;
   commentCursor?: string;
   commentPageNo?: number;
+  commentShards?: CommentTimeShard[];
   done: boolean;
 }
 
 export interface ScanState {
-  version: 1;
+  version: 1 | 2;
   commentPagination?: "cursor-v1";
   commentPageSize?: number;
   uid: string;
@@ -230,6 +231,7 @@ export interface ScanOptions {
   onMatch?: (comment: FoundComment) => void;
   onSongProgress?: (activity: SongScanActivity) => void;
   onRequestActivity?: (activity: ScanRequestActivity) => void;
+  onSchedulerActivity?: (activity: ScanSchedulerActivity) => void;
 }
 
 export interface SongScanActivity {
@@ -258,6 +260,7 @@ export interface ScanRequestActivity {
 
 export interface ScanSchedulerActivity {
   type: "adaptive-split";
+  songId?: string;
   originalShardId: number;
   newShardId: number;
   splitAt: number;

@@ -8,7 +8,7 @@ export function createState(
 ): ScanState {
   const now = new Date().toISOString();
   return {
-    version: 1,
+    version: 2,
     commentPagination: "cursor-v1",
     commentPageSize: options.commentPageSize,
     uid: options.uid,
@@ -41,7 +41,8 @@ export function createState(
 export async function loadState(path: string): Promise<ScanState | undefined> {
   try {
     const parsed = JSON.parse(await readFile(path, "utf8")) as ScanState;
-    if (parsed.version !== 1) throw new Error(`Unsupported state version: ${parsed.version}`);
+    if (parsed.version !== 1 && parsed.version !== 2) throw new Error(`Unsupported state version: ${parsed.version}`);
+    parsed.version = 2;
     parsed.strategyResolved ??= true;
     parsed.sourcesLoaded ??= parsed.songs.length > 0 || parsed.sourceSongCount > 0 || parsed.finished;
     parsed.sourceErrors ??= [];

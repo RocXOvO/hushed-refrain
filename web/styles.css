@@ -634,6 +634,39 @@ select:focus {
   margin-bottom: 9px;
 }
 
+.clash-config-choices {
+  display: grid;
+  gap: 6px;
+  max-height: 150px;
+  padding: 8px;
+  overflow: auto;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid #cbd1d6;
+  border-radius: var(--radius);
+}
+
+.clash-config-choices label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.76rem;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.clash-config-choices input {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  accent-color: var(--teal);
+}
+
+.clash-config-choices span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .segmented {
   position: relative;
   display: grid;

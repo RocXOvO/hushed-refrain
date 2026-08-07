@@ -9,6 +9,11 @@ import { spawn, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { EnhancedNcmClient } from "./api";
+import {
+  inlineProxyDefinitions,
+  selectProxyCandidates,
+  type ProxyDefinition,
+} from "./clash-profile-merge";
 import { ProxyTransportGate } from "./proxy-transport-gate";
 
 const execFileAsync = promisify(execFile);
@@ -17,7 +22,7 @@ const POOL_RECHECK_CONCURRENCY = 4;
 type YamlObject = Record<string, unknown>;
 
 export interface MihomoPoolOptions {
-  sourceConfigPath: string;
+  sourceConfigPaths: string[];
   mihomoPath: string;
   workDirectory: string;
   poolPath: string;
@@ -45,6 +50,7 @@ export interface ProxyPoolFile {
   source: ProxyPoolSource;
   active: boolean;
   sourceConfigPath?: string;
+  sourceConfigPaths?: string[];
   mihomoConfigPath?: string;
   mihomoExecutablePath?: string;
   pid?: number;
@@ -72,30 +78,39 @@ export interface ClashVergeProfile {
 export async function startMihomoPool(
   options: MihomoPoolOptions,
 ): Promise<ProxyPoolFile> {
-  const previous = await readProxyPool(options.poolPath);
-  if (previous?.pid && managedMihomoProcessAlive(previous)) {
-    process.kill(previous.pid);
-    await waitForProcessExit(previous.pid, 5_000);
+  const sourceConfigPaths = [...new Set(options.sourceConfigPaths)];
+  if (sourceConfigPaths.length === 0) throw new Error("At least one Clash Verge config is required.");
+  const lastCandidatePort = options.basePort + options.candidateCount - 1;
+  if (lastCandidatePort > 65_535) throw new Error("The proxy listener port range exceeds 65535.");
+  if (options.controllerPort >= options.basePort && options.controllerPort <= lastCandidatePort) {
+    throw new Error("The Mihomo controller port overlaps the proxy listener range.");
   }
-
-  if (!existsSync(options.sourceConfigPath)) {
-    throw new Error(`Clash Verge config was not found: ${options.sourceConfigPath}`);
+  for (const sourceConfigPath of sourceConfigPaths) {
+    if (!existsSync(sourceConfigPath)) {
+      throw new Error(`Clash Verge config was not found: ${sourceConfigPath}`);
+    }
   }
   if (!existsSync(options.mihomoPath) && !isCommandName(options.mihomoPath)) {
     throw new Error(`Mihomo executable was not found: ${options.mihomoPath}`);
   }
 
-  const source = parse(await readFile(options.sourceConfigPath, "utf8")) as YamlObject;
-  const proxies = Array.isArray(source.proxies)
-    ? source.proxies.filter(isProxyDefinition)
-    : [];
-  const candidates = diverseCandidates(proxies, options.candidateCount);
+  const proxyGroups: ProxyDefinition[][] = [];
+  for (const sourceConfigPath of sourceConfigPaths) {
+    try {
+      const source = parse(await readFile(sourceConfigPath, "utf8")) as YamlObject;
+      proxyGroups.push(inlineProxyDefinitions(source));
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)} 配置：${sourceConfigPath}`);
+    }
+  }
+  const candidates = selectProxyCandidates(proxyGroups, options.candidateCount);
   if (candidates.length < options.size) {
     throw new Error(`Only ${candidates.length} proxy candidates are available.`);
   }
 
   await mkdir(options.workDirectory, { recursive: true });
   const configPath = join(options.workDirectory, "config.yaml");
+  const stagingConfigPath = join(options.workDirectory, "config.next.yaml");
   const logPath = join(options.workDirectory, "mihomo.log");
   const config = {
     "log-level": "warning",
@@ -117,15 +132,27 @@ export async function startMihomoPool(
     })),
     rules: ["MATCH,DIRECT"],
   };
-  await writeFile(configPath, stringify(config, { lineWidth: 0 }), "utf8");
-  if (process.platform !== "win32") await chmod(configPath, 0o600);
+  const serializedConfig = stringify(config, { lineWidth: 0 });
+  await writeFile(stagingConfigPath, serializedConfig, "utf8");
+  if (process.platform !== "win32") await chmod(stagingConfigPath, 0o600);
   await execFileAsync(options.mihomoPath, [
     "-t",
     "-d",
     options.workDirectory,
     "-f",
-    configPath,
+    stagingConfigPath,
   ], { windowsHide: true, timeout: 30_000 });
+
+  const previous = await readProxyPool(options.poolPath);
+  if (previous?.pid && isProcessAlive(previous.pid)) {
+    if (!managedMihomoProcessAlive(previous)) {
+      throw new Error("现有代理池 PID 的进程身份无法确认，已取消替换以避免误杀。");
+    }
+    process.kill(previous.pid);
+    await waitForProcessExit(previous.pid, 5_000);
+  }
+  await writeFile(configPath, serializedConfig, "utf8");
+  if (process.platform !== "win32") await chmod(configPath, 0o600);
 
   const output = openSync(logPath, "a");
   const child = spawn(options.mihomoPath, [
@@ -209,7 +236,8 @@ export async function startMihomoPool(
       lastCheckedAt: generatedAt,
       source: "clash-verge",
       active: true,
-      sourceConfigPath: options.sourceConfigPath,
+      sourceConfigPath: sourceConfigPaths[0],
+      sourceConfigPaths,
       mihomoConfigPath: configPath,
       mihomoExecutablePath: options.mihomoPath,
       pid: child.pid,
@@ -241,7 +269,9 @@ export async function readProxyPool(path: string): Promise<ProxyPoolFile | undef
     if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
       throw new Error("Unsupported proxy pool file.");
     }
-    parsed.source ??= parsed.sourceConfigPath ? "clash-verge" : "external";
+    parsed.sourceConfigPaths ??= parsed.sourceConfigPath ? [parsed.sourceConfigPath] : undefined;
+    parsed.sourceConfigPath ??= parsed.sourceConfigPaths?.[0];
+    parsed.source ??= parsed.sourceConfigPaths?.length ? "clash-verge" : "external";
     parsed.active ??= true;
     return parsed;
   } catch (error) {
@@ -260,9 +290,10 @@ export function proxyPoolRunning(pool: ProxyPoolFile | undefined): boolean {
  *
  * A full managed-process identity check shells out to `ps` on Unix and
  * PowerShell on Windows. Doing that on every dashboard poll blocks Electron's
- * main process and makes the window visibly stutter. Mutating and scan-start
- * paths still use `proxyPoolRunning`, which performs the full PID identity
- * check before trusting or terminating a managed process.
+ * main process and makes the window visibly stutter. Callers that only need
+ * to use the already-verified listeners can combine this hint with
+ * `verifyProxyPool`, which probes every actual exit. Process lifecycle paths
+ * still use `proxyPoolRunning` before they signal a PID.
  */
 export function proxyPoolStatusRunning(pool: ProxyPoolFile | undefined): boolean {
   if (!pool?.active || pool.entries.length === 0) return false;
@@ -304,12 +335,19 @@ export async function importExternalProxyPool(
   return pool;
 }
 
-export async function verifyProxyPool(pool: ProxyPoolFile): Promise<ProxyPoolEntry[]> {
-  if (!proxyPoolRunning(pool)) throw new Error("The proxy pool is not active.");
+export async function verifyProxyPool(
+  pool: ProxyPoolFile,
+  verifier: (name: string, endpoint: string) => Promise<ProxyPoolEntry> = verifyProxyEndpoint,
+): Promise<ProxyPoolEntry[]> {
+  const processIdentityVerified = proxyPoolRunning(pool);
+  if (!processIdentityVerified && !proxyPoolStatusRunning(pool)) {
+    throw new Error("The proxy pool is not active.");
+  }
   const verificationGate = poolVerificationGate();
   const checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) =>
-    verificationGate.run(() => verifyProxyEndpoint(entry.name, entry.endpoint))
+    verificationGate.run(() => verifier(entry.name, entry.endpoint))
   );
+  assertStableFallbackExits(pool, checked, processIdentityVerified);
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
     throw new Error(
@@ -324,11 +362,16 @@ export async function refreshProxyPool(
   verifier: (name: string, endpoint: string) => Promise<ProxyPoolEntry> = verifyProxyEndpoint,
 ): Promise<ProxyPoolFile> {
   const pool = await readProxyPool(poolPath);
-  if (!pool || !proxyPoolRunning(pool)) throw new Error("The proxy pool is not active.");
+  if (!pool) throw new Error("The proxy pool is not active.");
+  const processIdentityVerified = proxyPoolRunning(pool);
+  if (!processIdentityVerified && !proxyPoolStatusRunning(pool)) {
+    throw new Error("The proxy pool is not active.");
+  }
   const verificationGate = poolVerificationGate();
   const checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) =>
     verificationGate.run(() => verifier(entry.name, entry.endpoint))
   );
+  assertStableFallbackExits(pool, checked, processIdentityVerified);
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
     throw new Error(
@@ -340,7 +383,7 @@ export async function refreshProxyPool(
   const current = await readProxyPool(poolPath);
   if (
     !current ||
-    !proxyPoolRunning(current) ||
+    !proxyPoolStatusRunning(current) ||
     current.generatedAt !== pool.generatedAt
   ) {
     throw new Error("代理池已在复测期间停止或重新构建。");
@@ -352,6 +395,20 @@ export async function refreshProxyPool(
   };
   await writeProxyPool(poolPath, refreshed);
   return refreshed;
+}
+
+function assertStableFallbackExits(
+  pool: ProxyPoolFile,
+  checked: ProxyPoolEntry[],
+  processIdentityVerified: boolean,
+): void {
+  if (pool.source !== "clash-verge" || processIdentityVerified) return;
+  const changed = checked.some((entry, index) => entry.egressIp !== pool.entries[index]?.egressIp);
+  if (changed) {
+    throw new Error(
+      "代理池进程身份暂时无法复核，且实际出口 IP 已变化；为防止误用本机出口，请重新自动优选。",
+    );
+  }
 }
 
 /**
@@ -409,38 +466,7 @@ function expandIpv6(ip: string): string[] {
   return [...leftParts, ...Array<string>(zeroCount).fill("0"), ...rightParts];
 }
 
-function diverseCandidates(proxies: YamlObject[], limit: number): YamlObject[] {
-  const groups = new Map<string, YamlObject[]>();
-  for (const proxy of proxies) {
-    const name = String(proxy.name);
-    if (/剩余|流量|到期|官网|套餐|更新|订阅/i.test(name)) continue;
-    const region = name.trim().split(/\s+/)[0] || "other";
-    const group = groups.get(region) ?? [];
-    group.push(proxy);
-    groups.set(region, group);
-  }
-  const selected: YamlObject[] = [];
-  let depth = 0;
-  while (selected.length < limit) {
-    let added = false;
-    for (const group of groups.values()) {
-      const proxy = group[depth];
-      if (!proxy) continue;
-      selected.push(proxy);
-      added = true;
-      if (selected.length >= limit) break;
-    }
-    if (!added) break;
-    depth += 1;
-  }
-  return selected;
-}
-
-function isProxyDefinition(value: unknown): value is YamlObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const proxy = value as YamlObject;
-  return typeof proxy.name === "string" && typeof proxy.type === "string";
-}
+export { mergeProxyDefinitions } from "./clash-profile-merge";
 
 function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string> {
   const proxy = new URL(proxyEndpoint);
@@ -600,7 +626,10 @@ function normalizeCommandIdentity(value: string): string {
 function processCommandLine(pid: number): string | undefined {
   try {
     if (process.platform === "win32") {
-      const script = `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\").CommandLine`;
+      // Write the raw string instead of letting PowerShell format it. The
+      // default formatter can wrap long AppData paths, making a valid managed
+      // Mihomo command fail the exact config-path identity check.
+      const script = `$managed = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($null -ne $managed) { [Console]::Out.Write([string]$managed.CommandLine) }`;
       const output = execFileSync("powershell.exe", [
         "-NoProfile",
         "-NonInteractive",
@@ -649,7 +678,7 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void>
 export function defaultMihomoPoolOptions(projectRoot: string): MihomoPoolOptions {
   const discovery = discoverClashVerge();
   return {
-    sourceConfigPath: discovery.configPath ?? discovery.configCandidates[0],
+    sourceConfigPaths: [discovery.configPath ?? discovery.configCandidates[0]],
     mihomoPath: discovery.mihomoPath ?? discovery.mihomoCandidates[0],
     workDirectory: resolve(projectRoot, ".ncm", "mihomo-pool"),
     poolPath: resolve(projectRoot, ".ncm", "proxy-pool.json"),

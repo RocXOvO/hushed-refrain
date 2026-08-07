@@ -12,6 +12,7 @@ import { mergeCommentTotal } from "./progress";
 import { JsonlResultWriter } from "./results";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { AsyncWorkQueue } from "./work-queue";
+import { createTimeShards, splitRemainingTimeShard } from "./time-shards";
 import type {
   CommentTimeShard,
   FoundComment,
@@ -242,27 +243,17 @@ export async function runParallelSongScan(
     } else {
       shard.cursor = nextCursor;
       const waitingWorkers = queue.waitingCount();
-      const splitAt = Math.floor((shard.startTime + numericNextCursor!) / 2);
-      if (waitingWorkers > 0 && splitAt > shard.startTime && splitAt < numericNextCursor!) {
-        const remainingStart = shard.startTime;
-        const remainingEnd = numericNextCursor!;
-        const sibling: CommentTimeShard = {
-          id: nextShardId,
-          startTime: remainingStart,
-          endTime: splitAt,
-          cursor: String(splitAt),
-          pageNo: 2,
-          pagesProcessed: 0,
-          done: false,
-        };
+      const split = waitingWorkers > 0
+        ? splitRemainingTimeShard(shard, nextShardId)
+        : undefined;
+      if (split) {
+        const { sibling, splitAt, remainingStart, remainingEnd } = split;
         nextShardId += 1;
-        shard.startTime = splitAt;
-        shard.endTime = remainingEnd;
-        shard.cursor = String(remainingEnd);
-        shard.pageNo = 2;
+        Object.assign(shard, split.current);
         state.shards.push(sibling);
         publishSchedulerActivity(options, {
           type: "adaptive-split",
+          songId: options.songId,
           originalShardId: shard.id,
           newShardId: sibling.id,
           splitAt,
@@ -390,32 +381,7 @@ function remoteStatus(error: unknown): number | undefined {
   return typeof value.body?.code === "number" ? value.body.code : undefined;
 }
 
-export function createTimeShards(
-  startTime: number,
-  endTime: number,
-  shardCount: number,
-): CommentTimeShard[] {
-  if (!Number.isInteger(startTime) || !Number.isInteger(endTime) || endTime <= startTime) {
-    throw new Error("The scan time range is invalid.");
-  }
-  if (!Number.isInteger(shardCount) || shardCount <= 0) {
-    throw new Error("shardCount must be a positive integer.");
-  }
-  const width = Math.ceil((endTime - startTime) / shardCount);
-  return Array.from({ length: shardCount }, (_, id) => {
-    const shardStart = startTime + id * width;
-    const shardEnd = Math.min(endTime, shardStart + width);
-    return {
-      id,
-      startTime: shardStart,
-      endTime: shardEnd,
-      cursor: String(shardEnd),
-      pageNo: 2,
-      pagesProcessed: 0,
-      done: false,
-    };
-  }).filter((shard) => shard.startTime < shard.endTime);
-}
+export { createTimeShards } from "./time-shards";
 
 function createParallelState(options: ParallelSongScanOptions): ParallelSongScanState {
   const now = new Date().toISOString();

@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { startDashboard } from "../src/server";
+import { startDashboard, validateClashConfigSelection } from "../src/server";
 import type { ProxyPoolFile } from "../src/mihomo-pool";
 
 test("dashboard serves UI assets and estimate API", async (context) => {
@@ -53,6 +53,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /if \(refreshInFlight\) return refreshInFlight/);
   assert.match(appText, /scheduleResultsRender/);
   assert.match(appText, /Date\.now\(\) - lastLogsRefreshAt < 3_000/);
+  assert.match(appText, /poolStatus === "starting"/);
+  assert.match(appText, /syncTaskStartAvailability/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
@@ -89,6 +91,26 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(protectedValue.expectedSeconds, 8);
   assert.equal(protectedValue.effectiveWorkers, 8);
   assert.equal(protectedValue.proxyTransportMaxConcurrent, 8);
+});
+
+test("validates multiple Clash config selections against one discovery snapshot", () => {
+  const discovery = {
+    platform: process.platform,
+    installed: true,
+    configPath: "/profiles/a.yaml",
+    mihomoPath: "/bin/mihomo",
+    configCandidates: ["/profiles/a.yaml"],
+    mihomoCandidates: ["/bin/mihomo"],
+    profiles: [{ uid: "b", name: "B", path: "/profiles/b.yaml", type: "remote" as const, active: false }],
+  };
+  assert.deepEqual(
+    validateClashConfigSelection(["/profiles/a.yaml", "/profiles/b.yaml"], discovery),
+    ["/profiles/a.yaml", "/profiles/b.yaml"],
+  );
+  assert.throws(
+    () => validateClashConfigSelection(["/profiles/a.yaml", "/profiles/nope.yaml"], discovery),
+    /已发现的代理配置/,
+  );
 });
 
 test("dashboard restores the last task descriptor from the persistent runtime root", async (context) => {
@@ -342,7 +364,7 @@ test("dashboard rejects an arbitrary Clash Verge config path", async (context) =
   const response = await fetch(`http://127.0.0.1:${address.port}/api/pool/start`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sourceConfigPath: join(runtimeRoot, "not-a-discovered-profile.yaml") }),
+    body: JSON.stringify({ sourceConfigPaths: [join(runtimeRoot, "not-a-discovered-profile.yaml")] }),
   });
 
   assert.equal(response.status, 400);

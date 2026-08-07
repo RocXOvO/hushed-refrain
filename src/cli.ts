@@ -120,7 +120,7 @@ async function proxyPoolCommand(args: string[]): Promise<void> {
   const parsed = parseArgs({
     args,
     options: {
-      "source-config": { type: "string", default: defaults.sourceConfigPath },
+      "source-config": { type: "string", multiple: true, default: defaults.sourceConfigPaths },
       mihomo: { type: "string", default: defaults.mihomoPath },
       "work-dir": { type: "string", default: defaults.workDirectory },
       output: { type: "string", default: defaults.poolPath },
@@ -165,7 +165,7 @@ async function proxyPoolCommand(args: string[]): Promise<void> {
     throw new Error("proxy-pool action must be start, import, status, or stop.");
   }
   const pool = await startMihomoPool({
-    sourceConfigPath: resolve(parsed.values["source-config"]!),
+    sourceConfigPaths: parsed.values["source-config"]!.map((path) => resolve(path)),
     mihomoPath: resolve(parsed.values.mihomo!),
     workDirectory: resolve(parsed.values["work-dir"]!),
     poolPath,
