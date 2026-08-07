@@ -2,6 +2,7 @@ import {
   AuthenticationRequired,
   CooldownRequired,
   RequestBudgetExhausted,
+  RequestExecutionError,
   RunCancelled,
   errorStatus,
 } from "./errors";
@@ -96,7 +97,10 @@ export class RequestGovernor {
 
         if (!isRetryable(status) || retry >= this.options.maxRetries) {
           const detail = error instanceof Error ? error.message : JSON.stringify(error);
-          throw new Error(`${label} failed${status ? ` (${status})` : ""}: ${detail}`);
+          throw new RequestExecutionError(
+            `${label} failed${status ? ` (${status})` : ""}: ${detail}`,
+            status,
+          );
         }
 
         const base = this.options.retryBaseMs ?? 2_000;

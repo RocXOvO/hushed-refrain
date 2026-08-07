@@ -388,9 +388,11 @@ export async function runPooledCommentFinder(
         startedAt: new Date(requestStartedAt).toISOString(),
       };
       publishRequestActivity(options, { ...requestActivity, phase: "start" });
+      let attempts = 0;
+      let networkElapsedMs = 0;
       let page;
       try {
-        page = await executeProxyRequest(lane, `comment_new:${song.id}${shard ? `:shard-${shard.id}` : ""}`, () => {
+        page = await executeProxyRequest(lane, `comment_new:${song.id}${shard ? `:shard-${shard.id}` : ""}`, async () => {
           publishSongProgress(
             options,
             song,
@@ -400,12 +402,18 @@ export async function runPooledCommentFinder(
             workerId,
             requestedPageNo,
           );
-          return lane.client.getSongCommentsByCursor(
-            song.id,
-            options.commentPageSize,
-            requestedPageNo,
-            requestedCursor,
-          );
+          attempts += 1;
+          const networkStartedAt = Date.now();
+          try {
+            return await lane.client.getSongCommentsByCursor(
+              song.id,
+              options.commentPageSize,
+              requestedPageNo,
+              requestedCursor,
+            );
+          } finally {
+            networkElapsedMs += Date.now() - networkStartedAt;
+          }
         });
       } catch (error) {
         const reservedPages = reservedSongPages.get(songIndex) ?? progress.pageInSong;
@@ -416,6 +424,8 @@ export async function runPooledCommentFinder(
           ...requestActivity,
           phase: "failure",
           elapsedMs: Date.now() - requestStartedAt,
+          networkElapsedMs,
+          attempts,
           status,
           rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
           error: errorMessage(error),
@@ -438,22 +448,27 @@ export async function runPooledCommentFinder(
           ...requestActivity,
           phase: "failure",
           elapsedMs: Date.now() - requestStartedAt,
+          networkElapsedMs,
+          attempts,
           status: 502,
           error: errorMessage(error),
         });
         throw error;
       }
+      const scannedComments = shard
+        ? page.comments.filter((comment) => comment.time === undefined || (comment.time >= shard.startTime && comment.time < shard.endTime))
+        : page.comments;
       publishRequestActivity(options, {
         ...requestActivity,
         phase: "success",
         elapsedMs: Date.now() - requestStartedAt,
+        networkElapsedMs,
+        attempts,
         comments: page.comments.length,
+        effectiveComments: scannedComments.length,
         totalComments: page.total,
         hasMore: page.hasMore,
       });
-      const scannedComments = shard
-        ? page.comments.filter((comment) => comment.time === undefined || (comment.time >= shard.startTime && comment.time < shard.endTime))
-        : page.comments;
       progress.pageInSong += 1;
       progress.commentOffset += scannedComments.length;
       progress.totalComments = mergeCommentTotal(progress.totalComments, page.total, progress.commentOffset);

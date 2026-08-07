@@ -341,7 +341,7 @@ function upstreamFailureMessage(name: string, error: object): string {
   if (detail && /timeout|timed out|etimedout/i.test(detail)) {
     return `${name} 请求失败：代理链路超时。`;
   }
-  return `${name} request failed`;
+  return `${name} 请求失败：上游未返回可识别的状态。`;
 }
 
 function isPlainJsonObject(value: unknown): value is JsonObject {

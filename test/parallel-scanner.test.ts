@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
+import { ProxyTransportGate } from "../src/proxy-transport-gate";
 import {
   createTimeShards,
   loadParallelState,
@@ -201,7 +202,7 @@ test("trailing-publishes a parallel page burst while the next request is still r
   };
   const config = await options(directory);
   config.shardCount = 4;
-  config.workersPerLane = 1;
+  config.workersPerLane = 4;
   const pages: number[] = [];
   let sawBurstBeforeThirdFinished = false;
   config.onCheckpoint = (activity) => {
@@ -222,6 +223,19 @@ test("trailing-publishes a parallel page burst while the next request is still r
 test("hard-caps parallel worker loops while rotating across every selected lane", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-worker-cap-"));
   const client = new ParallelFakeClient();
+  const getPage = client.getSongCommentsByCursor.bind(client);
+  let pageCalls = 0;
+  client.getSongCommentsByCursor = async (...args) => {
+    pageCalls += 1;
+    const page = await getPage(...args);
+    const cursor = args[3];
+    const nextCursor = String(Number(cursor) - 10);
+    return {
+      ...page,
+      hasMore: pageCalls <= 2,
+      nextCursor,
+    };
+  };
   const config = await options(directory);
   config.shardCount = 8;
   config.workersPerLane = 3;
@@ -240,6 +254,57 @@ test("hard-caps parallel worker loops while rotating across every selected lane"
   assert.equal(report.workers, 2);
   assert.equal(client.maxActive, 2);
   assert.deepEqual(usedLanes, new Set(lanes.map((lane) => lane.name)));
+});
+
+test("materializes only enough fresh shards for actual worker capacity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-initial-shards-"));
+  const client = new ParallelFakeClient();
+  const config = await options(directory);
+  config.shardCount = 96;
+  config.workersPerLane = 3;
+  config.maxWorkers = 2;
+
+  const report = await runParallelSongScan(Array.from({ length: 4 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: governor(),
+  })), config);
+  const state = await loadParallelState(config.statePath);
+
+  assert.equal(report.status, "complete");
+  assert.equal(state?.shardCount, 96);
+  assert.equal(state?.shards.length, 2);
+  assert.equal(report.pagesProcessed, 2);
+});
+
+test("materializes fresh shards at the currently reduced transport capacity", async () => {
+  const gate = new ProxyTransportGate({
+    maxConcurrent: 8,
+    minStartDelayMs: 0,
+    startJitterMs: 0,
+  });
+  for (let failure = 0; failure < 3; failure += 1) {
+    await assert.rejects(gate.run(async () => { throw new Error("temporary"); }));
+  }
+  assert.equal(gate.currentMaxConcurrent, 4);
+
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-reduced-shards-"));
+  const client = new ParallelFakeClient();
+  const config = await options(directory);
+  config.shardCount = 96;
+  config.workersPerLane = 3;
+  config.maxWorkers = 8;
+  const report = await runParallelSongScan(Array.from({ length: 4 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: governor(),
+    transportGate: gate,
+  })), config);
+  const state = await loadParallelState(config.statePath);
+
+  assert.equal(report.status, "complete");
+  assert.equal(state?.shardCount, 96);
+  assert.equal(state?.shards.length, 4);
 });
 
 test("continues an empty page when its descending cursor advances", async () => {

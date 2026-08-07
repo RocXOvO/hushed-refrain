@@ -6,10 +6,16 @@ import { extname, join, resolve, sep } from "node:path";
 import { EnhancedNcmClient, type NcmUserProfile } from "./api";
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import { CommentRateTracker } from "./comment-rate";
-import { CooldownRequired } from "./errors";
+import { AuthenticationRequired, CooldownRequired, errorStatus } from "./errors";
 import { estimateCommentScan } from "./estimate";
 import { RequestGovernor } from "./governor";
+import {
+  JsonlSnapshotLimitError,
+  readJsonlSnapshotDetails,
+  type JsonlSnapshot,
+} from "./jsonl-snapshot";
 import { readJsonlTail } from "./jsonl-tail";
+import { PagePerformanceTracker, type PagePerformanceSnapshot } from "./page-performance";
 import { timeCoveragePercent } from "./progress";
 import {
   DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
@@ -40,6 +46,7 @@ import {
   type ParallelCommentLane,
 } from "./parallel-scanner";
 import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
+import { renderResultReportHtml, type ResultReport } from "./result-report";
 import { loadState, SOURCE_CATALOG_VERSION } from "./state";
 import { taskElapsedMs, TaskCoordinator } from "./task-coordinator";
 import { readTaskLog, TaskLogger } from "./task-log";
@@ -92,6 +99,11 @@ interface ActiveSongSnapshot {
   id: string;
   name?: string;
   workers: number;
+  workersPerLane?: number;
+  hostConcurrency?: number;
+  pageSize?: number;
+  minDelayMs?: number;
+  jitterMs?: number;
   pagesProcessed?: number;
   requestingPage?: number;
   requestStartedAt?: number;
@@ -101,7 +113,7 @@ interface ActiveSongSnapshot {
   progressBasis?: "comments" | "time";
 }
 
-interface JobSnapshot {
+interface JobSnapshot extends PagePerformanceSnapshot {
   id?: string;
   status: JobStatus;
   uid?: string;
@@ -129,6 +141,12 @@ interface JobSnapshot {
   lanes: number;
   laneSelection?: ProxyLaneSelection;
   workers: number;
+  workersPerLane?: number;
+  hostConcurrency?: number;
+  configuredShardCount?: number;
+  pageSize?: number;
+  minDelayMs?: number;
+  jitterMs?: number;
   proxyTransportMaxConcurrent?: number;
   proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
@@ -141,7 +159,7 @@ interface JobSnapshot {
   note?: string;
 }
 
-interface ParallelJobSnapshot {
+interface ParallelJobSnapshot extends PagePerformanceSnapshot {
   id?: string;
   status: "idle" | "running" | "stopping" | ParallelSongScanReport["status"] | "error";
   uid?: string;
@@ -153,6 +171,12 @@ interface ParallelJobSnapshot {
   lanes: number;
   laneSelection?: ProxyLaneSelection;
   workers: number;
+  workersPerLane?: number;
+  hostConcurrency?: number;
+  configuredShardCount?: number;
+  pageSize?: number;
+  minDelayMs?: number;
+  jitterMs?: number;
   proxyTransportMaxConcurrent?: number;
   proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
@@ -223,12 +247,99 @@ interface SourceProbe {
   error?: string;
 }
 
-interface UserProbe {
+export interface UserProbe {
   profile: NcmUserProfile;
   record: SourceProbe;
   likes: SourceProbe;
   sessionPresent: boolean;
   elapsedMs: number;
+  route: "direct" | "explicit-proxy" | "managed-pool";
+  routeName?: string;
+  routeAttempts: number;
+}
+
+type UserProbeRequest = (uid: string, proxy: string | undefined, cookiePath: string) => Promise<UserProbe>;
+
+export interface UserProbeRouterDependencies {
+  readPool?: typeof readProxyPool;
+  verifyPool?: typeof verifyProxyPool;
+  probe?: UserProbeRequest;
+}
+
+/** Rotates profile lookups across the managed pool instead of reusing one direct exit for every UID. */
+export class UserProbeRouter {
+  private cursor = 0;
+
+  constructor(
+    private readonly cookiePath: string,
+    private readonly poolPath: string,
+    private readonly dependencies: UserProbeRouterDependencies = {},
+  ) {}
+
+  async run(uid: string, explicitProxy?: string): Promise<UserProbe> {
+    const probe = this.dependencies.probe ?? probeUser;
+    if (explicitProxy) {
+      return this.runSingle(probe, uid, explicitProxy, "explicit-proxy", "手动代理");
+    }
+
+    const pool = await (this.dependencies.readPool ?? readProxyPool)(this.poolPath);
+    if (!proxyPoolStatusRunning(pool)) {
+      return this.runSingle(probe, uid, undefined, "direct", "本机直连");
+    }
+
+    let entries: ProxyPoolEntry[];
+    try {
+      entries = recentlyVerifiedProxyPoolEntries(pool!)
+        ?? await (this.dependencies.verifyPool ?? verifyProxyPool)(pool!);
+    } catch {
+      throw new HttpError(409, "代理池正在运行，但节点复核失败；已阻止用户查询回退到本机直连，请先重新优选节点。");
+    }
+    if (entries.length === 0) {
+      throw new HttpError(409, "代理池当前没有可用节点；已阻止用户查询回退到本机直连。");
+    }
+
+    const start = this.cursor % entries.length;
+    this.cursor = (this.cursor + 1) % entries.length;
+    const attempts = Math.min(3, entries.length);
+    let lastError: unknown;
+    for (let index = 0; index < attempts; index += 1) {
+      const entry = entries[(start + index) % entries.length];
+      try {
+        const result = await probe(uid, entry.endpoint, this.cookiePath);
+        return {
+          ...result,
+          route: "managed-pool",
+          routeName: entry.name,
+          routeAttempts: index + 1,
+        };
+      } catch (error) {
+        if (error instanceof AuthenticationRequired) throw new HttpError(401, error.message);
+        if (errorStatus(error) === 404) throw userProbeHttpError(error, index + 1, true);
+        lastError = error;
+      }
+    }
+    throw userProbeHttpError(lastError, attempts, true);
+  }
+
+  private async runSingle(
+    probe: UserProbeRequest,
+    uid: string,
+    proxy: string | undefined,
+    route: UserProbe["route"],
+    routeName: string,
+  ): Promise<UserProbe> {
+    try {
+      return {
+        ...await probe(uid, proxy, this.cookiePath),
+        route,
+        routeName,
+        routeAttempts: 1,
+      };
+    } catch (error) {
+      if (error instanceof AuthenticationRequired) throw new HttpError(401, error.message);
+      throw userProbeHttpError(error, 1, false);
+    }
+  }
 }
 
 interface PoolSnapshot {
@@ -253,6 +364,8 @@ const projectRoot = resolve(__dirname, "..");
 const webRoot = join(projectRoot, "web");
 const iconRoot = join(projectRoot, "node_modules", "lucide-static", "icons");
 const ACTIVE_SONG_PROGRESS_LIMIT = 64;
+const MAX_RESULT_REPORT_BYTES = 64 * 1024 * 1024;
+const MAX_RESULT_REPORT_RECORDS = 20_000;
 
 class JobManager {
   private snapshotValue: JobSnapshot = emptySnapshot();
@@ -267,6 +380,7 @@ class JobManager {
   private readonly songNameById = new Map<string, string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
   private readonly commentRate = new CommentRateTracker();
+  private readonly pagePerformance = new PagePerformanceTracker();
 
   constructor(
     private readonly paths: RuntimePaths,
@@ -349,6 +463,7 @@ class JobManager {
     this.activeSongProgress.clear();
     this.songNameById.clear();
     this.commentRate.reset();
+    this.pagePerformance.reset();
     const logger = new TaskLogger(
       join(this.paths.data, "logs", `source-${activeId}.jsonl`),
       "source",
@@ -387,6 +502,7 @@ class JobManager {
         }
       },
       onRequestActivity: (activity) => {
+        this.pagePerformance.record(activity);
         if (activity.phase === "success") this.commentRate.record(activity.comments ?? 0);
         logger.request(activity);
         this.trackActiveSong(activeId, activity);
@@ -430,6 +546,7 @@ class JobManager {
       ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
       startedAt, proxyEnabled: selectedPoolEntries.length > 0 || Boolean(proxy),
       lanes: this.lanes.length, workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
+      workersPerLane, hostConcurrency, pageSize: commentPageSize, minDelayMs, jitterMs,
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
       proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
       proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
@@ -581,6 +698,7 @@ class JobManager {
       this.snapshotValue.finishedAt,
     );
     this.snapshotValue.commentsPerSecond = active ? this.commentRate.rate() : 0;
+    Object.assign(this.snapshotValue, this.pagePerformance.snapshot());
     this.snapshotValue.proxyTransportEffectiveConcurrent = this.transportGate?.currentMaxConcurrent ?? this.snapshotValue.proxyTransportEffectiveConcurrent;
     return {
       ...this.snapshotValue,
@@ -599,6 +717,42 @@ class JobManager {
       results: results.map((comment) => comment.songName || !comment.songId
         ? comment
         : { ...comment, songName: songNameById.get(comment.songId) }),
+    };
+  }
+  async report(expectedJobId: string, expectedUid: string): Promise<ResultReport> {
+    if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== expectedUid) {
+      throw new HttpError(409, "当前用户来源任务已经切换，请重新点击导出。");
+    }
+    const outputPath = this.outputPath;
+    const songNameById = new Map(this.songNameById);
+    const [fileSnapshot, snapshot] = await Promise.all([
+      readResultReportSnapshot(outputPath),
+      this.status(),
+    ]);
+    if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== expectedUid
+      || this.outputPath !== outputPath || snapshot.id !== expectedJobId || snapshot.uid !== expectedUid) {
+      throw new HttpError(409, "当前用户来源任务已经切换，请重新点击导出。");
+    }
+    const comments = fileSnapshot.records.map((comment) => comment.songName || !comment.songId
+      ? comment
+      : { ...comment, songName: songNameById.get(comment.songId) });
+    return {
+      mode: "source",
+      jobId: snapshot.id,
+      uid: snapshot.uid!,
+      status: snapshot.status,
+      source: snapshot.source,
+      startedAt: snapshot.startedAt,
+      finishedAt: snapshot.finishedAt,
+      elapsedMs: snapshot.elapsedMs,
+      matches: snapshot.matches,
+      requestsTotal: snapshot.requestsTotal,
+      pagesProcessed: snapshot.pagesProcessed,
+      coverageLabel: snapshot.songs > 0
+        ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲`
+        : "等待歌曲目录",
+      exportedAt: new Date().toISOString(),
+      comments: comments.reverse(),
     };
   }
   async logs(limit: number): Promise<{ path?: string; entries: Awaited<ReturnType<typeof readTaskLog>> }> {
@@ -708,6 +862,7 @@ class ParallelJobManager {
   private readonly activeWorkers = new Map<string, number>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
   private readonly commentRate = new CommentRateTracker();
+  private readonly pagePerformance = new PagePerformanceTracker();
 
   constructor(
     private readonly paths: RuntimePaths,
@@ -768,6 +923,7 @@ class ParallelJobManager {
     this.abortController = new AbortController();
     this.activeWorkers.clear();
     this.commentRate.reset();
+    this.pagePerformance.reset();
     const logger = new TaskLogger(
       join(this.paths.data, "logs", `parallel-${activeId}.jsonl`),
       "parallel",
@@ -778,6 +934,7 @@ class ParallelJobManager {
       songName: song.name, activeSongs: [{ id: songId, name: song.name, workers: 0 }], startedAt, lanes: this.lanes.length,
       laneSelection: selectedPool.selection,
       workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency), shards: shardCount,
+      workersPerLane, hostConcurrency, configuredShardCount: shardCount, pageSize, minDelayMs, jitterMs,
       proxyTransportMaxConcurrent: hostConcurrency,
       proxyTransportEffectiveConcurrent: this.transportGate.currentMaxConcurrent,
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
@@ -837,6 +994,7 @@ class ParallelJobManager {
         this.snapshotValue = { ...this.snapshotValue, ...activity };
       },
       onRequestActivity: (activity) => {
+        this.pagePerformance.record(activity);
         if (activity.phase === "success") this.commentRate.record(activity.comments ?? 0);
         logger.request(activity);
         this.trackActiveSong(activeId, activity);
@@ -922,6 +1080,7 @@ class ParallelJobManager {
       this.snapshotValue.finishedAt,
     );
     this.snapshotValue.commentsPerSecond = active ? this.commentRate.rate() : 0;
+    Object.assign(this.snapshotValue, this.pagePerformance.snapshot());
     this.snapshotValue.proxyTransportEffectiveConcurrent = this.transportGate?.currentMaxConcurrent ?? this.snapshotValue.proxyTransportEffectiveConcurrent;
     return {
       ...this.snapshotValue,
@@ -940,6 +1099,38 @@ class ParallelJobManager {
     const jobId = this.snapshotValue.id;
     const outputPath = this.outputPath;
     return { jobId, results: await readJsonl(outputPath, limit) };
+  }
+  async report(expectedJobId: string, expectedUid: string): Promise<ResultReport> {
+    if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== expectedUid) {
+      throw new HttpError(409, "当前单曲任务已经切换，请重新点击导出。");
+    }
+    const outputPath = this.outputPath;
+    const [fileSnapshot, snapshot] = await Promise.all([
+      readResultReportSnapshot(outputPath),
+      this.status(),
+    ]);
+    if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== expectedUid
+      || this.outputPath !== outputPath || snapshot.id !== expectedJobId || snapshot.uid !== expectedUid) {
+      throw new HttpError(409, "当前单曲任务已经切换，请重新点击导出。");
+    }
+    const comments = fileSnapshot.records;
+    return {
+      mode: "parallel",
+      jobId: snapshot.id,
+      uid: snapshot.uid!,
+      status: snapshot.status,
+      songId: snapshot.songId,
+      songName: snapshot.songName,
+      startedAt: snapshot.startedAt,
+      finishedAt: snapshot.finishedAt,
+      elapsedMs: snapshot.elapsedMs,
+      matches: snapshot.matches,
+      requestsTotal: snapshot.requestsTotal,
+      pagesProcessed: snapshot.pagesProcessed,
+      coverageLabel: `${Math.max(0, Math.min(100, snapshot.coveragePercent)).toFixed(1)}% 时间范围`,
+      exportedAt: new Date().toISOString(),
+      comments: comments.reverse(),
+    };
   }
   async logs(limit: number): Promise<{ path?: string; entries: Awaited<ReturnType<typeof readTaskLog>> }> {
     return { path: this.snapshotValue.logPath, entries: await readTaskLog(this.snapshotValue.logPath, limit) };
@@ -1156,6 +1347,7 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
     options.poolDiscoverer ?? discoverClashVerge,
   );
   const auth = new AuthManager(paths);
+  const userProbes = new UserProbeRouter(paths.cookie, paths.pool);
   const currentVersion = options.currentVersion ?? await applicationVersion();
   const updateChecker = cachedUpdateChecker(options.updateChecker ?? (() => checkForUpdate({
     currentVersion,
@@ -1163,7 +1355,7 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
     arch: options.arch,
   })));
   const server = createServer(async (request, response) => {
-    try { await route(request, response, paths, jobs, parallel, pool, auth, updateChecker); }
+    try { await route(request, response, paths, jobs, parallel, pool, auth, userProbes, updateChecker); }
     catch (error) { json(response, error instanceof HttpError ? error.status : 500, { error: message(error) }); }
   });
   await new Promise<void>((done, reject) => {
@@ -1176,6 +1368,7 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
 async function route(
   request: IncomingMessage, response: ServerResponse, paths: RuntimePaths,
   jobs: JobManager, parallel: ParallelJobManager, pool: PoolManager, auth: AuthManager,
+  userProbes: UserProbeRouter,
   updateChecker: () => Promise<UpdateSnapshot>,
 ): Promise<void> {
   const method = request.method ?? "GET";
@@ -1193,6 +1386,16 @@ async function route(
   if (method === "POST" && url.pathname === "/api/parallel/job/stop") return json(response, 200, await parallel.stop());
   if (method === "GET" && url.pathname === "/api/parallel/results/stream") return streamMatches(request, response, (subscriber) => parallel.subscribeMatches(subscriber));
   if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, await parallel.results(limit(url)));
+  if (method === "GET" && url.pathname === "/report/results") {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      throw new HttpError(403, "结果报告仅允许从本机访问。");
+    }
+    const mode = selection(url.searchParams.get("mode"), ["source", "parallel"] as const, "mode");
+    const jobId = reportJobId(url.searchParams.get("jobId"));
+    const uid = numericId(url.searchParams.get("uid"), "UID");
+    const report = mode === "parallel" ? await parallel.report(jobId, uid) : await jobs.report(jobId, uid);
+    return html(response, renderResultReportHtml(report));
+  }
   if (method === "GET" && url.pathname === "/api/logs") {
     return json(response, 200, url.searchParams.get("mode") === "parallel"
       ? await parallel.logs(limit(url))
@@ -1210,6 +1413,11 @@ async function route(
     return json(response, 200, estimateCommentScan({
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
       pageSize: integer(url.searchParams.get("pageSize") ?? 1_000, "pageSize", 1, 2_000),
+      partitions: url.searchParams.has("partitions")
+        ? integer(url.searchParams.get("partitions"), "partitions", 1, 100_000)
+        : undefined,
+      observedCommentsPerPage: optionalNumber(url.searchParams.get("observedCommentsPerPage"), "observedCommentsPerPage", 0.01, 2_000),
+      requestSuccessRatio: optionalNumber(url.searchParams.get("requestSuccessRatio"), "requestSuccessRatio", 0.0001, 1),
       minDelayMs: integer(url.searchParams.get("minDelayMs") ?? 2_500, "minDelayMs", 0, 600_000),
       jitterMs: integer(url.searchParams.get("jitterMs") ?? 800, "jitterMs", 0, 600_000),
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
@@ -1228,10 +1436,21 @@ async function route(
         1,
         32,
       ),
+      proxyTransportEffectiveConcurrent: integer(
+        url.searchParams.get("proxyTransportEffectiveConcurrent")
+          ?? url.searchParams.get("hostConcurrency")
+          ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+        "proxyTransportEffectiveConcurrent",
+        1,
+        32,
+      ),
     }));
   }
   if (method === "GET" && url.pathname === "/api/user") {
-    return json(response, 200, await probeUser(numericId(url.searchParams.get("uid"), "UID"), proxyUrl(url.searchParams.get("proxy")), paths.cookie));
+    return json(response, 200, await userProbes.run(
+      numericId(url.searchParams.get("uid"), "UID"),
+      proxyUrl(url.searchParams.get("proxy")),
+    ));
   }
   if (method === "GET" && url.pathname === "/api/auth") return json(response, 200, await auth.status());
   if (method === "POST" && url.pathname === "/api/auth/qr") return json(response, 202, await auth.start());
@@ -1323,6 +1542,17 @@ function json(response: ServerResponse, status: number, value: unknown): void {
   response.end(`${JSON.stringify(value)}\n`);
 }
 
+function html(response: ServerResponse, value: string): void {
+  response.writeHead(200, {
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; connect-src 'none'; img-src 'none'; frame-ancestors 'none'",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+  });
+  response.end(value);
+}
+
 function streamMatches(
   request: IncomingMessage,
   response: ServerResponse,
@@ -1389,7 +1619,9 @@ async function probeUser(uid: string, proxy: string | undefined, cookiePath: str
   const cookie = await readCookie(cookiePath);
   const client = new EnhancedNcmClient({ proxy });
   const governor = new RequestGovernor({ requestBudget: 4, minDelayMs: 800, jitterMs: 200, maxRetries: 1, forbiddenCooldownMs: 900_000 });
-  const profile = await governor.execute("user_detail", () => client.getUserProfile(uid, cookie));
+  // Public profile lookup does not need the operator's cookie. Keeping it out
+  // prevents an expired login session from breaking a public UID switch.
+  const profile = await governor.execute("user_detail", () => client.getUserProfile(uid));
   const inspect = async (source: "record" | "likes"): Promise<SourceProbe> => {
     try {
       const songs = source === "record"
@@ -1403,12 +1635,48 @@ async function probeUser(uid: string, proxy: string | undefined, cookiePath: str
   };
   const record = await inspect("record");
   const likes = record.status === "cooldown" ? { status: "cooldown" as const, error: "record probe entered cooldown" } : await inspect("likes");
-  return { profile, record, likes, sessionPresent: Boolean(cookie), elapsedMs: Date.now() - started };
+  return {
+    profile,
+    record,
+    likes,
+    sessionPresent: Boolean(cookie),
+    elapsedMs: Date.now() - started,
+    route: proxy ? "explicit-proxy" : "direct",
+    routeAttempts: 1,
+  };
+}
+
+function userProbeHttpError(error: unknown, attempts: number, usedPool: boolean): HttpError {
+  if (errorStatus(error) === 404) {
+    return new HttpError(404, "没有找到这个 UID 对应的用户资料；请确认输入的是用户主页中的纯数字 UID，且该账号资料仍可访问。");
+  }
+  if (error instanceof CooldownRequired) {
+    return new HttpError(429, usedPool
+      ? `用户资料查询已轮换 ${attempts} 个代理出口，但都被网易云暂时拒绝或限流；请稍后再试。`
+      : "用户资料查询被网易云暂时拒绝或限流；请稍后再试，或先开启代理池。"
+    );
+  }
+  return new HttpError(502, usedPool
+    ? `用户资料查询已自动轮换 ${attempts} 个代理出口，仍未收到有效响应；请检查节点状态或稍后再试。`
+    : "用户资料查询未收到有效上游响应；请先开启代理池后重试，避免连续 UID 查询始终使用同一本机出口。"
+  );
 }
 
 async function readJsonl(path: string | undefined, max: number): Promise<FoundComment[]> {
   if (!path) return [];
   return readJsonlTail<FoundComment>(path, max);
+}
+
+async function readResultReportSnapshot(path: string | undefined): Promise<JsonlSnapshot<FoundComment>> {
+  try {
+    return await readJsonlSnapshotDetails<FoundComment>(path, {
+      maxBytes: MAX_RESULT_REPORT_BYTES,
+      maxRecords: MAX_RESULT_REPORT_RECORDS,
+    });
+  } catch (error) {
+    if (error instanceof JsonlSnapshotLimitError) throw new HttpError(413, error.message);
+    throw error;
+  }
 }
 
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
@@ -1417,8 +1685,8 @@ function requestStartedAt(value: string | undefined): number {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
-function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
   return coordinator.activeMode() === "parallel"
@@ -1426,8 +1694,22 @@ function busyTaskMessage(coordinator: TaskCoordinator): string {
     : "已有用户来源任务正在运行，请先停止该任务。";
 }
 function numericId(value: unknown, name: string): string { const id = String(value ?? "").trim(); if (!/^\d+$/.test(id)) throw new HttpError(400, `${name} 应为纯数字。`); return id; }
+function reportJobId(value: unknown): string { const id = String(value ?? "").trim(); if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new HttpError(400, "任务 ID 格式错误。"); return id; }
+export function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  return address === "::1" || address === "127.0.0.1" || address.startsWith("127.")
+    || address === "::ffff:127.0.0.1" || address.startsWith("::ffff:127.");
+}
 function selection<const T extends readonly string[]>(value: unknown, choices: T, name: string): T[number] { if (typeof value === "string" && choices.includes(value)) return value as T[number]; throw new HttpError(400, `${name} 参数错误。`); }
 function integer(value: unknown, name: string, minimum: number, maximum: number): number { const parsed = Number(value); if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) throw new HttpError(400, `${name} 应为 ${minimum} 到 ${maximum} 之间的整数。`); return parsed; }
+function optionalNumber(value: unknown, name: string, minimum: number, maximum: number): number | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < minimum || parsed > maximum) {
+    throw new HttpError(400, `${name} 应为 ${minimum} 到 ${maximum} 之间的数字。`);
+  }
+  return parsed;
+}
 function bool(value: unknown): boolean { return value === true; }
 function proxyUrl(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;

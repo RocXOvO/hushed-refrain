@@ -4,7 +4,14 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { sourceTaskPaths, startDashboard, validateClashConfigSelection } from "../src/server";
+import {
+  isLoopbackAddress,
+  sourceTaskPaths,
+  startDashboard,
+  UserProbeRouter,
+  validateClashConfigSelection,
+  type UserProbe,
+} from "../src/server";
 import type { ProxyPoolFile } from "../src/mihomo-pool";
 
 test("isolates target-owned likes while preserving the legacy record result path", () => {
@@ -51,10 +58,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="activeSongCount"/);
   assert.match(pageText, /id="activeWorkerCount"/);
   assert.match(pageText, /id="activeSongsList"/);
+  assert.match(pageText, /id="exportResultsButton"/);
+  assert.match(pageText, /id="runtimeInspectorBody"/);
+  assert.match(pageText, /PDF 将包含截至导出时已经保存的全部结果/);
   assert.match(pageText, /评论读取进度/);
   assert.match(pageText, /主机并发会硬性限制总 Worker 数/);
-  assert.match(pageText, /styles\.css\?v=34/);
-  assert.match(pageText, /app\.js\?v=35/);
+  assert.match(pageText, /styles\.css\?v=38/);
+  assert.match(pageText, /app\.js\?v=38/);
   assert.match(pageText, /id="speedMetric"/);
   assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
@@ -106,6 +116,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /maxProxyLanes/);
   assert.match(appText, /value\.hostConcurrency = Number\(el\.hostConcurrency\.value\)/);
   assert.match(appText, /requested > 0 \? requested : poolLaneCount/);
+  assert.match(appText, /observedCommentsPerPage/);
+  assert.match(appText, /pageRequestAttempts/);
+  assert.match(appText, /proxyTransportEffectiveStartDelayMs/);
+  assert.match(appText, /result\.route === "managed-pool"/);
+  assert.match(appText, /任务产生 3 次页面请求后自动校准/);
+  assert.match(appText, /exportResultsPdf/);
+  assert.match(appText, /inspectorBody\.inert/);
   assert.doesNotMatch(appText, /当前生效配置（合并）/);
   assert.doesNotMatch(appText, /resultTimestamp/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
@@ -113,6 +130,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
   assert.match(icon.headers.get("content-type") ?? "", /image\/svg\+xml/);
+
+  const reportScript = await fetch(`${base}/report.js`);
+  assert.equal(reportScript.status, 200);
+  assert.match(await reportScript.text(), /window\.print/);
+
+  const invalidReport = await fetch(`${base}/report/results?mode=source&jobId=not-a-uuid`);
+  assert.equal(invalidReport.status, 400);
 
   const styles = await fetch(`${base}/styles.css`);
   assert.equal(styles.status, 200);
@@ -125,6 +149,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);
   assert.match(styleText, /body\.inspector-collapsed/);
+  assert.match(styleText, /\.inspector-body\s*\{[^}]*transition:/s);
+  assert.match(styleText, /prefers-reduced-motion:\s*reduce/);
   assert.match(styleText, /transform 210ms/);
   assert.match(styleText, /font-size:\s*16px/);
   assert.match(styleText, /\.pool-state-indicator\.is-ready \.pool-state-led/);
@@ -171,6 +197,118 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const customProtectedValue = await customProtectedEstimate.json() as { effectiveWorkers: number; proxyTransportMaxConcurrent: number };
   assert.equal(customProtectedValue.effectiveWorkers, 4);
   assert.equal(customProtectedValue.proxyTransportMaxConcurrent, 4);
+
+  const calibratedEstimate = await fetch(`${base}/api/estimate?comments=60000&pageSize=1000&partitions=100&observedCommentsPerPage=600&requestSuccessRatio=0.8&networkMs=550&lanes=8&workersPerLane=2&proxyTransport=1&hostConcurrency=8&proxyTransportEffectiveConcurrent=4&minDelayMs=0&jitterMs=0`);
+  assert.equal(calibratedEstimate.status, 200);
+  const calibratedValue = await calibratedEstimate.json() as { pages: number; estimatedRequests: number; effectiveWorkers: number };
+  assert.equal(calibratedValue.pages, 100);
+  assert.equal(calibratedValue.estimatedRequests, 125);
+  assert.equal(calibratedValue.effectiveWorkers, 4);
+});
+
+test("recognizes only local socket addresses for private result reports", () => {
+  assert.equal(isLoopbackAddress("127.0.0.1"), true);
+  assert.equal(isLoopbackAddress("127.19.2.3"), true);
+  assert.equal(isLoopbackAddress("::1"), true);
+  assert.equal(isLoopbackAddress("::ffff:127.0.0.1"), true);
+  assert.equal(isLoopbackAddress("192.168.1.5"), false);
+  assert.equal(isLoopbackAddress("::ffff:192.168.1.5"), false);
+  assert.equal(isLoopbackAddress(undefined), false);
+});
+
+test("rotates UID lookups across the managed pool and fails over to another exit", async () => {
+  const entries = [
+    { name: "node-a", endpoint: "http://127.0.0.1:17891", egressIp: "1.1.1.1", latencyMs: 10, ncmLatencyMs: 20, ncmVerified: true },
+    { name: "node-b", endpoint: "http://127.0.0.1:17892", egressIp: "2.2.2.2", latencyMs: 11, ncmLatencyMs: 21, ncmVerified: true },
+  ];
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    lastCheckedAt: new Date().toISOString(),
+    source: "external",
+    active: true,
+    entries,
+  };
+  const calls: Array<string | undefined> = [];
+  const successfulProbe = (uid: string): UserProbe => ({
+    profile: { userId: uid, nickname: `user-${uid}` },
+    record: { status: "available", songs: 1 },
+    likes: { status: "available", songs: 2 },
+    sessionPresent: false,
+    elapsedMs: 10,
+    route: "direct",
+    routeAttempts: 1,
+  });
+  const router = new UserProbeRouter("/cookie", "/pool", {
+    readPool: async () => pool,
+    probe: async (uid, proxy) => {
+      calls.push(proxy);
+      if (proxy === entries[0].endpoint) throw new Error("broken exit");
+      return successfulProbe(uid);
+    },
+  });
+
+  const first = await router.run("101");
+  const second = await router.run("202");
+  assert.deepEqual(calls, [entries[0].endpoint, entries[1].endpoint, entries[1].endpoint]);
+  assert.deepEqual(
+    { route: first.route, name: first.routeName, attempts: first.routeAttempts },
+    { route: "managed-pool", name: "node-b", attempts: 2 },
+  );
+  assert.deepEqual(
+    { route: second.route, name: second.routeName, attempts: second.routeAttempts },
+    { route: "managed-pool", name: "node-b", attempts: 1 },
+  );
+});
+
+test("keeps a failed managed-pool UID lookup from silently falling back to direct", async () => {
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    lastCheckedAt: new Date().toISOString(),
+    source: "external",
+    active: true,
+    entries: [{ name: "node-a", endpoint: "http://127.0.0.1:17891", egressIp: "1.1.1.1", latencyMs: 10, ncmLatencyMs: 20, ncmVerified: true }],
+  };
+  const calls: Array<string | undefined> = [];
+  const router = new UserProbeRouter("/cookie", "/pool", {
+    readPool: async () => pool,
+    probe: async (_uid, proxy) => { calls.push(proxy); throw new Error("upstream failed"); },
+  });
+  await assert.rejects(router.run("303"), (error: unknown) => {
+    assert.equal((error as { status?: number }).status, 502);
+    assert.match((error as Error).message, /1 个代理出口/);
+    return true;
+  });
+  assert.deepEqual(calls, [pool.entries[0].endpoint]);
+});
+
+test("turns user_detail 404 into an actionable UID error without rotating every exit", async () => {
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    lastCheckedAt: new Date().toISOString(),
+    source: "external",
+    active: true,
+    entries: [
+      { name: "node-a", endpoint: "http://127.0.0.1:17891", egressIp: "1.1.1.1", latencyMs: 10, ncmLatencyMs: 20, ncmVerified: true },
+      { name: "node-b", endpoint: "http://127.0.0.1:17892", egressIp: "2.2.2.2", latencyMs: 11, ncmLatencyMs: 21, ncmVerified: true },
+    ],
+  };
+  const calls: Array<string | undefined> = [];
+  const router = new UserProbeRouter("/cookie", "/pool", {
+    readPool: async () => pool,
+    probe: async (_uid, proxy) => {
+      calls.push(proxy);
+      throw Object.assign(new Error("user_detail failed (404)"), { status: 404 });
+    },
+  });
+  await assert.rejects(router.run("404404"), (error: unknown) => {
+    assert.equal((error as { status?: number }).status, 404);
+    assert.match((error as Error).message, /用户主页中的纯数字 UID/);
+    return true;
+  });
+  assert.deepEqual(calls, [pool.entries[0].endpoint]);
 });
 
 test("validates multiple Clash config selections against one discovery snapshot", () => {

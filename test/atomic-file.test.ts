@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   AtomicWriteError,
   readAtomicJson,
+  writeAtomicBuffer,
   writeAtomicJson,
 } from "../src/atomic-file";
 
@@ -29,6 +30,15 @@ test("retries a transient Windows rename lock and eventually commits", async () 
 
   assert.equal(attempts, 3);
   assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { generation: 2 });
+});
+
+test("atomically writes binary PDF output", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-atomic-buffer-"));
+  const path = join(root, "report.pdf");
+  const pdfHeader = Buffer.from("%PDF-1.7\n", "ascii");
+  await writeAtomicBuffer(path, pdfHeader, { randomId: () => "pdf" });
+  assert.deepEqual(await readFile(path), pdfHeader);
+  assert.equal((await readdir(root)).filter((name) => name.includes(".tmp-")).length, 0);
 });
 
 test("concurrent writes to one path use distinct temporary files", async () => {

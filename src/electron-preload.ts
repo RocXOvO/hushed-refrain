@@ -18,6 +18,10 @@ const DESKTOP_UPDATE_CHANNELS = {
   stateChanged: "desktop-update:state-changed",
 } as const;
 
+const DESKTOP_EXPORT_CHANNELS = {
+  resultsPdf: "desktop-export:results-pdf",
+} as const;
+
 contextBridge.exposeInMainWorld("ncmDesktop", Object.freeze({
   platform: process.platform,
   minimize: (): void => ipcRenderer.send(DESKTOP_WINDOW_CHANNELS.minimize),
@@ -33,6 +37,7 @@ contextBridge.exposeInMainWorld("ncmDesktop", Object.freeze({
   checkForUpdates: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.check),
   downloadUpdate: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.download),
   installUpdate: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.install),
+  exportResultsPdf: (request: unknown): Promise<unknown> => ipcRenderer.invoke(DESKTOP_EXPORT_CHANNELS.resultsPdf, request),
   onUpdateState: (listener: (state: unknown) => void): (() => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, state: unknown): void => listener(state);
     ipcRenderer.on(DESKTOP_UPDATE_CHANNELS.stateChanged, wrapped);

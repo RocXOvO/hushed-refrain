@@ -4,6 +4,7 @@ import {
   AuthenticationRequired,
   CooldownRequired,
   RequestBudgetExhausted,
+  RequestExecutionError,
   RunCancelled,
 } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
@@ -116,6 +117,23 @@ test("turns 403 into a persistent cooldown signal without retry", async () => {
   await assert.rejects(
     governor.execute("still-blocked", async () => { calls += 1; }),
     CooldownRequired,
+  );
+  assert.equal(calls, 1);
+});
+
+test("preserves a terminal upstream status for higher-level error handling", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 3,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, fake.runtime);
+  let calls = 0;
+  await assert.rejects(
+    governor.execute("user_detail", async () => { calls += 1; throw { status: 404 }; }),
+    (error: unknown) => error instanceof RequestExecutionError && error.status === 404,
   );
   assert.equal(calls, 1);
 });

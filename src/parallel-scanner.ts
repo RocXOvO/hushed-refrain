@@ -47,8 +47,11 @@ export async function runParallelSongScan(
   const startedAt = Date.now();
   const loaded = options.fresh ? undefined : await loadParallelState(options.statePath);
   if (loaded) assertCompatible(loaded, options);
-  const state = loaded ?? createParallelState(options);
   const workerCount = workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers);
+  const transportCapacity = lanes.reduce((capacity, lane) =>
+    Math.min(capacity, lane.transportGate?.currentMaxConcurrent ?? capacity), workerCount);
+  const initialShardCount = Math.max(1, Math.min(options.shardCount, workerCount, transportCapacity));
+  const state = loaded ?? createParallelState(options, initialShardCount);
   const initialRequests = state.requestCount;
   const seenCommentIds = new Set(state.seenCommentIds);
   const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
@@ -201,17 +204,27 @@ export async function runParallelSongScan(
       startedAt: new Date(requestStartedAt).toISOString(),
     };
     publishRequestActivity(options, { ...requestActivity, phase: "start" });
+    let attempts = 0;
+    let networkElapsedMs = 0;
     let page;
     try {
       page = await executeProxyRequest(
         lane,
         `comment_new:${options.songId}:shard-${shard.id}`,
-        () => lane.client.getSongCommentsByCursor(
-          options.songId,
-          options.pageSize,
-          shard.pageNo,
-          requestedCursor,
-        ),
+        async () => {
+          attempts += 1;
+          const networkStartedAt = Date.now();
+          try {
+            return await lane.client.getSongCommentsByCursor(
+              options.songId,
+              options.pageSize,
+              shard.pageNo,
+              requestedCursor,
+            );
+          } finally {
+            networkElapsedMs += Date.now() - networkStartedAt;
+          }
+        },
       );
     } catch (error) {
       const status = remoteStatus(error);
@@ -219,6 +232,8 @@ export async function runParallelSongScan(
         ...requestActivity,
         phase: "failure",
         elapsedMs: Date.now() - requestStartedAt,
+        networkElapsedMs,
+        attempts,
         status,
         rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
         error: errorMessage(error),
@@ -252,20 +267,13 @@ export async function runParallelSongScan(
         ...requestActivity,
         phase: "failure",
         elapsedMs: Date.now() - requestStartedAt,
+        networkElapsedMs,
+        attempts,
         status: 502,
         error: errorMessage(error),
       });
       throw error;
     }
-    publishRequestActivity(options, {
-      ...requestActivity,
-      phase: "success",
-      elapsedMs: Date.now() - requestStartedAt,
-      comments: page.comments.length,
-      totalComments: page.total,
-      hasMore: page.hasMore,
-    });
-
     shard.pagesProcessed += 1;
     shard.pageNo += 1;
     state.pagesProcessed += 1;
@@ -274,6 +282,17 @@ export async function runParallelSongScan(
       comment.time === undefined ||
       (comment.time >= shard.startTime && comment.time < shard.endTime)
     );
+    publishRequestActivity(options, {
+      ...requestActivity,
+      phase: "success",
+      elapsedMs: Date.now() - requestStartedAt,
+      networkElapsedMs,
+      attempts,
+      comments: page.comments.length,
+      effectiveComments: rangedComments.length,
+      totalComments: page.total,
+      hasMore: page.hasMore,
+    });
     state.commentsInspected += rangedComments.length;
     state.totalComments = mergeCommentTotal(state.totalComments, page.total, state.commentsInspected);
 
@@ -514,7 +533,10 @@ function remoteStatus(error: unknown): number | undefined {
 
 export { createTimeShards } from "./time-shards";
 
-function createParallelState(options: ParallelSongScanOptions): ParallelSongScanState {
+function createParallelState(
+  options: ParallelSongScanOptions,
+  initialShardCount: number,
+): ParallelSongScanState {
   const now = new Date().toISOString();
   return {
     version: 1,
@@ -526,7 +548,11 @@ function createParallelState(options: ParallelSongScanOptions): ParallelSongScan
     endTime: options.endTime,
     shardCount: options.shardCount,
     pageSize: options.pageSize,
-    shards: createTimeShards(options.startTime, options.endTime, options.shardCount),
+    // shardCount remains the user's configured compatibility key. A fresh run
+    // only materializes enough shards to occupy real workers; busy workers can
+    // split remaining ranges adaptively without paying dozens of empty boundary
+    // requests up front.
+    shards: createTimeShards(options.startTime, options.endTime, initialShardCount),
     pagesProcessed: 0,
     commentsInspected: 0,
     requestCount: 0,

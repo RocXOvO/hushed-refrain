@@ -10,7 +10,7 @@ const el = {
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
-  matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
+  matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"), exportResults: $("#exportResultsButton"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
@@ -21,7 +21,7 @@ const el = {
   windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
-  primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"),
+  primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
   activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
   appSplash: $("#appSplash"),
 };
@@ -57,6 +57,9 @@ let resultStream;
 let resultMode = mode;
 let resultRequest = 0;
 const resultJobIds = { parallel: undefined, source: undefined };
+const resultJobMeta = { parallel: undefined, source: undefined };
+const latestJobs = { parallel: undefined, source: undefined };
+let resultExportInProgress = false;
 let resultRenderTimer;
 let pendingLiveCommentId;
 let resultsRenderPending = false;
@@ -109,7 +112,7 @@ async function startParallel() {
     value.maxProxyLanes = Number(el.exitLimit.value);
     value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/parallel/job", { method: "POST", body: JSON.stringify(value) });
-    syncResultJob("parallel", job.id);
+    syncResultJob("parallel", job.id, job.uid);
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "parallel" : undefined;
     settlementPending.parallel = job.id;
     if (requestedMode === mode && requestedModeVersion === modeSwitchVersion) {
@@ -138,7 +141,7 @@ async function startSource(dryRun) {
     value.maxProxyLanes = Number(el.exitLimit.value);
     value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/job", { method: "POST", body: JSON.stringify(value) });
-    syncResultJob("source", job.id);
+    syncResultJob("source", job.id, job.uid);
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "source" : undefined;
     settlementPending.source = job.id;
     if (requestedMode === mode && requestedModeVersion === modeSwitchVersion) {
@@ -166,7 +169,10 @@ async function lookupUser() {
   try {
     const result = await api(`/api/user?uid=${encodeURIComponent(el.uid.value.trim())}`);
     el.userNickname.textContent = result.profile.nickname;
-    el.userMeta.textContent = [`UID ${result.profile.userId}`, result.profile.level === undefined ? null : `Lv.${result.profile.level}`, `${fmt(result.elapsedMs)}ms`].filter(Boolean).join(" · ");
+    const probeRoute = result.route === "managed-pool"
+      ? `代理池 ${result.routeName || "节点"}${Number(result.routeAttempts) > 1 ? `（第 ${fmt(result.routeAttempts)} 个出口成功）` : ""}`
+      : result.route === "explicit-proxy" ? "手动代理" : "本机直连";
+    el.userMeta.textContent = [`UID ${result.profile.userId}`, result.profile.level === undefined ? null : `Lv.${result.profile.level}`, probeRoute, `${fmt(result.elapsedMs)}ms`].filter(Boolean).join(" · ");
     probe(el.recordProbe, "听歌排行", result.record); probe(el.likesProbe, "喜欢歌曲", result.likes); el.userPreview.hidden = false;
   } catch (error) { el.userPreview.hidden = true; toast(error.message); } finally { el.lookup.disabled = false; }
 }
@@ -266,13 +272,15 @@ async function performRefresh() {
       else await refreshResults();
     }
     if ($('.tab.active')?.dataset.tab === "logs") await refreshLogs(false);
+    if ($('.tab.active')?.dataset.tab === "estimate") scheduleEstimateRefresh(80);
   } catch (error) {
     el.connection.classList.remove("ready"); toast(error.message);
   }
 }
 
 function renderParallel(job) {
-  syncResultJob("parallel", job.id);
+  latestJobs.parallel = job;
+  syncResultJob("parallel", job.id, job.uid);
   if (!shouldRenderJob("parallel", job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
@@ -298,7 +306,8 @@ function renderParallel(job) {
 }
 
 function renderSource(job) {
-  syncResultJob("source", job.id);
+  latestJobs.source = job;
+  syncResultJob("source", job.id, job.uid);
   if (!shouldRenderJob("source", job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
@@ -841,12 +850,50 @@ function resetVisibleResults(invalidateRequest = true) {
   renderResults();
 }
 
-function syncResultJob(jobMode, jobId) {
+function syncResultJob(jobMode, jobId, uid) {
+  resultJobMeta[jobMode] = jobId && uid ? { jobId: String(jobId), uid: String(uid) } : undefined;
+  syncResultExportAvailability();
   if (resultJobIds[jobMode] === jobId) return;
   resultJobIds[jobMode] = jobId;
   if (jobMode !== mode) return;
   knownMatches = -1;
   resetVisibleResults();
+}
+
+function syncResultExportAvailability() {
+  const current = resultJobMeta[mode];
+  el.exportResults.disabled = resultExportInProgress || !current?.jobId || !/^\d+$/.test(current.uid);
+}
+
+async function exportCurrentResults() {
+  const exportMode = mode;
+  const current = resultJobMeta[exportMode];
+  if (!current?.jobId || !/^\d+$/.test(current.uid) || resultExportInProgress) return;
+  resultExportInProgress = true;
+  syncResultExportAvailability();
+  el.exportResults.setAttribute("aria-busy", "true");
+  el.exportResults.querySelector("span").textContent = "正在生成…";
+  try {
+    if (typeof window.ncmDesktop?.exportResultsPdf === "function") {
+      const result = await window.ncmDesktop.exportResultsPdf({ mode: exportMode, jobId: current.jobId, uid: current.uid });
+      if (result?.status === "saved") toast(`PDF 已导出：${shortPath(result.path)}`);
+    } else {
+      const report = new URL("/report/results", location.origin);
+      report.searchParams.set("mode", exportMode);
+      report.searchParams.set("jobId", current.jobId);
+      report.searchParams.set("uid", current.uid);
+      const opened = window.open(report.toString(), "_blank", "noopener");
+      if (!opened) throw new Error("浏览器阻止了报告窗口，请允许弹出窗口后重试。");
+      toast("报告已打开，请选择“打印 / 保存 PDF”。");
+    }
+  } catch (error) {
+    toast(error.message || "PDF 导出失败。");
+  } finally {
+    resultExportInProgress = false;
+    el.exportResults.removeAttribute("aria-busy");
+    el.exportResults.querySelector("span").textContent = "导出 PDF";
+    syncResultExportAvailability();
+  }
 }
 
 function resetVisibleLogs() {
@@ -982,18 +1029,71 @@ async function refreshEstimate(reportInvalid = true) {
     const pageSize = Number(form.elements.pageSize.value);
     const proxyTransport = mode === "parallel" || poolRunning || Boolean(form.elements.proxy?.value.trim());
     const lanes = selectedTaskLaneCount(workersPerLane);
-    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(lanes), workersPerLane: String(workersPerLane), proxyTransport: proxyTransport ? "1" : "0", hostConcurrency: el.hostConcurrency.value });
+    const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
+    const actualWorkers = Math.min(lanes * workersPerLane, hostConcurrency);
+    const job = latestJobs[mode];
+    const formUid = String((mode === "parallel" ? el.parallelUid : el.uid).value || "").trim();
+    const requestedParallelShards = mode === "parallel"
+      ? Math.max(1, Number(form.elements.shards?.value || 1))
+      : undefined;
+    const sameTarget = Boolean(job?.id) && String(job.uid || "") === formUid && (
+      mode !== "parallel" || String(job.songId || "") === String(form.elements.songId?.value || "").trim()
+    );
+    const sameConfiguration = sameTarget
+      && Number(job.pageSize) === pageSize
+      && Number(job.minDelayMs) === minDelayMs
+      && Number(job.jitterMs) === jitterMs
+      && Number(job.workersPerLane) === workersPerLane
+      && Number(job.hostConcurrency) === hostConcurrency
+      && Number(job.lanes) === lanes
+      && (mode === "parallel"
+        ? Number(job.configuredShardCount) === requestedParallelShards
+        : String(job.source || "") === String(form.elements.source?.value || ""));
+    const calibrated = sameConfiguration
+      && Number(job.pageRequestSamples) >= 3
+      && Number(job.successfulPageRequests) > 0
+      && Number(job.averagePageRequestMs) >= 0
+      && Number(job.averageCommentsPerPage) > 0;
+    const effectiveTransport = proxyTransport && sameConfiguration && Number(job.proxyTransportEffectiveConcurrent) > 0
+      ? Math.min(hostConcurrency, Number(job.proxyTransportEffectiveConcurrent))
+      : hostConcurrency;
+    const configuredPartitions = mode === "parallel"
+      ? requestedParallelShards
+      : Math.max(1, sameTarget ? Number(job.songs || 1) : 1);
+    const partitions = mode === "parallel"
+      ? Math.max(1, Math.min(configuredPartitions, actualWorkers, effectiveTransport))
+      : configuredPartitions;
+    const params = new URLSearchParams({
+      comments: el.estimateComments.value,
+      pageSize: String(pageSize),
+      partitions: String(partitions),
+      minDelayMs: String(minDelayMs),
+      jitterMs: String(jitterMs),
+      networkMs: String(calibrated ? job.averagePageRequestMs : poolNetworkMs),
+      lanes: String(lanes),
+      workersPerLane: String(workersPerLane),
+      proxyTransport: proxyTransport ? "1" : "0",
+      hostConcurrency: String(hostConcurrency),
+      proxyTransportEffectiveConcurrent: String(effectiveTransport),
+    });
+    if (calibrated) {
+      params.set("observedCommentsPerPage", String(job.averageCommentsPerPage));
+      params.set("requestSuccessRatio", String(job.pageRequestSuccessRatio || 1));
+    }
     const value = await api(`/api/estimate?${params}`);
     if (request !== estimateRequest) return;
-    el.estimatePages.textContent = fmt(value.pages);
+    el.estimatePages.textContent = fmt(value.estimatedRequests);
     el.estimateOptimistic.textContent = duration(value.optimisticSeconds);
     el.estimateExpected.textContent = duration(value.expectedSeconds);
     el.estimateConservative.textContent = duration(value.conservativeSeconds);
     const scanMode = mode === "parallel" ? "单曲并行" : "用户来源";
     const transport = value.proxyTransportMaxConcurrent
-      ? ` · 主机聚合保护：总并发最多 ${fmt(value.proxyTransportMaxConcurrent)}，启动间隔 ${fmt(value.proxyTransportStartDelayMs)}..${fmt(value.proxyTransportStartDelayMs + value.proxyTransportStartJitterMs)}ms`
+      ? ` · 主机聚合保护：配置 ${fmt(value.proxyTransportMaxConcurrent)}，当前有效 ${fmt(value.proxyTransportEffectiveConcurrent)} 并发，实际启动间隔 ${fmt(value.proxyTransportEffectiveStartDelayMs)}..${fmt(value.proxyTransportEffectiveStartDelayMs + value.proxyTransportStartJitterMs)}ms`
       : "";
-    el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 并发 · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} Worker · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+    const calibration = calibrated
+      ? `实况校准 ${fmt(job.pageRequestSamples)} 页 / ${fmt(job.pageRequestAttempts)} 次远端尝试：平均 ${fmt(job.averageCommentsPerPage)} 条/页、${fmt(job.averagePageRequestMs)}ms、成功率 ${(Number(job.pageRequestSuccessRatio || 0) * 100).toFixed(1)}%`
+      : `理论模型：节点轻量探测约 ${fmt(poolNetworkMs)}ms；任务产生 3 次页面请求后自动校准`;
+    el.estimateContext.textContent = `${scanMode} · ${fmt(value.partitions)} 个独立分页区间 · ${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 并发 · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} Worker · 每页上限 ${fmt(pageSize)} 条 · ${calibration}${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { if (request === estimateRequest) toast(error.message); }
   finally { if (request === estimateRequest) el.estimateButton.disabled = false; }
 }
@@ -1254,6 +1354,7 @@ async function switchMode(value) {
   mode = value;
   document.body.dataset.mode = mode;
   syncToolbarContext();
+  syncResultExportAvailability();
   resetVisibleResults();
   resetVisibleLogs();
   connectResultStream();
@@ -1472,6 +1573,11 @@ function setTaskPanelCollapsed(collapsed) {
   }
 }
 function setInspectorCollapsed(collapsed) {
+  if (collapsed && el.inspectorBody.contains(document.activeElement)) {
+    el.inspectorToggle.focus({ preventScroll: true });
+  }
+  el.inspectorBody.inert = collapsed;
+  el.inspectorBody.setAttribute("aria-hidden", String(collapsed));
   document.body.classList.toggle("inspector-collapsed", collapsed);
   el.inspectorToggle.setAttribute("aria-label", collapsed ? "展开运行详情" : "收起运行详情");
   el.inspectorToggle.title = collapsed ? "展开运行详情" : "收起运行详情";
@@ -1554,6 +1660,7 @@ el.taskPanelOpen.addEventListener("click", () => {
 });
 el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(true));
 el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
+el.exportResults.addEventListener("click", () => void exportCurrentResults());
 $$('[data-nav-view]').forEach((item) => item.addEventListener("click", () => void activateNavigation(item.dataset.navView)));
 $$('#parallelForm input, #sourceForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
 el.exitLimit.addEventListener("input", syncToolbarContext);
@@ -1594,6 +1701,7 @@ $$('.tab').forEach((tab) => {
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));
 syncInspectorForViewport();
+syncResultExportAvailability();
 inspectorOverlayQuery.addEventListener("change", syncInspectorForViewport);
 syncToolbarContext();
 void boot().finally(() => {

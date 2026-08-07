@@ -53,6 +53,22 @@ export async function writeAtomicText(
   contents: string,
   options: AtomicWriteOptions = {},
 ): Promise<void> {
+  await writeAtomicContents(path, contents, options);
+}
+
+export async function writeAtomicBuffer(
+  path: string,
+  contents: Uint8Array,
+  options: AtomicWriteOptions = {},
+): Promise<void> {
+  await writeAtomicContents(path, contents, options);
+}
+
+async function writeAtomicContents(
+  path: string,
+  contents: string | Uint8Array,
+  options: AtomicWriteOptions,
+): Promise<void> {
   const directory = dirname(path);
   try {
     await mkdir(directory, { recursive: true });
@@ -67,7 +83,8 @@ export async function writeAtomicText(
   let completedWrite = false;
   try {
     file = await open(temporary, "wx", 0o600);
-    await file.writeFile(contents, "utf8");
+    if (typeof contents === "string") await file.writeFile(contents, "utf8");
+    else await file.writeFile(contents);
     await file.sync();
     await file.close();
     file = undefined;

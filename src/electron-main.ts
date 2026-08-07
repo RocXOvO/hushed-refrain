@@ -4,7 +4,17 @@ import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import { startDashboard } from "./server";
-import { DESKTOP_UPDATE_CHANNELS, DESKTOP_WINDOW_CHANNELS, desktopDashboardUrl, desktopWindowChrome } from "./window-shell";
+import { writeAtomicBuffer } from "./atomic-file";
+import {
+  DESKTOP_EXPORT_CHANNELS,
+  DESKTOP_UPDATE_CHANNELS,
+  DESKTOP_WINDOW_CHANNELS,
+  desktopDashboardUrl,
+  desktopResultReportUrl,
+  desktopWindowChrome,
+  parseDesktopResultExportRequest,
+  resultReportFilename,
+} from "./window-shell";
 import {
   isWindowsAutoUpdateSupported,
   unsupportedWindowsUpdateState,
@@ -16,6 +26,9 @@ import {
 let dashboard: Server | undefined;
 let windowsUpdater: WindowsUpdateController | undefined;
 let windowsUpdateFallbackState: WindowsUpdateState | undefined;
+let mainWindow: BrowserWindow | undefined;
+let dashboardUrl: string | undefined;
+let resultExportInProgress = false;
 
 function currentUpdateState() {
   return windowsUpdater?.getState() ?? windowsUpdateFallbackState ?? unsupportedWindowsUpdateState(app.getVersion());
@@ -87,6 +100,60 @@ ipcMain.handle(DESKTOP_UPDATE_CHANNELS.install, () => {
   windowsUpdater?.install();
   return currentUpdateState();
 });
+ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unknown) => {
+  const window = senderWindow(event);
+  if (!window || window !== mainWindow || !dashboardUrl) throw new Error("当前窗口不能导出报告。");
+  if (resultExportInProgress) throw new Error("已有一份 PDF 正在生成，请稍候。");
+  const request = parseDesktopResultExportRequest(rawRequest);
+  resultExportInProgress = true;
+  let reportWindow: BrowserWindow | undefined;
+  try {
+    const destination = await dialog.showSaveDialog(window, {
+      title: "导出评论检索报告",
+      defaultPath: join(app.getPath("documents"), resultReportFilename(request.uid)),
+      filters: [{ name: "PDF 文档", extensions: ["pdf"] }],
+      properties: ["createDirectory", "showOverwriteConfirmation"],
+    });
+    if (destination.canceled || !destination.filePath) return { status: "cancelled" };
+    const reportUrl = desktopResultReportUrl(dashboardUrl, request);
+    reportWindow = new BrowserWindow({
+      show: false,
+      parent: window,
+      backgroundColor: "#ffffff",
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+      },
+    });
+    reportWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+    reportWindow.webContents.on("will-navigate", (navigationEvent, target) => {
+      if (target !== reportUrl) navigationEvent.preventDefault();
+    });
+    await reportWindow.loadURL(reportUrl);
+    const readyReport = await reportWindow.webContents.executeJavaScript(`Promise.resolve(document.fonts?.ready).then(() => ({ jobId: document.querySelector('meta[name="result-report-job"]')?.content, uid: document.querySelector('meta[name="result-report-uid"]')?.content }))`);
+    if (readyReport?.jobId !== request.jobId || readyReport?.uid !== request.uid) {
+      throw new Error("报告数据已过期，请重新点击导出。");
+    }
+    const pdf = await reportWindow.webContents.printToPDF({
+      printBackground: true,
+      preferCSSPageSize: true,
+      pageSize: "A4",
+      displayHeaderFooter: true,
+      headerTemplate: "<span></span>",
+      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>云评检索台</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
+      margins: { top: 0.4, bottom: 0.55, left: 0.35, right: 0.35 },
+    });
+    await writeAtomicBuffer(destination.filePath, pdf);
+    return { status: "saved", path: destination.filePath };
+  } catch (error) {
+    writeDesktopLog("pdf-export", error);
+    throw new Error(`PDF 导出失败：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    resultExportInProgress = false;
+    if (reportWindow && !reportWindow.isDestroyed()) reportWindow.destroy();
+  }
+});
 
 async function createWindow(): Promise<void> {
   dashboard = await startDashboard({
@@ -97,6 +164,7 @@ async function createWindow(): Promise<void> {
   });
   const address = dashboard.address() as AddressInfo;
   const url = desktopDashboardUrl(`http://127.0.0.1:${address.port}/`, process.platform);
+  dashboardUrl = url;
   const smokeTest = process.env.NCM_DESKTOP_SMOKE === "1";
   const window = new BrowserWindow({
     width: 1280,
@@ -115,6 +183,7 @@ async function createWindow(): Promise<void> {
       preload: join(__dirname, "electron-preload.js"),
     },
   });
+  mainWindow = window;
   initializeWindowsUpdater(window);
   const sendMaximizedState = (): void => {
     if (!window.isDestroyed()) {
@@ -146,9 +215,10 @@ async function createWindow(): Promise<void> {
     const bridge = await window.webContents.executeJavaScript(`(async () => ({
       platform: window.ncmDesktop?.platform,
       maximized: await window.ncmDesktop?.isMaximized?.(),
-      updateState: await window.ncmDesktop?.getUpdateState?.()
-    }))()` ) as { platform?: string; maximized?: boolean; updateState?: { supported?: boolean } };
-    if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean") {
+      updateState: await window.ncmDesktop?.getUpdateState?.(),
+      exportReady: typeof window.ncmDesktop?.exportResultsPdf === "function"
+    }))()` ) as { platform?: string; maximized?: boolean; updateState?: { supported?: boolean }; exportReady?: boolean };
+    if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean" || bridge.exportReady !== true) {
       throw new Error("Desktop window preload bridge is unavailable.");
     }
     if (process.platform === "win32" && app.isPackaged && bridge.updateState.supported !== true) {
@@ -178,6 +248,8 @@ app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {
   dashboard?.close();
   dashboard = undefined;
+  dashboardUrl = undefined;
+  mainWindow = undefined;
   windowsUpdater = undefined;
   windowsUpdateFallbackState = undefined;
 });

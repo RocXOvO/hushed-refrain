@@ -299,7 +299,10 @@ export interface ScanRequestActivity {
   page: number;
   shardId?: number;
   elapsedMs?: number;
+  networkElapsedMs?: number;
+  attempts?: number;
   comments?: number;
+  effectiveComments?: number;
   totalComments?: number;
   hasMore?: boolean;
   status?: number;

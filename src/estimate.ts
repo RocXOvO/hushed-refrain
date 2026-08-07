@@ -7,6 +7,9 @@ import {
 export interface EstimateInput {
   comments: number;
   pageSize: number;
+  partitions?: number;
+  observedCommentsPerPage?: number;
+  requestSuccessRatio?: number;
   minDelayMs: number;
   jitterMs: number;
   networkMs?: number;
@@ -15,13 +18,19 @@ export interface EstimateInput {
   maxWorkers?: number;
   proxyTransport?: boolean;
   proxyTransportMaxConcurrent?: number;
+  proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
+  proxyTransportEffectiveStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
 }
 
 export interface ScanEstimate {
   comments: number;
   pages: number;
+  estimatedRequests: number;
+  partitions: number;
+  commentsPerPage: number;
+  requestSuccessRatio: number;
   optimisticSeconds: number;
   expectedSeconds: number;
   conservativeSeconds: number;
@@ -31,6 +40,7 @@ export interface ScanEstimate {
   totalWorkers: number;
   effectiveWorkers?: number;
   proxyTransportMaxConcurrent?: number;
+  proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
 }
@@ -38,6 +48,13 @@ export interface ScanEstimate {
 export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const comments = nonNegativeInteger(input.comments, "comments");
   const pageSize = positiveInteger(input.pageSize, "pageSize");
+  const partitions = positiveInteger(input.partitions ?? 1, "partitions");
+  const commentsPerPage = input.observedCommentsPerPage === undefined
+    ? pageSize
+    : positiveNumber(input.observedCommentsPerPage, "observedCommentsPerPage");
+  const requestSuccessRatio = input.requestSuccessRatio === undefined
+    ? 1
+    : ratio(input.requestSuccessRatio, "requestSuccessRatio");
   const minDelayMs = nonNegativeInteger(input.minDelayMs, "minDelayMs");
   const jitterMs = nonNegativeInteger(input.jitterMs, "jitterMs");
   const networkMs = nonNegativeInteger(input.networkMs ?? 400, "networkMs");
@@ -48,6 +65,13 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     input.proxyTransportMaxConcurrent ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
     "proxyTransportMaxConcurrent",
   );
+  const proxyTransportEffectiveConcurrent = positiveInteger(
+    input.proxyTransportEffectiveConcurrent ?? proxyTransportMaxConcurrent,
+    "proxyTransportEffectiveConcurrent",
+  );
+  if (proxyTransportEffectiveConcurrent > proxyTransportMaxConcurrent) {
+    throw new Error("proxyTransportEffectiveConcurrent must not exceed proxyTransportMaxConcurrent.");
+  }
   const proxyTransportStartDelayMs = nonNegativeInteger(
     input.proxyTransportStartDelayMs ?? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
     "proxyTransportStartDelayMs",
@@ -63,22 +87,33 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const effectiveWorkers = Math.min(
     totalWorkers,
     maxWorkers,
-    proxyTransport ? proxyTransportMaxConcurrent : Number.POSITIVE_INFINITY,
+    proxyTransport ? proxyTransportEffectiveConcurrent : Number.POSITIVE_INFINITY,
   );
-  const pages = Math.ceil(comments / pageSize);
+  const pages = pageCount(
+    comments,
+    pageSize,
+    commentsPerPage,
+    partitions,
+    input.observedCommentsPerPage !== undefined,
+    input.partitions !== undefined,
+  );
+  const estimatedRequests = pages === 0 ? 0 : Math.ceil(pages / requestSuccessRatio);
+  const effectiveTransportStartDelayMs = proxyTransport
+    ? Math.ceil(proxyTransportStartDelayMs * proxyTransportMaxConcurrent / proxyTransportEffectiveConcurrent)
+    : 0;
 
   const duration = (spacingMs: number, transportJitterFactor: number): number => {
-    if (pages === 0) return 0;
+    if (estimatedRequests === 0) return 0;
     const perLaneCycleMs = Math.max(spacingMs, networkMs) / workersPerLane;
     const laneTopologyCycleMs = perLaneCycleMs / lanes;
     const workerCycleMs = networkMs / effectiveWorkers;
     const transportCycleMs = proxyTransport
       ? Math.max(
-        proxyTransportStartDelayMs + proxyTransportStartJitterMs * transportJitterFactor,
-        networkMs / proxyTransportMaxConcurrent,
+        effectiveTransportStartDelayMs + proxyTransportStartJitterMs * transportJitterFactor,
+        networkMs / proxyTransportEffectiveConcurrent,
       )
       : 0;
-    return Math.ceil(Math.max(networkMs, pages * Math.max(laneTopologyCycleMs, workerCycleMs, transportCycleMs)) / 1_000);
+    return Math.ceil(Math.max(networkMs, estimatedRequests * Math.max(laneTopologyCycleMs, workerCycleMs, transportCycleMs)) / 1_000);
   };
   const optimisticSeconds = duration(minDelayMs, 0);
   const expectedSeconds = duration(minDelayMs + jitterMs / 2, 0.5);
@@ -87,6 +122,10 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   return {
     comments,
     pages,
+    estimatedRequests,
+    partitions,
+    commentsPerPage: Number(commentsPerPage.toFixed(2)),
+    requestSuccessRatio,
     optimisticSeconds,
     expectedSeconds,
     conservativeSeconds,
@@ -99,11 +138,41 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     ...(proxyTransport
       ? {
         proxyTransportMaxConcurrent,
+        proxyTransportEffectiveConcurrent,
         proxyTransportStartDelayMs,
+        proxyTransportEffectiveStartDelayMs: effectiveTransportStartDelayMs,
         proxyTransportStartJitterMs,
       }
       : {}),
   };
+}
+
+function pageCount(
+  comments: number,
+  pageSize: number,
+  commentsPerPage: number,
+  partitions: number,
+  calibrated: boolean,
+  partitionsExplicit: boolean,
+): number {
+  if (comments === 0) return partitionsExplicit ? partitions : 0;
+  if (calibrated) return Math.max(partitions, Math.ceil(comments / Math.min(pageSize, commentsPerPage)));
+  const smallerPartitionSize = Math.floor(comments / partitions);
+  const largerPartitions = comments % partitions;
+  return (partitions - largerPartitions) * Math.max(1, Math.ceil(smallerPartitionSize / pageSize))
+    + largerPartitions * Math.max(1, Math.ceil((smallerPartitionSize + 1) / pageSize));
+}
+
+function positiveNumber(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive number.`);
+  return value;
+}
+
+function ratio(value: number, name: string): number {
+  if (!Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new Error(`${name} must be greater than zero and no greater than one.`);
+  }
+  return value;
 }
 
 function positiveInteger(value: number, name: string): number {

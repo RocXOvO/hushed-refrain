@@ -5,6 +5,13 @@ export class RequestBudgetExhausted extends Error {
   }
 }
 
+export class RequestExecutionError extends Error {
+  constructor(message: string, public readonly status?: number) {
+    super(message);
+    this.name = "RequestExecutionError";
+  }
+}
+
 export class CooldownRequired extends Error {
   constructor(
     public readonly status: number,
