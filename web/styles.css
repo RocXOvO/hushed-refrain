@@ -555,6 +555,8 @@ th:nth-child(5) { width: 58px; }
 .activity-table th:nth-child(5) { width: 116px; }
 .activity-status { width: fit-content; padding: 2px 6px; display: inline-flex; align-items: center; gap: 5px; color: #096746; background: var(--success-soft); border-radius: 4px; font-size: .61rem; font-weight: 750; }
 .activity-status::before { content: ""; width: 6px; height: 6px; background: var(--success); border-radius: 50%; }
+.activity-status.is-waiting { color: var(--muted); background: var(--surface-raised); }
+.activity-status.is-waiting::before { background: var(--muted); }
 .activity-worker-count { color: var(--ink); font-weight: 750; font-variant-numeric: tabular-nums; }
 .song-read-progress { min-width: 190px; }
 .song-read-progress > span:first-child { display: block; overflow: hidden; color: var(--muted); font-size: .67rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }

@@ -40,7 +40,7 @@ import {
   type ParallelCommentLane,
 } from "./parallel-scanner";
 import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
-import { loadState } from "./state";
+import { loadState, SOURCE_CATALOG_VERSION } from "./state";
 import { taskElapsedMs, TaskCoordinator } from "./task-coordinator";
 import { readTaskLog, TaskLogger } from "./task-log";
 import type {
@@ -52,6 +52,7 @@ import type {
   SourceSelection,
 } from "./types";
 import { checkForUpdate, type UpdateSnapshot } from "./update";
+import { workerCountForTopology } from "./worker-topology";
 
 export interface DashboardOptions {
   host: string;
@@ -258,7 +259,7 @@ class JobManager {
   private outputPath?: string;
   private terminalStateSyncedId?: string;
   private abortController?: AbortController;
-  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage: number }>();
+  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage?: number; active: boolean }>();
   private readonly activeSongProgress = new Map<string, Omit<ActiveSongSnapshot, "id" | "name" | "workers" | "requestingPage">>();
   private readonly songNameById = new Map<string, string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
@@ -299,9 +300,9 @@ class JobManager {
     );
     const proxy = proxyUrl(input.proxy);
     const allowDirect = bool(input.allowDirect);
-    const jobKey = `${uid}-${source}`;
-    const nextStatePath = join(this.paths.data, `web-state-${jobKey}.json`);
-    const nextOutputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
+    const taskPaths = sourceTaskPaths(this.paths.data, uid, source);
+    const nextStatePath = taskPaths.statePath;
+    const nextOutputPath = taskPaths.outputPath;
     const activePool = await readProxyPool(this.paths.pool);
     const activePoolExpected = proxyPoolStatusRunning(activePool);
     const poolEntries = activePoolExpected
@@ -400,6 +401,7 @@ class JobManager {
           progressPercent,
           progressBasis: "comments",
         });
+        if (activity.done) this.removeScheduledSong(activity.songId);
         this.publishActiveSongs(activeId);
         this.snapshotValue = {
           ...this.snapshotValue,
@@ -421,7 +423,7 @@ class JobManager {
     this.snapshotValue = {
       ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
       startedAt, proxyEnabled: selectedPoolEntries.length > 0 || Boolean(proxy),
-      lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
+      lanes: this.lanes.length, workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
       proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
       proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
@@ -436,7 +438,7 @@ class JobManager {
       recordScope,
       pageSize: commentPageSize,
       lanes: this.lanes.length,
-      workers: this.lanes.length * workersPerLane,
+      workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
       requestBudget,
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
       proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
@@ -470,7 +472,7 @@ class JobManager {
         error: message(error),
       });
     }
-    void runPooledCommentFinder(this.lanes, { ...options, workersPerLane, requestBudget })
+    void runPooledCommentFinder(this.lanes, { ...options, workersPerLane, maxWorkers: hostConcurrency, requestBudget })
       .then((report) => {
         if (this.snapshotValue.id !== activeId) return;
         this.snapshotValue = {
@@ -618,9 +620,14 @@ class JobManager {
         id: activity.songId,
         name: activity.songName,
         requestingPage: activity.page,
+        active: true,
       });
     } else {
-      this.activeSongByWorker.delete(activity.workerId);
+      const scheduled = this.activeSongByWorker.get(activity.workerId);
+      if (scheduled?.id === activity.songId) {
+        scheduled.active = false;
+        scheduled.requestingPage = undefined;
+      }
     }
     this.publishActiveSongs(activeId);
   }
@@ -631,20 +638,33 @@ class JobManager {
     for (const active of this.activeSongByWorker.values()) {
       const existing = songs.get(active.id);
       if (existing) {
-        existing.workers += 1;
+        existing.workers += active.active ? 1 : 0;
         existing.name ??= active.name;
-        existing.requestingPage = Math.min(existing.requestingPage ?? active.requestingPage, active.requestingPage);
+        if (active.requestingPage !== undefined) {
+          existing.requestingPage = Math.min(existing.requestingPage ?? active.requestingPage, active.requestingPage);
+        }
       } else {
         songs.set(active.id, {
           id: active.id,
-          name: active.name,
-          workers: 1,
+          name: active.name ?? this.songNameById.get(active.id),
+          workers: active.active ? 1 : 0,
           ...this.activeSongProgress.get(active.id),
           requestingPage: active.requestingPage,
         });
       }
     }
+    const scheduledIds = new Set(songs.keys());
+    for (const id of this.activeSongProgress.keys()) {
+      if (!scheduledIds.has(id)) this.activeSongProgress.delete(id);
+    }
     this.snapshotValue = { ...this.snapshotValue, activeSongs: [...songs.values()] };
+  }
+
+  private removeScheduledSong(songId: string): void {
+    for (const [workerId, scheduled] of this.activeSongByWorker) {
+      if (scheduled.id === songId) this.activeSongByWorker.delete(workerId);
+    }
+    this.activeSongProgress.delete(songId);
   }
 
   private fail(activeId: string | undefined, error: unknown): void {
@@ -733,9 +753,9 @@ class ParallelJobManager {
     );
     this.snapshotValue = {
       ...emptyParallelSnapshot(), id: activeId, status: "running", uid, songId,
-      songName: song.name, activeSongs: [], startedAt, lanes: this.lanes.length,
+      songName: song.name, activeSongs: [{ id: songId, name: song.name, workers: 0 }], startedAt, lanes: this.lanes.length,
       laneSelection: selectedPool.selection,
-      workers: this.lanes.length * workersPerLane, shards: shardCount,
+      workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency), shards: shardCount,
       proxyTransportMaxConcurrent: hostConcurrency,
       proxyTransportEffectiveConcurrent: this.transportGate.currentMaxConcurrent,
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
@@ -750,7 +770,7 @@ class ParallelJobManager {
       pageSize,
       shards: shardCount,
       lanes: this.lanes.length,
-      workers: this.lanes.length * workersPerLane,
+      workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
       requestBudget,
       laneSelection: selectedPool.selection,
       proxyTransportMaxConcurrent: hostConcurrency,
@@ -785,6 +805,7 @@ class ParallelJobManager {
     void runParallelSongScan(this.lanes, {
       uid, songId, songName: song.name, startTime: previous?.startTime ?? song.publishTime ?? Date.UTC(2000, 0, 1),
       endTime: previous?.endTime ?? Date.now(), shardCount, pageSize, workersPerLane,
+      maxWorkers: hostConcurrency,
       requestBudget, maxPages, stopAfterFirst: false,
       fresh: bool(input.fresh), statePath: this.statePath, outputPath: this.outputPath,
       signal: this.abortController.signal,
@@ -922,13 +943,11 @@ class ParallelJobManager {
     }
     this.snapshotValue = {
       ...this.snapshotValue,
-      activeSongs: this.activeWorkers.size > 0
-        ? [{
-          id: activity.songId,
-          name: activity.songName ?? this.snapshotValue.songName,
-          workers: this.activeWorkers.size,
-        }]
-        : [],
+      activeSongs: [{
+        id: activity.songId,
+        name: activity.songName ?? this.snapshotValue.songName,
+        workers: this.activeWorkers.size,
+      }],
     };
   }
 }
@@ -1167,6 +1186,12 @@ async function route(
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
       lanes: integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256),
       workersPerLane: integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16),
+      maxWorkers: integer(
+        url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+        "hostConcurrency",
+        1,
+        32,
+      ),
       proxyTransport: url.searchParams.get("proxyTransport") === "1",
       proxyTransportMaxConcurrent: integer(
         url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
@@ -1334,13 +1359,16 @@ async function probeUser(uid: string, proxy: string | undefined, cookiePath: str
   const started = Date.now();
   const cookie = await readCookie(cookiePath);
   const client = new EnhancedNcmClient({ proxy });
-  const governor = new RequestGovernor({ requestBudget: 3, minDelayMs: 800, jitterMs: 200, maxRetries: 1, forbiddenCooldownMs: 900_000 });
+  const governor = new RequestGovernor({ requestBudget: 4, minDelayMs: 800, jitterMs: 200, maxRetries: 1, forbiddenCooldownMs: 900_000 });
   const profile = await governor.execute("user_detail", () => client.getUserProfile(uid, cookie));
   const inspect = async (source: "record" | "likes"): Promise<SourceProbe> => {
     try {
       const songs = source === "record"
         ? await governor.execute("user_record", () => client.getUserRecord(uid, "all", cookie))
-        : await governor.execute("likelist", () => client.getLikedSongs(uid, cookie));
+        : await (async () => {
+          const target = await governor.execute("target_likes_playlist", () => client.getTargetLikedPlaylist!(uid, cookie));
+          return governor.execute("target_likes_tracks", () => client.getTargetLikedPlaylistSongs!(uid, target, cookie));
+        })();
       return { status: "available", songs: songs.length };
     } catch (error) { return { status: error instanceof CooldownRequired ? "cooldown" : "restricted", error: message(error) }; }
   };
@@ -1407,6 +1435,24 @@ export function validateClashConfigSelection(
     throw new HttpError(400, "请选择 Clash Verge 已发现的代理配置。");
   }
   return selected;
+}
+
+export function sourceTaskPaths(
+  dataRoot: string,
+  uid: string,
+  source: SourceSelection,
+): { statePath: string; outputPath: string } {
+  if (source === "record") {
+    return {
+      statePath: join(dataRoot, `web-state-${uid}-record.json`),
+      outputPath: join(dataRoot, `web-comments-${uid}.jsonl`),
+    };
+  }
+  const suffix = `target-v${SOURCE_CATALOG_VERSION}`;
+  return {
+    statePath: join(dataRoot, `web-state-${uid}-${source}-${suffix}.json`),
+    outputPath: join(dataRoot, `web-comments-${uid}-${source}-${suffix}.jsonl`),
+  };
 }
 function publicPoolEntries(entries: ProxyPoolEntry[]): ProxyPoolEntry[] {
   return entries.map((entry) => ({ ...entry, endpoint: maskProxyCredentials(entry.endpoint) }));

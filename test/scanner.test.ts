@@ -461,9 +461,9 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.deepEqual(new Set(activities.map((activity) => activity.songId)), new Set(songs.map((song) => song.id)));
   assert.ok(activities.some((activity) => activity.pageInSong === 0 && activity.requestingPage === 1));
   assert.ok(activities.some((activity) => activity.pageInSong === 1 && activity.requestingPage === undefined));
-  assert.ok(activities.every((activity) => activity.workerId?.includes(":")));
+  assert.ok(activities.every((activity) => /^worker-\d+$/.test(activity.workerId ?? "")));
   assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
-  assert.ok(requestActivities.some((activity) => activity.phase === "start" && activity.songId === "3" && activity.songName === "song-3" && activity.workerId?.includes(":")));
+  assert.ok(requestActivities.some((activity) => activity.phase === "start" && activity.songId === "3" && activity.songName === "song-3" && /^worker-\d+$/.test(activity.workerId ?? "")));
 });
 
 test("hydrates unnamed liked songs in a batch when resuming an old pooled checkpoint", async () => {
@@ -722,7 +722,7 @@ test("pooled source scan uses multiple workers on one proxy lane", async () => {
   assert.equal(tracker.maxActive, 2);
 });
 
-test("does not cap an eighteen-worker source topology at twelve active songs", async () => {
+test("hard-caps an eighteen-worker source topology at the host worker limit", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-eighteen-workers-"));
   const config = await options(directory);
   config.source = "record";
@@ -733,9 +733,13 @@ test("does not cap an eighteen-worker source topology at twelve active songs", a
   }));
   const tracker = { active: 0, maxActive: 0, maxDistinctSongs: 0 };
   const activeSongsByWorker = new Map<string, string>();
+  const usedLanes = new Set<string>();
   config.onRequestActivity = (activity) => {
     if (!activity.workerId) return;
-    if (activity.phase === "start") activeSongsByWorker.set(activity.workerId, activity.songId);
+    if (activity.phase === "start") {
+      activeSongsByWorker.set(activity.workerId, activity.songId);
+      usedLanes.add(activity.lane);
+    }
     else activeSongsByWorker.delete(activity.workerId);
     tracker.maxDistinctSongs = Math.max(tracker.maxDistinctSongs, new Set(activeSongsByWorker.values()).size);
   };
@@ -769,14 +773,45 @@ test("does not cap an eighteen-worker source topology at twelve active songs", a
   const report = await runPooledCommentFinder(lanes, {
     ...config,
     workersPerLane: 3,
+    maxWorkers: 4,
     requestBudget: 100,
   });
 
   assert.equal(report.status, "complete");
   assert.equal(report.lanes, 6);
-  assert.equal(report.workers, 18);
-  assert.equal(tracker.maxActive, 18);
-  assert.equal(tracker.maxDistinctSongs, 18);
+  assert.equal(report.workers, 4);
+  assert.equal(tracker.maxActive, 4);
+  assert.equal(tracker.maxDistinctSongs, 4);
+  assert.deepEqual(usedLanes, new Set(lanes.map((lane) => lane.name)));
+});
+
+test("governs target liked-playlist discovery and track loading as separate requests", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-target-likes-governor-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.dryRun = true;
+  const calls: string[] = [];
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => { throw new Error("two-step target path should be used"); },
+    getTargetLikedPlaylist: async (uid) => { calls.push(`playlist:${uid}`); return { id: "9", trackCount: 1 }; },
+    getTargetLikedPlaylistSongs: async (uid, playlist) => {
+      calls.push(`tracks:${uid}:${playlist.id}`);
+      return [{ id: "song-1", sources: ["likes"] }];
+    },
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const report = await runPooledCommentFinder([{
+    name: "lane-1",
+    client,
+    governor: governor(20),
+  }], { ...config, workersPerLane: 1, maxWorkers: 1, requestBudget: 20 });
+  assert.equal(report.status, "dry-run");
+  assert.equal(report.requestsThisRun, 2);
+  assert.deepEqual(calls, ["playlist:42", "tracks:42:9"]);
 });
 
 test("pre-shards twelve songs across all eighteen workers and every selected exit", async () => {

@@ -75,6 +75,7 @@ const visibleResults = new Map();
 let visibleResultOrder = [];
 const disclosureAnimations = new WeakMap();
 let activeSongsSignature = "";
+const activeSongRows = new Map();
 
 async function api(path, options) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -340,7 +341,7 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
   const normalized = songs.map((song) => ({
     id: String(song.id || ""),
     name: String(song.name || ""),
-    workers: Math.max(1, Number(song.workers || 1)),
+    workers: Math.max(0, Number(song.workers || 0)),
     pagesProcessed: finiteNumber(song.pagesProcessed),
     requestingPage: finiteNumber(song.requestingPage),
     commentsProcessed: finiteNumber(song.commentsProcessed),
@@ -357,62 +358,87 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
   el.activeWorkerCount.textContent = `${fmt(activeWorkers)} / ${fmt(workerCapacity)} Worker 活跃`;
   el.activeSongSummary.textContent = summary;
   if (normalized.length === 0) {
+    activeSongRows.clear();
     const row = document.createElement("tr");
     row.className = "empty-row";
     const cell = document.createElement("td");
     cell.colSpan = 5;
     cell.textContent = "暂无正在扫描的歌曲";
     row.append(cell);
-    el.activeSongsList.replaceChildren(row);
+    if (!el.activeSongsList.querySelector(".empty-row")) el.activeSongsList.replaceChildren(row);
     return;
   }
-  el.activeSongsList.replaceChildren(...normalized.map((song) => {
+  el.activeSongsList.querySelector(".empty-row")?.remove();
+  const visibleIds = new Set(normalized.map((song) => song.id));
+  for (const [songId, entry] of activeSongRows) {
+    if (visibleIds.has(songId)) continue;
+    entry.row.remove();
+    activeSongRows.delete(songId);
+  }
+  for (const song of normalized) {
+    let entry = activeSongRows.get(song.id);
+    if (!entry) {
+      entry = createActiveSongRow();
+      activeSongRows.set(song.id, entry);
+      el.activeSongsList.append(entry.row);
+    }
+    updateActiveSongRow(entry, song);
+  }
+}
+
+function createActiveSongRow() {
     const row = document.createElement("tr");
     const status = document.createElement("td");
     const badge = document.createElement("span");
     badge.className = "activity-status";
-    badge.textContent = "扫描中";
     status.append(badge);
     const name = document.createElement("td");
-    name.textContent = song.name || "正在读取歌曲名称";
     const id = document.createElement("td");
-    id.textContent = song.id;
-    const progress = renderSongReadProgress(song);
+    const progress = document.createElement("td");
+    progress.className = "song-read-progress";
+    const progressLabel = document.createElement("span");
+    const progressTrack = document.createElement("span");
+    progressTrack.className = "song-read-track";
+    const progressFill = document.createElement("i");
+    progressTrack.append(progressFill);
+    progress.append(progressLabel, progressTrack);
     const workers = document.createElement("td");
     workers.className = "activity-worker-count";
-    workers.textContent = `${fmt(song.workers)} Worker`;
     row.append(status, name, id, progress, workers);
-    return row;
-  }));
+    return { row, badge, name, id, progress, progressLabel, progressTrack, progressFill, workers };
 }
 
-function renderSongReadProgress(song) {
-  const cell = document.createElement("td");
-  cell.className = "song-read-progress";
+function updateActiveSongRow(entry, song) {
+  entry.badge.textContent = song.workers > 0 ? "扫描中" : "等待调度";
+  entry.badge.classList.toggle("is-waiting", song.workers === 0);
+  entry.name.textContent = song.name || "正在读取歌曲名称";
+  entry.id.textContent = song.id;
+  entry.workers.textContent = `${fmt(song.workers)} Worker`;
+  renderSongReadProgress(song, entry);
+}
+
+function renderSongReadProgress(song, entry) {
   const comments = Math.max(0, song.commentsProcessed ?? 0);
   const total = song.totalComments !== undefined && song.totalComments > 0
     ? Math.max(comments, song.totalComments)
     : undefined;
   const measuredPercent = total ? comments / total * 100 : undefined;
   const percent = Math.max(0, Math.min(100, song.progressPercent ?? measuredPercent ?? 0));
-  const label = document.createElement("span");
-  label.textContent = song.progressBasis === "time" && song.progressPercent !== undefined
+  const label = song.progressBasis === "time" && song.progressPercent !== undefined
     ? `已读 ${fmt(comments)} 条 · 时间覆盖 ${Math.round(percent)}%`
     : total
     ? `已读 ${fmt(comments)} / ${fmt(total)} 条 · ${Math.round(percent)}%`
+    : song.pagesProcessed !== undefined && song.pagesProcessed > 0
+    ? `已读 ${fmt(comments)} 条 · 已完成 ${fmt(song.pagesProcessed)} 页${song.workers > 0 ? ` · ${fmt(song.workers)} 个分片处理中` : ""}`
     : song.requestingPage !== undefined
-    ? `已读 ${fmt(comments)} 条 · 正在请求第 ${fmt(song.requestingPage)} 页`
+    ? "正在处理首批评论分片"
     : song.pagesProcessed !== undefined
     ? `已读 ${fmt(comments)} 条 · 已完成 ${fmt(song.pagesProcessed)} 页`
     : "等待首个评论页";
-  const track = document.createElement("span");
-  track.className = `song-read-track${song.progressPercent === undefined && measuredPercent === undefined ? " is-unknown" : ""}`;
-  const fill = document.createElement("i");
-  fill.style.width = `${percent}%`;
-  track.append(fill);
-  cell.setAttribute("aria-label", label.textContent);
-  cell.append(label, track);
-  return cell;
+  entry.progressLabel.textContent = label;
+  entry.progressTrack.classList.toggle("is-unknown", song.progressPercent === undefined && measuredPercent === undefined);
+  entry.progressFill.style.width = `${percent}%`;
+  entry.progress.setAttribute("aria-label", label);
 }
 
 function setProgressBar(bar, percent, indeterminate) {
@@ -944,7 +970,7 @@ async function refreshEstimate(reportInvalid = true) {
     const transport = value.proxyTransportMaxConcurrent
       ? ` · 主机聚合保护：总并发最多 ${fmt(value.proxyTransportMaxConcurrent)}，启动间隔 ${fmt(value.proxyTransportStartDelayMs)}..${fmt(value.proxyTransportStartDelayMs + value.proxyTransportStartJitterMs)}ms`
       : "";
-    el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+    el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 并发 · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} Worker · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { if (request === estimateRequest) toast(error.message); }
   finally { if (request === estimateRequest) el.estimateButton.disabled = false; }
 }
@@ -1356,12 +1382,13 @@ function syncToolbarContext() {
   const workers = Number(form.elements.workersPerProxy?.value || 1);
   const lanes = selectedTaskLaneCount(workers);
   const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
+  const actualWorkers = Math.min(lanes * workers, hostConcurrency);
   const laneMode = Number(el.exitLimit.value || 0) > 0 ? "手动" : "自动";
   el.toolbarUid.textContent = uid ? `UID ${uid}` : "UID 待填写";
   el.toolbarMode.textContent = mode === "parallel" ? "单曲并行" : `用户来源 · ${sourceName(form.elements.source?.value)}`;
   el.toolbarTopology.textContent = poolRunning
-    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · 主机≤${fmt(hostConcurrency)}并发 · 每出口≤${fmt(workers)}线程`
-    : `1 出口 · 主机≤${fmt(hostConcurrency)}并发 · 每出口≤${fmt(workers)}线程`;
+    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · 实际 ${fmt(actualWorkers)} Worker · 每出口≤${fmt(workers)}`
+    : `1 出口 · 实际 ${fmt(actualWorkers)} Worker · 每出口≤${fmt(workers)}`;
 }
 function setActiveNavigation(view) {
   $$('[data-nav-view]').forEach((item) => {
@@ -1453,10 +1480,7 @@ function transportConcurrencyText(job) {
     : ` · 主机并发上限 ${fmt(configured)}`;
 }
 function topologyCapacityNote(job) {
-  const workers = Number(job.workers);
-  const hostCeiling = Number(job.proxyTransportMaxConcurrent);
-  if (!Number.isFinite(workers) || !Number.isFinite(hostCeiling) || workers <= 0 || workers >= hostCeiling) return "";
-  return `当前拓扑只创建 ${fmt(workers)} 个 Worker，低于主机并发上限 ${fmt(hostCeiling)}；需要增加任务出口或每 IP 并发才能用满`;
+  return "";
 }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
 function dateOnly(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value)); }

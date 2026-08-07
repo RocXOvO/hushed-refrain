@@ -178,11 +178,34 @@ test("publishes stable worker identity and song metadata for live activity", asy
 
   const starts = activities.filter((activity) => activity.phase === "start");
   assert.equal(starts.length, 2);
-  assert.deepEqual(new Set(starts.map((activity) => activity.workerId)), new Set(["lane-1:1", "lane-1:2"]));
+  assert.deepEqual(new Set(starts.map((activity) => activity.workerId)), new Set(["worker-1", "worker-2"]));
   assert.ok(activities.every((activity) => activity.songId === "186016" && activity.songName === "song"));
   for (const start of starts) {
     assert.ok(activities.some((activity) => activity.phase === "success" && activity.workerId === start.workerId));
   }
+});
+
+test("hard-caps parallel worker loops while rotating across every selected lane", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-worker-cap-"));
+  const client = new ParallelFakeClient();
+  const config = await options(directory);
+  config.shardCount = 8;
+  config.workersPerLane = 3;
+  config.maxWorkers = 2;
+  const usedLanes = new Set<string>();
+  config.onRequestActivity = (activity) => {
+    if (activity.phase === "start") usedLanes.add(activity.lane);
+  };
+  const lanes = Array.from({ length: 4 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: governor(),
+  }));
+  const report = await runParallelSongScan(lanes, config);
+  assert.equal(report.status, "complete");
+  assert.equal(report.workers, 2);
+  assert.equal(client.maxActive, 2);
+  assert.deepEqual(usedLanes, new Set(lanes.map((lane) => lane.name)));
 });
 
 test("continues an empty page when its descending cursor advances", async () => {

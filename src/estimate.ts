@@ -12,6 +12,7 @@ export interface EstimateInput {
   networkMs?: number;
   lanes?: number;
   workersPerLane?: number;
+  maxWorkers?: number;
   proxyTransport?: boolean;
   proxyTransportMaxConcurrent?: number;
   proxyTransportStartDelayMs?: number;
@@ -56,19 +57,28 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     "proxyTransportStartJitterMs",
   );
   const totalWorkers = lanes * workersPerLane;
+  const maxWorkers = input.maxWorkers === undefined
+    ? totalWorkers
+    : positiveInteger(input.maxWorkers, "maxWorkers");
+  const effectiveWorkers = Math.min(
+    totalWorkers,
+    maxWorkers,
+    proxyTransport ? proxyTransportMaxConcurrent : Number.POSITIVE_INFINITY,
+  );
   const pages = Math.ceil(comments / pageSize);
 
   const duration = (spacingMs: number, transportJitterFactor: number): number => {
     if (pages === 0) return 0;
     const perLaneCycleMs = Math.max(spacingMs, networkMs) / workersPerLane;
     const laneTopologyCycleMs = perLaneCycleMs / lanes;
+    const workerCycleMs = networkMs / effectiveWorkers;
     const transportCycleMs = proxyTransport
       ? Math.max(
         proxyTransportStartDelayMs + proxyTransportStartJitterMs * transportJitterFactor,
         networkMs / proxyTransportMaxConcurrent,
       )
       : 0;
-    return Math.ceil(Math.max(networkMs, pages * Math.max(laneTopologyCycleMs, transportCycleMs)) / 1_000);
+    return Math.ceil(Math.max(networkMs, pages * Math.max(laneTopologyCycleMs, workerCycleMs, transportCycleMs)) / 1_000);
   };
   const optimisticSeconds = duration(minDelayMs, 0);
   const expectedSeconds = duration(minDelayMs + jitterMs / 2, 0.5);
@@ -85,9 +95,9 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     lanes,
     workersPerLane,
     totalWorkers,
+    ...(input.maxWorkers !== undefined || proxyTransport ? { effectiveWorkers } : {}),
     ...(proxyTransport
       ? {
-        effectiveWorkers: Math.min(totalWorkers, proxyTransportMaxConcurrent),
         proxyTransportMaxConcurrent,
         proxyTransportStartDelayMs,
         proxyTransportStartJitterMs,

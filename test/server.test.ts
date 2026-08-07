@@ -4,8 +4,19 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
-import { startDashboard, validateClashConfigSelection } from "../src/server";
+import { sourceTaskPaths, startDashboard, validateClashConfigSelection } from "../src/server";
 import type { ProxyPoolFile } from "../src/mihomo-pool";
+
+test("isolates target-owned likes while preserving the legacy record result path", () => {
+  assert.deepEqual(sourceTaskPaths("/data", "42", "record"), {
+    statePath: join("/data", "web-state-42-record.json"),
+    outputPath: join("/data", "web-comments-42.jsonl"),
+  });
+  const likes = sourceTaskPaths("/data", "42", "likes");
+  assert.match(likes.statePath, /web-state-42-likes-target-v2\.json$/);
+  assert.match(likes.outputPath, /web-comments-42-likes-target-v2\.jsonl$/);
+  assert.doesNotMatch(likes.statePath, /web-state-42-likes\.json$/);
+});
 
 test("dashboard serves UI assets and estimate API", async (context) => {
   const server = await startDashboard({ host: "127.0.0.1", port: 0 });
@@ -41,7 +52,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="activeWorkerCount"/);
   assert.match(pageText, /id="activeSongsList"/);
   assert.match(pageText, /评论读取进度/);
-  assert.match(pageText, /主机并发只是上限/);
+  assert.match(pageText, /主机并发会硬性限制总 Worker 数/);
+  assert.match(pageText, /styles\.css\?v=32/);
+  assert.match(pageText, /app\.js\?v=34/);
   assert.match(pageText, /id="speedMetric"/);
   assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
@@ -138,7 +151,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(parallelEstimate.status, 200);
   const parallelValue = await parallelEstimate.json() as { pages: number; expectedSeconds: number; totalWorkers: number };
   assert.equal(parallelValue.pages, 100);
-  assert.equal(parallelValue.expectedSeconds, 4);
+  assert.equal(parallelValue.expectedSeconds, 5);
   assert.equal(parallelValue.totalWorkers, 12);
 
   const protectedEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=1000&minDelayMs=333&jitterMs=100&networkMs=400&lanes=4&workersPerLane=3&proxyTransport=1`);

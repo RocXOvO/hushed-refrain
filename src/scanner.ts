@@ -6,6 +6,7 @@ import {
 } from "./errors";
 import { RequestGovernor } from "./governor";
 import { LaneRecovery } from "./lane-recovery";
+import { LaneAllocator } from "./lane-allocator";
 import {
   executeBestEffortProxyRequest,
   executeProxyRequest,
@@ -17,6 +18,7 @@ import { JsonlResultWriter } from "./results";
 import { hydrateMissingSongMetadata } from "./song-metadata";
 import { createTimeShards, SOURCE_SCAN_START_TIME, splitRemainingTimeShard } from "./time-shards";
 import { AsyncWorkQueue } from "./work-queue";
+import { workerCountForTopology } from "./worker-topology";
 import {
   assertCompatibleState,
   createState,
@@ -44,6 +46,8 @@ export interface SourceScanLane {
 
 export interface PooledScanOptions extends ScanOptions {
   workersPerLane: number;
+  /** Hard ceiling for the number of actual worker loops in this task. */
+  maxWorkers?: number;
   requestBudget: number;
 }
 
@@ -202,7 +206,7 @@ export async function runPooledCommentFinder(
     }
     if (state.finished) return pooledReport(state, lanes, options, initialRequests, "complete");
 
-    const configuredWorkers = lanes.length * options.workersPerLane;
+    const configuredWorkers = workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers);
     const transportCapacity = lanes.find((lane) => lane.transportGate)?.transportGate?.currentMaxConcurrent;
     const initialWorkTarget = Math.min(configuredWorkers, transportCapacity ?? configuredWorkers);
     const queue = new AsyncWorkQueue<SourceScanWork>(
@@ -212,6 +216,13 @@ export async function runPooledCommentFinder(
     const unavailableLanes = new Set<string>();
     const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
     const activeLaneRequests = new Map(lanes.map((lane) => [lane.name, 0]));
+    const laneAllocator = new LaneAllocator(
+      lanes,
+      options.workersPerLane,
+      (lane) => !blockedLanes.has(lane.name) && !unavailableLanes.has(lane.name),
+      (lane) => laneRecovery.get(lane.name)!.ready,
+      () => [...activeLaneRequests.values()].some((count) => count > 0),
+    );
     const reservedSongPages = new Map(
       state.songProgress!.map((progress, index) => [index, progress.pageInSong]),
     );
@@ -228,6 +239,7 @@ export async function runPooledCommentFinder(
 
     const stopScheduling = (): void => {
       stopRequested = true;
+      laneAllocator.cancel();
       for (const recovery of laneRecovery.values()) recovery.cancel();
       queue.stop();
       for (const waiters of songPermitWaiters.values()) {
@@ -249,6 +261,7 @@ export async function runPooledCommentFinder(
     options.signal?.addEventListener("abort", abortListener, { once: true });
     if (options.signal?.aborted) abortListener();
     void queue.whenClosed().then(() => {
+      laneAllocator.cancel();
       for (const recovery of laneRecovery.values()) recovery.cancel();
     });
 
@@ -283,6 +296,16 @@ export async function runPooledCommentFinder(
       if (options.maxCommentPagesPerSong > 0 && reservedPages >= options.maxCommentPagesPerSong) {
         if (progress.pageInSong >= options.maxCommentPagesPerSong) {
           markSongTruncated(state, songIndex);
+          publishSongProgress(
+            options,
+            state.songs[songIndex],
+            progress.pageInSong,
+            progress.commentOffset,
+            progress.totalComments,
+            undefined,
+            undefined,
+            true,
+          );
           notifySongPermit(songIndex);
           return "stopped";
         }
@@ -472,6 +495,8 @@ export async function runPooledCommentFinder(
         progress.commentOffset,
         progress.totalComments,
         workerId,
+        undefined,
+        progress.done,
       );
       await checkpoint();
       if (added > 0 && options.stopAfterFirst) {
@@ -481,39 +506,55 @@ export async function runPooledCommentFinder(
       return stopRequested || progress.done ? [] : nextWork;
     };
 
-    const runWorker = async (lane: SourceScanLane, workerIndex: number): Promise<void> => {
-      const workerId = `${lane.name}:${workerIndex + 1}`;
-      const recovery = laneRecovery.get(lane.name)!;
-      while (!stopRequested && !blockedLanes.has(lane.name) && !unavailableLanes.has(lane.name)) {
-        await recovery.waitUntilReady();
-        if (stopRequested || queue.isClosed() || blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) return;
+    const runWorker = async (workerIndex: number): Promise<void> => {
+      const workerId = `worker-${workerIndex + 1}`;
+      while (!stopRequested) {
+        const permit = await laneAllocator.acquire();
+        if (!permit) return;
+        const lane = permit.lane;
+        const recovery = laneRecovery.get(lane.name)!;
+        if (stopRequested || queue.isClosed()) {
+          permit.release();
+          return;
+        }
         const work = await queue.take();
-        if (work === undefined) return;
+        if (work === undefined) {
+          permit.release();
+          return;
+        }
         let requeue: SourceScanWork[] = [];
         let laneRequestActive = false;
         try {
           if (blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) {
             requeue = stopRequested ? [] : [work];
-            return;
+            continue;
           }
           laneRequestActive = true;
           activeLaneRequests.set(lane.name, (activeLaneRequests.get(lane.name) ?? 0) + 1);
+          if (!recovery.ready) {
+            requeue = [work];
+            continue;
+          }
           requeue = await scanSongPage(lane, workerId, work);
           recovery.recordSuccess();
           unavailableLanes.delete(lane.name);
+          laneAllocator.notify();
         } catch (error) {
           if (error instanceof CooldownRequired) {
             blockedLanes.set(lane.name, error.retryAfterMs);
             unavailableLanes.delete(lane.name);
+            laneAllocator.notify();
             requeue = state.songProgress![work.songIndex].done ? [] : [work];
-            return;
+            continue;
           }
           if (error instanceof SourceLaneFailure) {
-            recovery.recordFailure();
+            const retryAfterMs = recovery.recordFailure();
+            const recoveryTimer = setTimeout(() => laneAllocator.notify(), retryAfterMs);
+            recoveryTimer.unref?.();
             requeue = state.songProgress![work.songIndex].done ? [] : [work];
             if (recovery.failureCount >= MAX_CONSECUTIVE_LANE_FAILURES) {
               if (!blockedLanes.has(lane.name)) unavailableLanes.add(lane.name);
-              return;
+              laneAllocator.notify();
             }
             continue;
           }
@@ -534,6 +575,7 @@ export async function runPooledCommentFinder(
           if (laneRequestActive) {
             activeLaneRequests.set(lane.name, Math.max(0, (activeLaneRequests.get(lane.name) ?? 1) - 1));
           }
+          permit.release();
           maybeStopAfterLaneRequests();
           if (stopRequested) requeue = [];
           queue.complete(requeue.length > 0 ? requeue : undefined);
@@ -542,9 +584,9 @@ export async function runPooledCommentFinder(
     };
 
     try {
-      await Promise.all(Array.from({ length: options.workersPerLane }, (_, workerIndex) =>
-        lanes.map((lane) => runWorker(lane, workerIndex))
-      ).flat());
+      await Promise.all(Array.from({ length: configuredWorkers }, (_, workerIndex) =>
+        runWorker(workerIndex)
+      ));
     } finally {
       options.signal?.removeEventListener("abort", abortListener);
     }
@@ -797,6 +839,9 @@ async function runSongScan(
       songProgress.pageInSong,
       songProgress.commentOffset,
       songProgress.totalComments,
+      undefined,
+      undefined,
+      songProgress.done,
     );
     await checkpoint();
 
@@ -835,8 +880,8 @@ async function collectSongs(
   }
   if (options.source === "likes" || options.source === "both") {
     try {
-      batches.push(await governor.execute("likelist", () =>
-        client.getLikedSongs(options.uid, options.cookie),
+      batches.push(await collectTargetLikedSongs(client, options, (label, request) =>
+        governor.execute(label, request)
       ));
     } catch (error) {
       if (options.source === "likes" || isPauseSignal(error)) throw error;
@@ -867,9 +912,7 @@ async function collectSongsPooled(
   }
   if (options.source === "likes" || options.source === "both") {
     try {
-      batches.push(await requestFromPool(lanes, "likelist", (client) =>
-        client.getLikedSongs(options.uid, options.cookie)
-      ));
+      batches.push(await collectTargetLikedSongsPooled(lanes, options));
     } catch (error) {
       if (options.source === "likes" || isPauseSignal(error)) throw error;
       failures.push(`likes: ${errorMessage(error)}`);
@@ -898,6 +941,37 @@ async function requestFromPool<T>(
     }
   }
   throw lastError ?? new Error(`${label} failed on every proxy lane.`);
+}
+
+async function collectTargetLikedSongs(
+  client: NcmClient,
+  options: ScanOptions,
+  execute: <T>(label: string, request: () => Promise<T>) => Promise<T>,
+): Promise<SongCandidate[]> {
+  if (!client.getTargetLikedPlaylist || !client.getTargetLikedPlaylistSongs) {
+    return execute("likelist", () => client.getLikedSongs(options.uid, options.cookie));
+  }
+  const target = await execute("target_likes_playlist", () =>
+    client.getTargetLikedPlaylist!(options.uid, options.cookie)
+  );
+  return execute("target_likes_tracks", () =>
+    client.getTargetLikedPlaylistSongs!(options.uid, target, options.cookie)
+  );
+}
+
+async function collectTargetLikedSongsPooled(
+  lanes: SourceScanLane[],
+  options: ScanOptions,
+): Promise<SongCandidate[]> {
+  if (!lanes.every((lane) => lane.client.getTargetLikedPlaylist && lane.client.getTargetLikedPlaylistSongs)) {
+    return requestFromPool(lanes, "likelist", (client) => client.getLikedSongs(options.uid, options.cookie));
+  }
+  const target = await requestFromPool(lanes, "target_likes_playlist", (client) =>
+    client.getTargetLikedPlaylist!(options.uid, options.cookie)
+  );
+  return requestFromPool(lanes, "target_likes_tracks", (client) =>
+    client.getTargetLikedPlaylistSongs!(options.uid, target, options.cookie)
+  );
 }
 
 async function requestBestEffortFromPool<T>(
@@ -1054,7 +1128,7 @@ function pooledReport(
     requestsThisRun,
     requestsTotal: initialRequests + requestsThisRun,
     lanes: lanes.length,
-    workers: lanes.length * options.workersPerLane,
+    workers: workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers),
     pagesProcessed: state.pagesProcessed ?? 0,
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
@@ -1253,6 +1327,7 @@ function publishSongProgress(
   totalComments: number | undefined,
   workerId?: string,
   requestingPage?: number,
+  done?: boolean,
 ): void {
   try {
     options.onSongProgress?.({
@@ -1263,6 +1338,7 @@ function publishSongProgress(
       requestingPage,
       commentsProcessed,
       totalComments,
+      done,
     });
   } catch {
     // Status delivery must never interrupt the scan.

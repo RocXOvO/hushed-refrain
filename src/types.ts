@@ -12,6 +12,11 @@ export interface SongCandidate {
   score?: number;
 }
 
+export interface TargetLikedPlaylist {
+  id: string;
+  trackCount?: number;
+}
+
 export interface CommentRecord {
   commentId: string;
   userId: string;
@@ -66,6 +71,12 @@ export interface NcmClient {
     cookie?: string,
   ): Promise<SongCandidate[]>;
   getLikedSongs(uid: string, cookie?: string): Promise<SongCandidate[]>;
+  getTargetLikedPlaylist?(uid: string, cookie?: string): Promise<TargetLikedPlaylist>;
+  getTargetLikedPlaylistSongs?(
+    uid: string,
+    playlist: TargetLikedPlaylist,
+    cookie?: string,
+  ): Promise<SongCandidate[]>;
   getSongInfos?(songIds: readonly string[]): Promise<SongInfo[]>;
   getSongComments(
     songId: string,
@@ -129,6 +140,8 @@ export interface ParallelSongScanOptions {
   shardCount: number;
   pageSize: number;
   workersPerLane: number;
+  /** Hard ceiling for the number of actual worker loops in this task. */
+  maxWorkers?: number;
   requestBudget: number;
   maxPages: number;
   stopAfterFirst: boolean;
@@ -223,6 +236,7 @@ export interface ScanState {
   sourceSongCount: number;
   sourceTruncated: boolean;
   sourceErrors: string[];
+  sourceCatalogVersion?: number;
   songIndex: number;
   commentOffset: number;
   pageInSong: number;
@@ -271,6 +285,7 @@ export interface SongScanActivity {
   requestingPage?: number;
   commentsProcessed: number;
   totalComments?: number;
+  done?: boolean;
 }
 
 export interface ScanRequestActivity {

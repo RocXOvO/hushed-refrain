@@ -38,6 +38,10 @@ export class LaneRecovery {
     return this.consecutiveFailures;
   }
 
+  get ready(): boolean {
+    return !this.cancelled && this.retryAt <= this.runtime.now();
+  }
+
   recordSuccess(): void {
     this.consecutiveFailures = 0;
     this.retryAt = 0;

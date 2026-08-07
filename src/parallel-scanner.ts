@@ -6,12 +6,14 @@ import {
 } from "./errors";
 import { RequestGovernor } from "./governor";
 import { LaneRecovery } from "./lane-recovery";
+import { LaneAllocator } from "./lane-allocator";
 import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-gate";
 import { mergeCommentTotal, timeCoveragePercent } from "./progress";
 import { JsonlResultWriter } from "./results";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { AsyncWorkQueue } from "./work-queue";
 import { createTimeShards, splitRemainingTimeShard } from "./time-shards";
+import { workerCountForTopology } from "./worker-topology";
 import type {
   CommentTimeShard,
   FoundComment,
@@ -46,6 +48,7 @@ export async function runParallelSongScan(
   const loaded = options.fresh ? undefined : await loadParallelState(options.statePath);
   if (loaded) assertCompatible(loaded, options);
   const state = loaded ?? createParallelState(options);
+  const workerCount = workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers);
   const initialRequests = state.requestCount;
   const seenCommentIds = new Set(state.seenCommentIds);
   const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
@@ -89,6 +92,13 @@ export async function runParallelSongScan(
   const unavailableLanes = new Set<string>();
   const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
   const activeLaneRequests = new Map(lanes.map((lane) => [lane.name, 0]));
+  const laneAllocator = new LaneAllocator(
+    lanes,
+    options.workersPerLane,
+    (lane) => !blockedLanes.has(lane.name) && !unavailableLanes.has(lane.name),
+    (lane) => laneRecovery.get(lane.name)!.ready,
+    () => [...activeLaneRequests.values()].some((count) => count > 0),
+  );
   const initialPages = state.pagesProcessed;
   let scheduledRequests = 0;
   let stopRequested = false;
@@ -103,6 +113,7 @@ export async function runParallelSongScan(
 
   const stopScheduling = (): void => {
     stopRequested = true;
+    laneAllocator.cancel();
     for (const recovery of laneRecovery.values()) recovery.cancel();
     queue.stop();
   };
@@ -120,6 +131,7 @@ export async function runParallelSongScan(
   options.signal?.addEventListener("abort", abortListener, { once: true });
   if (options.signal?.aborted) abortListener();
   void queue.whenClosed().then(() => {
+    laneAllocator.cancel();
     for (const recovery of laneRecovery.values()) recovery.cancel();
   });
 
@@ -308,39 +320,55 @@ export async function runParallelSongScan(
     return stopRequested ? [] : nextWork;
   };
 
-  const runWorker = async (lane: ParallelCommentLane, workerIndex: number): Promise<void> => {
-    const workerId = `${lane.name}:${workerIndex + 1}`;
-    const recovery = laneRecovery.get(lane.name)!;
-    while (!stopRequested && !blockedLanes.has(lane.name) && !unavailableLanes.has(lane.name)) {
-      await recovery.waitUntilReady();
-      if (stopRequested || queue.isClosed() || blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) return;
+  const runWorker = async (workerIndex: number): Promise<void> => {
+    const workerId = `worker-${workerIndex + 1}`;
+    while (!stopRequested) {
+      const permit = await laneAllocator.acquire();
+      if (!permit) return;
+      const lane = permit.lane;
+      const recovery = laneRecovery.get(lane.name)!;
+      if (stopRequested || queue.isClosed()) {
+        permit.release();
+        return;
+      }
       const shard = await queue.take();
-      if (!shard) return;
+      if (!shard) {
+        permit.release();
+        return;
+      }
       let requeue: CommentTimeShard[] = [];
       let laneRequestActive = false;
       try {
         if (blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) {
           requeue = stopRequested ? [] : [shard];
-          return;
+          continue;
         }
         laneRequestActive = true;
         activeLaneRequests.set(lane.name, (activeLaneRequests.get(lane.name) ?? 0) + 1);
+        if (!recovery.ready) {
+          requeue = [shard];
+          continue;
+        }
         requeue = await scanShardPage(lane, workerId, shard);
         recovery.recordSuccess();
         unavailableLanes.delete(lane.name);
+        laneAllocator.notify();
       } catch (error) {
         if (error instanceof CooldownRequired) {
           blockedLanes.add(lane.name);
           unavailableLanes.delete(lane.name);
+          laneAllocator.notify();
           requeue = shard.done ? [] : [shard];
-          return;
+          continue;
         }
         if (error instanceof LaneRequestFailure) {
-          recovery.recordFailure();
+          const retryAfterMs = recovery.recordFailure();
+          const recoveryTimer = setTimeout(() => laneAllocator.notify(), retryAfterMs);
+          recoveryTimer.unref?.();
           requeue = shard.done ? [] : [shard];
           if (recovery.failureCount >= MAX_CONSECUTIVE_LANE_FAILURES) {
             if (!blockedLanes.has(lane.name)) unavailableLanes.add(lane.name);
-            return;
+            laneAllocator.notify();
           }
           continue;
         }
@@ -361,6 +389,7 @@ export async function runParallelSongScan(
         if (laneRequestActive) {
           activeLaneRequests.set(lane.name, Math.max(0, (activeLaneRequests.get(lane.name) ?? 1) - 1));
         }
+        permit.release();
         maybeStopAfterLaneRequests();
         if (stopRequested) requeue = [];
         queue.complete(requeue.length > 0 ? requeue : undefined);
@@ -368,11 +397,10 @@ export async function runParallelSongScan(
     }
   };
 
-  const workers = Array.from({ length: options.workersPerLane }, (_, workerIndex) =>
-    lanes.map((lane) => runWorker(lane, workerIndex))
-  ).flat();
   try {
-    await Promise.all(workers);
+    await Promise.all(Array.from({ length: workerCount }, (_, workerIndex) =>
+      runWorker(workerIndex)
+    ));
   } finally {
     options.signal?.removeEventListener("abort", abortListener);
   }
@@ -530,7 +558,7 @@ function makeReport(
     songId: state.songId,
     songName: state.songName,
     lanes: lanes.length,
-    workers: lanes.length * options.workersPerLane,
+    workers: workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers),
     shards: state.shards.length,
     shardsComplete: state.shards.filter((shard) => shard.done).length,
     pagesProcessed: state.pagesProcessed,

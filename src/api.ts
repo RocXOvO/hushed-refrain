@@ -10,6 +10,7 @@ import type {
   NcmClient,
   SongCandidate,
   SongInfo,
+  TargetLikedPlaylist,
 } from "./types";
 
 type JsonObject = Record<string, unknown>;
@@ -99,15 +100,69 @@ export class EnhancedNcmClient implements NcmClient {
   }
 
   async getLikedSongs(uid: string, cookie?: string): Promise<SongCandidate[]> {
-    const body = await invoke("likelist", () =>
-      api.likelist({ uid, ...this.requestConfig(cookie) }),
+    const playlist = await this.getTargetLikedPlaylist(uid, cookie);
+    return this.getTargetLikedPlaylistSongs(uid, playlist, cookie);
+  }
+
+  async getTargetLikedPlaylist(uid: string, cookie?: string): Promise<TargetLikedPlaylist> {
+    // Do not use /api/song/like/get here. In an authenticated session that
+    // endpoint may resolve the account from the cookie instead of the target
+    // UID, silently returning the operator's own likes. Resolve the target
+    // user's specialType=5 playlist first and verify its owner instead.
+    const listing = await invoke("user_playlist", () =>
+      api.user_playlist({ uid, limit: 1_000, offset: 0, ...this.requestConfig(cookie) }),
     );
-    return array(body.ids).flatMap((value, index) => {
-      const id = stringId(value);
-      return id
-        ? [{ id, sources: ["likes" as const], sourceRank: index + 1 }]
-        : [];
-    });
+    const targetPlaylist = array(listing.playlist)
+      .map(object)
+      .find((playlist) =>
+        Number(playlist.specialType) === 5 &&
+        stringId(object(playlist.creator).userId) === uid
+      );
+    const playlistId = stringId(targetPlaylist?.id);
+    if (!playlistId) {
+      throw new ApiResponseError("目标用户的“喜欢的音乐”歌单不可见，未使用当前登录账号的喜欢列表代替", 403, listing);
+    }
+    return { id: playlistId, trackCount: numberOrUndefined(targetPlaylist?.trackCount) };
+  }
+
+  async getTargetLikedPlaylistSongs(
+    uid: string,
+    target: TargetLikedPlaylist,
+    cookie?: string,
+  ): Promise<SongCandidate[]> {
+    const body = await invoke("playlist_detail", () =>
+      api.playlist_detail({ id: target.id, s: 0, ...this.requestConfig(cookie) }),
+    );
+    const playlist = object(body.playlist);
+    const ownerId = stringId(object(playlist.creator).userId);
+    if (ownerId !== uid) {
+      throw new ApiResponseError("喜欢歌单所属用户与目标 UID 不一致，已阻止使用错误的登录账号数据", 409, body);
+    }
+    const listingCount = target.trackCount;
+    const detailCount = numberOrUndefined(playlist.trackCount);
+    if (listingCount !== undefined && detailCount !== undefined && listingCount !== detailCount) {
+      throw new ApiResponseError(
+        `目标用户喜欢歌单数量前后不一致：列表声明 ${listingCount} 首，详情声明 ${detailCount} 首`,
+        502,
+        body,
+      );
+    }
+    const expectedCount = detailCount ?? listingCount;
+    if (!Array.isArray(playlist.trackIds)) {
+      throw new ApiResponseError("目标用户喜欢歌单详情缺少 trackIds，可能是隐私限制或响应截断", 502, body);
+    }
+    const ids = playlist.trackIds.map((value) => stringId(object(value).id));
+    if (ids.some((id) => !id)) {
+      throw new ApiResponseError("目标用户喜欢歌单包含无法识别的歌曲 ID，已阻止写入不完整目录", 502, body);
+    }
+    if (expectedCount !== undefined && ids.length !== expectedCount) {
+      throw new ApiResponseError(`目标用户喜欢歌单响应不完整：声明 ${expectedCount} 首，实际返回 ${ids.length} 个 ID`, 502, body);
+    }
+    return ids.map((id, index) => ({
+      id: id!,
+      sources: ["likes" as const],
+      sourceRank: index + 1,
+    }));
   }
 
   async getSongComments(
@@ -347,6 +402,7 @@ function stringId(value: unknown): string | undefined {
 }
 
 function numberOrUndefined(value: unknown): number | undefined {
+  if (value === null || value === undefined || value === "" || typeof value === "boolean") return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }

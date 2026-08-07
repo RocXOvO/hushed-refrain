@@ -1,6 +1,8 @@
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import type { ScanOptions, ScanState } from "./types";
 
+export const SOURCE_CATALOG_VERSION = 2;
+
 export function createState(
   options: ScanOptions,
   strategy: "scan" | "history",
@@ -21,6 +23,7 @@ export function createState(
     sourceSongCount: 0,
     sourceTruncated: false,
     sourceErrors: [],
+    sourceCatalogVersion: SOURCE_CATALOG_VERSION,
     songIndex: 0,
     commentOffset: 0,
     pageInSong: 0,
@@ -65,6 +68,10 @@ export function assertCompatibleState(state: ScanState, options: ScanOptions): v
   if (state.uid !== options.uid) mismatches.push("uid");
   if (state.source !== options.source) mismatches.push("source");
   if (state.recordScope !== options.recordScope) mismatches.push("recordScope");
+  if (
+    (options.source === "likes" || options.source === "both") &&
+    state.sourceCatalogVersion !== SOURCE_CATALOG_VERSION
+  ) mismatches.push("目标用户喜欢歌曲目录版本");
   if (options.strategy !== "auto" && state.strategy !== options.strategy) {
     mismatches.push("strategy");
   }

@@ -5,36 +5,46 @@ import { EnhancedNcmClient } from "../src/api";
 import { ApiResponseError, AuthenticationRequired } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
-test("passes one static proxy and cookie to the upstream API", async () => {
+test("resolves likes through the target user's owned playlist even with a login cookie", async () => {
   const mutable = upstream as unknown as {
-    likelist: (params: Record<string, unknown>) => Promise<unknown>;
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
   };
-  const original = mutable.likelist;
-  let captured: Record<string, unknown> | undefined;
-  mutable.likelist = async (params) => {
-    captured = params;
-    return { status: 200, body: { code: 200, ids: [123] }, cookie: [] };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  let capturedListing: Record<string, unknown> | undefined;
+  let capturedDetail: Record<string, unknown> | undefined;
+  mutable.user_playlist = async (params) => {
+    capturedListing = params;
+    return { status: 200, body: { code: 200, playlist: [{ id: 9, specialType: 5, creator: { userId: 42 } }] }, cookie: [] };
+  };
+  mutable.playlist_detail = async (params) => {
+    capturedDetail = params;
+    return { status: 200, body: { code: 200, playlist: { creator: { userId: 42 }, trackIds: [{ id: 123 }] } }, cookie: [] };
   };
 
   try {
     const client = new EnhancedNcmClient({ proxy: "http://127.0.0.1:7890/" });
     const songs = await client.getLikedSongs("42", "MUSIC_U=test");
     assert.deepEqual(songs.map((song) => song.id), ["123"]);
-    assert.equal(captured?.uid, "42");
-    assert.equal(captured?.cookie, "MUSIC_U=test");
-    assert.equal(captured?.proxy, "http://127.0.0.1:7890/");
-    assert.equal(captured?.timeout, 30_000);
+    assert.equal(capturedListing?.uid, "42");
+    assert.equal(capturedListing?.cookie, "MUSIC_U=test");
+    assert.equal(capturedListing?.proxy, "http://127.0.0.1:7890/");
+    assert.equal(capturedListing?.timeout, 30_000);
+    assert.equal(capturedDetail?.id, "9");
+    assert.equal(capturedDetail?.cookie, "MUSIC_U=test");
   } finally {
-    mutable.likelist = original;
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
   }
 });
 
 test("turns NetEase 301 responses into a clear login requirement", async () => {
   const mutable = upstream as unknown as {
-    likelist: (params: Record<string, unknown>) => Promise<unknown>;
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
   };
-  const original = mutable.likelist;
-  mutable.likelist = async () => {
+  const original = mutable.user_playlist;
+  mutable.user_playlist = async () => {
     throw { status: 301, body: { code: 301 } };
   };
 
@@ -44,9 +54,147 @@ test("turns NetEase 301 responses into a clear login requirement", async () => {
       (error: unknown) => error instanceof AuthenticationRequired && /二维码登录/.test(error.message),
     );
   } finally {
-    mutable.likelist = original;
+    mutable.user_playlist = original;
   }
 });
+
+test("rejects a liked playlist owned by the logged-in account instead of the target UID", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { code: 200, playlist: [{ id: 9, specialType: 5, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: { code: 200, playlist: { creator: { userId: 777 }, trackIds: [{ id: 123 }] } },
+  });
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getLikedSongs("42", "MUSIC_U=operator"),
+      (error: unknown) => error instanceof ApiResponseError && /UID/.test(error.message),
+    );
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+test("accepts an explicitly empty target liked playlist", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 0, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: { playlist: { creator: { userId: 42 }, trackCount: 0, trackIds: [] } },
+  });
+  try {
+    assert.deepEqual(await new EnhancedNcmClient().getLikedSongs("42", "MUSIC_U=operator"), []);
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+for (const detailTrackCount of [0, null] as const) {
+  test(`rejects an empty liked-playlist detail when the listing declares songs (${String(detailTrackCount)})`, async () => {
+    const mutable = upstream as unknown as {
+      user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+      playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+    };
+    const originalListing = mutable.user_playlist;
+    const originalDetail = mutable.playlist_detail;
+    mutable.user_playlist = async () => ({
+      status: 200,
+      body: { playlist: [{ id: 9, specialType: 5, trackCount: 100, creator: { userId: 42 } }] },
+    });
+    mutable.playlist_detail = async () => ({
+      status: 200,
+      body: {
+        playlist: {
+          creator: { userId: 42 },
+          trackCount: detailTrackCount,
+          trackIds: [],
+        },
+      },
+    });
+    try {
+      await assert.rejects(
+        new EnhancedNcmClient().getLikedSongs("42", "MUSIC_U=operator"),
+        (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+      );
+    } finally {
+      mutable.user_playlist = originalListing;
+      mutable.playlist_detail = originalDetail;
+    }
+  });
+}
+
+test("requires explicit trackIds even when a liked-playlist detail declares zero songs", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 0, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: { playlist: { creator: { userId: 42 }, trackCount: 0 } },
+  });
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getLikedSongs("42", "MUSIC_U=operator"),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+    );
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+for (const [label, playlist] of [
+  ["missing trackIds", { creator: { userId: 42 }, trackCount: 2 }],
+  ["truncated trackIds", { creator: { userId: 42 }, trackCount: 2, trackIds: [{ id: 1 }] }],
+  ["malformed trackIds", { creator: { userId: 42 }, trackCount: 1, trackIds: [{}] }],
+] as const) {
+  test(`rejects ${label} instead of checkpointing a partial liked-song catalog`, async () => {
+    const mutable = upstream as unknown as {
+      user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+      playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+    };
+    const originalListing = mutable.user_playlist;
+    const originalDetail = mutable.playlist_detail;
+    mutable.user_playlist = async () => ({
+      status: 200,
+      body: { playlist: [{ id: 9, specialType: 5, trackCount: 2, creator: { userId: 42 } }] },
+    });
+    mutable.playlist_detail = async () => ({ status: 200, body: { playlist } });
+    try {
+      await assert.rejects(
+        new EnhancedNcmClient().getLikedSongs("42", "MUSIC_U=operator"),
+        (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+      );
+    } finally {
+      mutable.user_playlist = originalListing;
+      mutable.playlist_detail = originalDetail;
+    }
+  });
+}
 
 test("normalizes a UID profile from user_detail", async () => {
   const mutable = upstream as unknown as {
