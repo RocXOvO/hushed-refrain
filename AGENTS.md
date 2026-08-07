@@ -12,7 +12,7 @@ The app finds NetEase Cloud Music comments authored by a numeric user UID. It ha
 
 There is no database. Durable scan state is JSON; matches are append-only JSONL. Generated/runtime directories (`dist/`, `release/`, `.ncm/`, `data/`, `tmp/`) are ignored and must not be committed.
 
-The code version is `v0.6.0`; its release process is in progress. The currently published baseline remains `v0.5.0`, so do not describe `v0.6.0` as released until the release checklist is complete.
+The code version is authoritative in `package.json` and `package-lock.json` (currently `0.6.0`). GitHub's latest Release is external state: when publishing or evaluating an upgrade, verify its tag, commit, and assets in real time rather than treating this file as a release-status source.
 
 ## Architecture and data flow
 
