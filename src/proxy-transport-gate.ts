@@ -128,3 +128,13 @@ export function executeProxyRequest<T>(
     lane.transportGate ? lane.transportGate.run(request) : request()
   );
 }
+
+export function executeBestEffortProxyRequest<T>(
+  lane: ProxyTransportLane,
+  label: string,
+  request: () => Promise<T>,
+): Promise<T> {
+  return lane.governor.executeBestEffort(label, () =>
+    lane.transportGate ? lane.transportGate.run(request) : request()
+  );
+}

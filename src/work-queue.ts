@@ -1,5 +1,6 @@
 export class AsyncWorkQueue<T> {
-  private readonly items: T[];
+  private items: T[];
+  private head = 0;
   private readonly waiters: Array<(item: T | undefined) => void> = [];
   private inFlight = 0;
   private closed = false;
@@ -10,7 +11,7 @@ export class AsyncWorkQueue<T> {
 
   take(): Promise<T | undefined> {
     if (this.closed) return Promise.resolve(undefined);
-    const item = this.items.shift();
+    const item = this.dequeue();
     if (item !== undefined) {
       this.inFlight += 1;
       return Promise.resolve(item);
@@ -40,20 +41,36 @@ export class AsyncWorkQueue<T> {
     if (this.closed) return;
     this.closed = true;
     this.items.length = 0;
+    this.head = 0;
     this.resolveWaiters();
   }
 
   private dispatch(): void {
-    while (!this.closed && this.items.length > 0 && this.waiters.length > 0) {
+    while (!this.closed && this.queuedCount() > 0 && this.waiters.length > 0) {
       const waiter = this.waiters.shift()!;
-      const item = this.items.shift()!;
+      const item = this.dequeue()!;
       this.inFlight += 1;
       waiter(item);
     }
-    if (!this.closed && this.items.length === 0 && this.inFlight === 0) {
+    if (!this.closed && this.queuedCount() === 0 && this.inFlight === 0) {
       this.closed = true;
       this.resolveWaiters();
     }
+  }
+
+  private dequeue(): T | undefined {
+    if (this.head >= this.items.length) return undefined;
+    const item = this.items[this.head];
+    this.head += 1;
+    if (this.head >= 1_024 && this.head * 2 >= this.items.length) {
+      this.items = this.items.slice(this.head);
+      this.head = 0;
+    }
+    return item;
+  }
+
+  private queuedCount(): number {
+    return this.items.length - this.head;
   }
 
   private resolveWaiters(): void {

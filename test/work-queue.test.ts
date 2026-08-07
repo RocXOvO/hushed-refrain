@@ -33,3 +33,29 @@ test("fans adaptive split work out to multiple waiting workers", async () => {
   queue.complete();
   queue.complete();
 });
+
+test("preserves FIFO order across internal compaction and requeued work", async () => {
+  const initial = Array.from({ length: 2_100 }, (_, index) => index);
+  const queue = new AsyncWorkQueue(initial);
+
+  for (let expected = 0; expected < 1_500; expected += 1) {
+    assert.equal(await queue.take(), expected);
+    queue.complete();
+  }
+
+  assert.equal(await queue.take(), 1_500);
+  queue.complete([2_100, 2_101]);
+
+  const remaining: number[] = [];
+  for (;;) {
+    const item = await queue.take();
+    if (item === undefined) break;
+    remaining.push(item);
+    queue.complete();
+  }
+  assert.deepEqual(remaining, [
+    ...Array.from({ length: 599 }, (_, index) => index + 1_501),
+    2_100,
+    2_101,
+  ]);
+});

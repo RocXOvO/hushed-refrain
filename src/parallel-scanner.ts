@@ -7,7 +7,7 @@ import {
 import { RequestGovernor } from "./governor";
 import { LaneRecovery } from "./lane-recovery";
 import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-gate";
-import { mergeCommentTotal } from "./progress";
+import { mergeCommentTotal, timeCoveragePercent } from "./progress";
 import { JsonlResultWriter } from "./results";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { AsyncWorkQueue } from "./work-queue";
@@ -56,10 +56,12 @@ export async function runParallelSongScan(
     if (!force && now - lastCheckpointAt < 500) return;
     lastCheckpointAt = now;
     state.requestCount = initialRequests + requestsUsed(lanes);
+    publishCheckpointProgress(options, state);
     const snapshot = structuredClone(state);
     checkpointTail = checkpointTail.then(() => saveParallelState(options.statePath, snapshot));
     await checkpointTail;
   };
+  publishCheckpointProgress(options, state);
 
   if (state.finished) {
     return makeReport("complete", state, lanes, options, initialRequests, startedAt);
@@ -358,6 +360,26 @@ function publishRequestActivity(
     options.onRequestActivity?.(activity);
   } catch {
     // Diagnostic logging must never interrupt the scan.
+  }
+}
+
+function publishCheckpointProgress(
+  options: ParallelSongScanOptions,
+  state: ParallelSongScanState,
+): void {
+  try {
+    options.onCheckpoint?.({
+      shards: state.shards.length,
+      shardsComplete: state.shards.filter((shard) => shard.done).length,
+      coveragePercent: timeCoveragePercent(state.startTime, state.endTime, state.shards),
+      pagesProcessed: state.pagesProcessed,
+      commentsInspected: state.commentsInspected,
+      totalComments: state.totalComments,
+      matches: state.matchCount,
+      requestsTotal: state.requestCount,
+    });
+  } catch {
+    // Status delivery must never interrupt the scan.
   }
 }
 

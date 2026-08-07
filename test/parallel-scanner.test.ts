@@ -116,7 +116,9 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   const client = new ParallelFakeClient();
   const config = await options(directory);
   const liveMatches: string[] = [];
+  const checkpoints: Array<{ shardsComplete: number; pagesProcessed: number; requestsTotal: number }> = [];
   config.onMatch = (comment) => liveMatches.push(comment.commentId);
+  config.onCheckpoint = (activity) => checkpoints.push(activity);
   const report = await runParallelSongScan([{
     name: "lane-1",
     client,
@@ -133,6 +135,7 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.equal(result.userId, "42");
   assert.equal(result.songId, "186016");
   assert.deepEqual(liveMatches, ["comment-75"]);
+  assert.ok(checkpoints.some((activity) => activity.shardsComplete === 2 && activity.pagesProcessed === 2 && activity.requestsTotal === 2));
 });
 
 test("continues an empty page when its descending cursor advances", async () => {

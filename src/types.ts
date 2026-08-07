@@ -66,6 +66,7 @@ export interface NcmClient {
     cookie?: string,
   ): Promise<SongCandidate[]>;
   getLikedSongs(uid: string, cookie?: string): Promise<SongCandidate[]>;
+  getSongInfos?(songIds: readonly string[]): Promise<SongInfo[]>;
   getSongComments(
     songId: string,
     limit: number,
@@ -135,8 +136,32 @@ export interface ParallelSongScanOptions {
   statePath: string;
   outputPath: string;
   onMatch?: (comment: FoundComment) => void;
+  onCheckpoint?: (activity: ParallelCheckpointActivity) => void;
   onRequestActivity?: (activity: ScanRequestActivity) => void;
   onSchedulerActivity?: (activity: ScanSchedulerActivity) => void;
+}
+
+export interface ParallelCheckpointActivity {
+  shards: number;
+  shardsComplete: number;
+  coveragePercent: number;
+  pagesProcessed: number;
+  commentsInspected: number;
+  totalComments?: number;
+  matches: number;
+  requestsTotal: number;
+}
+
+export interface ScanCheckpointActivity {
+  songs: number;
+  songsProcessed: number;
+  commentOffset: number;
+  matches: number;
+  requestsTotal: number;
+  pagesProcessed: number;
+  coverageComplete: boolean;
+  sourceErrors: string[];
+  blockedUntil?: string;
 }
 
 export interface ParallelSongScanReport {
@@ -229,6 +254,8 @@ export interface ScanOptions {
   fresh: boolean;
   dryRun: boolean;
   onMatch?: (comment: FoundComment) => void;
+  onCheckpoint?: (activity: ScanCheckpointActivity) => void;
+  onSongCatalog?: (songs: readonly SongCandidate[]) => void;
   onSongProgress?: (activity: SongScanActivity) => void;
   onRequestActivity?: (activity: ScanRequestActivity) => void;
   onSchedulerActivity?: (activity: ScanSchedulerActivity) => void;
@@ -237,6 +264,7 @@ export interface ScanOptions {
 export interface SongScanActivity {
   songId: string;
   songName?: string;
+  workerId?: string;
   pageInSong: number;
   commentsProcessed: number;
   totalComments?: number;
@@ -245,8 +273,10 @@ export interface SongScanActivity {
 export interface ScanRequestActivity {
   phase: "start" | "success" | "failure";
   lane: string;
+  workerId?: string;
   operation: "comment-page";
   songId: string;
+  songName?: string;
   page: number;
   shardId?: number;
   elapsedMs?: number;

@@ -163,22 +163,32 @@ export class EnhancedNcmClient implements NcmClient {
   }
 
   async getSongInfo(songId: string): Promise<SongInfo> {
+    const song = (await this.getSongInfos([songId]))[0];
+    if (!song) throw new ApiResponseError("song_detail returned no song", 502);
+    return song;
+  }
+
+  async getSongInfos(songIds: readonly string[]): Promise<SongInfo[]> {
+    const ids = [...new Set(songIds)].filter(Boolean);
+    if (ids.length === 0) return [];
     const body = await invoke("song_detail", () =>
-      api.song_detail({ ids: songId, ...this.requestConfig() }),
+      api.song_detail({ ids: ids.join(","), ...this.requestConfig() }),
     );
-    const song = object(array(body.songs)[0]);
-    const album = object(song.al ?? song.album);
-    const id = stringId(song.id);
-    if (!id) throw new ApiResponseError("song_detail returned no song", 502, body);
-    const artists = array(song.ar ?? song.artists)
-      .map((artist) => text(object(artist).name))
-      .filter((name): name is string => Boolean(name));
-    return {
-      id,
-      name: text(song.name),
-      artists,
-      publishTime: numberOrUndefined(album.publishTime ?? song.publishTime),
-    };
+    return array(body.songs).flatMap((raw) => {
+      const song = object(raw);
+      const album = object(song.al ?? song.album);
+      const id = stringId(song.id);
+      if (!id) return [];
+      const artists = array(song.ar ?? song.artists)
+        .map((artist) => text(object(artist).name))
+        .filter((name): name is string => Boolean(name));
+      return [{
+        id,
+        name: text(song.name),
+        artists,
+        publishTime: numberOrUndefined(album.publishTime ?? song.publishTime),
+      }];
+    });
   }
 
   async getUserCommentHistory(

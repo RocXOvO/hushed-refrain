@@ -412,8 +412,10 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   const config = await options(directory);
   config.source = "record";
   config.commentPageSize = 100;
-  const activities: Array<{ songId: string; pageInSong: number; commentsProcessed: number; totalComments?: number }> = [];
+  const activities: Array<{ songId: string; songName?: string; workerId?: string; pageInSong: number; commentsProcessed: number; totalComments?: number }> = [];
+  const requestActivities: Array<{ phase: string; songId?: string; songName?: string; workerId?: string }> = [];
   config.onSongProgress = (activity) => activities.push(activity);
+  config.onRequestActivity = (activity) => requestActivities.push(activity);
   const tracker = { active: 0, maxActive: 0, calls: [] as string[] };
   const songs: SongCandidate[] = Array.from({ length: 4 }, (_, index) => ({
     id: String(index + 1),
@@ -458,7 +460,202 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(tracker.calls.some((call) => call.startsWith("b:")));
   assert.deepEqual(new Set(activities.map((activity) => activity.songId)), new Set(songs.map((song) => song.id)));
   assert.ok(activities.every((activity) => activity.pageInSong === 1));
+  assert.ok(activities.every((activity) => activity.workerId?.includes(":")));
   assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
+  assert.ok(requestActivities.some((activity) => activity.phase === "start" && activity.songId === "3" && activity.songName === "song-3" && activity.workerId?.includes(":")));
+});
+
+test("hydrates unnamed liked songs in a batch when resuming an old pooled checkpoint", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-metadata-resume-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.cookie = "session-cookie";
+  config.dryRun = true;
+  const baseClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => [
+      { id: "2", sources: ["likes"], sourceRank: 1 },
+      { id: "3", sources: ["likes"], sourceRank: 2 },
+    ],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const initial = await runPooledCommentFinder([
+    { name: "lane-a", client: baseClient, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+  assert.equal(initial.status, "dry-run");
+  const oldState = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.ok(oldState.songs.every((song: SongCandidate) => !song.name));
+
+  const metadataBatches: string[][] = [];
+  const catalogs: SongCandidate[][] = [];
+  const metadataClient: NcmClient = {
+    ...baseClient,
+    getLikedSongs: async () => { throw new Error("resume should retain the checkpoint song list"); },
+    getSongInfos: async (songIds) => {
+      metadataBatches.push([...songIds]);
+      return songIds.map((id) => ({ id, name: `name-${id}`, artists: [`artist-${id}`] }));
+    },
+  };
+  config.onSongCatalog = (songs) => catalogs.push(songs.map((song) => ({ ...song })));
+
+  const resumed = await runPooledCommentFinder([
+    { name: "lane-a", client: metadataClient, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+
+  assert.equal(resumed.status, "dry-run");
+  assert.deepEqual(metadataBatches, [["2", "3"]]);
+  const hydratedState = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.deepEqual(hydratedState.songs.map((song: SongCandidate) => [song.id, song.name, song.artists]), [
+    ["2", "name-2", ["artist-2"]],
+    ["3", "name-3", ["artist-3"]],
+  ]);
+  assert.deepEqual(catalogs.at(-1)?.map((song) => song.name), ["name-2", "name-3"]);
+});
+
+test("keeps scanning with an ID fallback when optional song metadata fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-metadata-fallback-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.cookie = "session-cookie";
+  let commentCalls = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => [{ id: "4", sources: ["likes"] }],
+    getSongInfos: async () => { throw { status: 403 }; },
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      commentCalls += 1;
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(commentCalls, 1);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songs[0].id, "4");
+  assert.equal(state.songs[0].name, undefined);
+});
+
+test("serial source scanning also continues after optional song metadata is rate-limited", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-serial-metadata-fallback-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.cookie = "session-cookie";
+  let commentCalls = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => [{ id: "serial-song", sources: ["likes"] }],
+    getSongInfos: async () => { throw { status: 403 }; },
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      commentCalls += 1;
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runCommentFinder(client, governor(100), config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(commentCalls, 1);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songs[0].id, "serial-song");
+  assert.equal(state.songs[0].name, undefined);
+});
+
+test("checkpoints successful metadata batches when a later pooled batch fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-metadata-partial-checkpoint-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.cookie = "session-cookie";
+  config.dryRun = true;
+  const songs = Array.from({ length: 501 }, (_, index) => ({
+    id: String(index + 1),
+    sources: ["likes" as const],
+  }));
+  let metadataCalls = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => songs,
+    getSongInfos: async (songIds) => {
+      metadataCalls += 1;
+      if (metadataCalls === 2) throw new Error("second metadata batch failed");
+      return songIds.map((id) => ({ id, name: `name-${id}` }));
+    },
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(metadataCalls, 2);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songs.filter((song: SongCandidate) => Boolean(song.name)).length, 500);
+  assert.equal(state.songs[0].name, "name-1");
+  assert.equal(state.songs[500].name, undefined);
+});
+
+test("pooled metadata hydration skips a lane after its optional cooldown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-metadata-lane-session-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.cookie = "session-cookie";
+  config.dryRun = true;
+  const songs = Array.from({ length: 1_001 }, (_, index) => ({
+    id: String(index + 1),
+    sources: ["likes" as const],
+  }));
+  let blockedMetadataCalls = 0;
+  let healthyMetadataCalls = 0;
+  const baseClient: Omit<NcmClient, "getSongInfos"> = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => songs,
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const blockedClient: NcmClient = {
+    ...baseClient,
+    getSongInfos: async () => {
+      blockedMetadataCalls += 1;
+      throw { status: 429 };
+    },
+  };
+  const healthyClient: NcmClient = {
+    ...baseClient,
+    getSongInfos: async (songIds) => {
+      healthyMetadataCalls += 1;
+      return songIds.map((id) => ({ id, name: `name-${id}` }));
+    },
+  };
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-blocked", client: blockedClient, governor: governor(100) },
+    { name: "lane-healthy", client: healthyClient, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(blockedMetadataCalls, 1);
+  assert.equal(healthyMetadataCalls, 3);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songs.filter((song: SongCandidate) => Boolean(song.name)).length, 1_001);
 });
 
 test("pooled liked-song discovery stops after the first authentication failure", async () => {

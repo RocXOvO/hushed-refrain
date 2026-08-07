@@ -120,6 +120,81 @@ test("turns 403 into a persistent cooldown signal without retry", async () => {
   assert.equal(calls, 1);
 });
 
+test("does not latch an optional request cooldown onto later required work", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, fake.runtime);
+
+  await assert.rejects(
+    governor.executeBestEffort("optional-metadata", async () => { throw { status: 403 }; }),
+    CooldownRequired,
+  );
+  assert.equal(await governor.execute("required-comment", async () => "ok"), "ok");
+  assert.equal(governor.requestsUsed, 2);
+});
+
+test("does not latch an optional 429 cooldown onto later required work", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, fake.runtime);
+
+  await assert.rejects(
+    governor.executeBestEffort("optional-metadata", async () => { throw { status: 429 }; }),
+    CooldownRequired,
+  );
+  assert.equal(await governor.execute("required-comment", async () => "ok"), "ok");
+});
+
+test("best-effort work keeps retry, budget, and cancellation semantics", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 1,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 2,
+    retryBaseMs: 25,
+  }, fake.runtime);
+  let calls = 0;
+
+  assert.equal(await governor.executeBestEffort("optional-retry", async () => {
+    calls += 1;
+    if (calls === 1) throw { status: 500 };
+    return "ok";
+  }), "ok");
+  assert.equal(calls, 2);
+  assert.deepEqual(fake.sleeps, [25]);
+  await assert.rejects(
+    governor.execute("required-over-budget", async () => "never"),
+    RequestBudgetExhausted,
+  );
+
+  const cancelled = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, fake.runtime);
+  cancelled.cancel();
+  let cancelledCalls = 0;
+  await assert.rejects(
+    cancelled.executeBestEffort("cancelled-optional", async () => { cancelledCalls += 1; }),
+    RunCancelled,
+  );
+  assert.equal(cancelledCalls, 0);
+});
+
 test("turns 301 into a login requirement without retrying", async () => {
   const fake = fakeRuntime();
   const governor = new RequestGovernor({

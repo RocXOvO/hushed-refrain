@@ -32,7 +32,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /累计命中/);
   assert.match(pageText, /id="runtimeTimer"/);
   assert.match(pageText, /id="globalProgressContext"/);
-  assert.match(pageText, /id="songProgressBar"/);
+  assert.match(pageText, /id="taskPanelOpenButton"/);
+  assert.match(pageText, /id="taskExitLimit"[^>]*min="0"[^>]*max="32"/);
+  assert.match(pageText, /id="activeSongCount"/);
+  assert.match(pageText, /id="activeSongsList"/);
+  assert.doesNotMatch(pageText, /id="songProgressBar"/);
   assert.match(pageText, /主机保护/);
   assert.match(pageText, /允许本机直连/);
   assert.match(pageText, /id="logsPanel"/);
@@ -46,7 +50,6 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(app.status, 200);
   const appText = await app.text();
   assert.match(appText, /year:\s*"numeric"/);
-  assert.match(appText, /current\.totalComments/);
   assert.match(appText, /clockDuration/);
   assert.match(appText, /renderRuntimeTimer/);
   assert.match(appText, /proxyTransportMaxConcurrent/);
@@ -62,6 +65,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /syncTaskStartAvailability/);
   assert.match(appText, /activateNavigation/);
   assert.match(appText, /syncToolbarContext/);
+  assert.match(appText, /visibleResultOrder/);
+  assert.match(appText, /renderActiveSongs/);
+  assert.match(appText, /maxProxyLanes/);
+  assert.doesNotMatch(appText, /resultTimestamp/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
@@ -76,6 +83,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.navigation-rail/);
   assert.match(styleText, /body\.task-panel-collapsed/);
   assert.match(styleText, /body\.inspector-collapsed/);
+  assert.match(styleText, /transform 210ms/);
+  assert.match(styleText, /font-size:\s*16px/);
   assert.doesNotMatch(styleText, /backdrop-filter:/);
 
   const estimate = await fetch(`${base}/api/estimate?comments=500000`);
@@ -256,6 +265,14 @@ test("dashboard validates UID before starting a job", async (context) => {
   });
   assert.equal(oversizedPage.status, 400);
   assert.match(await oversizedPage.text(), /pageSize/);
+
+  const excessiveExitLimit = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: "42", source: "record", recordScope: "all", maxProxyLanes: 33 }),
+  });
+  assert.equal(excessiveExitLimit.status, 400);
+  assert.match(await excessiveExitLimit.text(), /maxProxyLanes/);
 
   const protectedDirect = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
     method: "POST",

@@ -60,6 +60,19 @@ export class RequestGovernor {
   }
 
   async execute<T>(label: string, request: () => Promise<T>): Promise<T> {
+    return this.executeWithPolicy(label, request, true);
+  }
+
+  /** Runs optional work through the same spacing/budget/cancellation path without latching its cooldown onto later required work. */
+  async executeBestEffort<T>(label: string, request: () => Promise<T>): Promise<T> {
+    return this.executeWithPolicy(label, request, false);
+  }
+
+  private async executeWithPolicy<T>(
+    label: string,
+    request: () => Promise<T>,
+    latchCooldown: boolean,
+  ): Promise<T> {
     let retry = 0;
     while (true) {
       this.throwIfUnavailable();
@@ -74,8 +87,10 @@ export class RequestGovernor {
         if (status === 301) throw new AuthenticationRequired();
         if (status === 403 || status === 429) {
           const cooldown = new CooldownRequired(status, this.options.forbiddenCooldownMs);
-          this.terminalError = cooldown;
-          this.wakeWaiters(cooldown);
+          if (latchCooldown) {
+            this.terminalError = cooldown;
+            this.wakeWaiters(cooldown);
+          }
           throw cooldown;
         }
 

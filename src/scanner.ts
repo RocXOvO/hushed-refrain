@@ -6,10 +6,15 @@ import {
 } from "./errors";
 import { RequestGovernor } from "./governor";
 import { LaneRecovery } from "./lane-recovery";
-import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-gate";
+import {
+  executeBestEffortProxyRequest,
+  executeProxyRequest,
+  type ProxyTransportGate,
+} from "./proxy-transport-gate";
 import { mergeCommentTotal } from "./progress";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { JsonlResultWriter } from "./results";
+import { hydrateMissingSongMetadata } from "./song-metadata";
 import { createTimeShards, SOURCE_SCAN_START_TIME, splitRemainingTimeShard } from "./time-shards";
 import { AsyncWorkQueue } from "./work-queue";
 import {
@@ -81,6 +86,7 @@ export async function runCommentFinder(
 
   const checkpoint = async (): Promise<void> => {
     state.requestCount = initialRequests + governor.requestsUsed;
+    publishCheckpointProgress(options, state);
     await saveState(options.statePath, state);
   };
 
@@ -162,6 +168,7 @@ export async function runPooledCommentFinder(
     if (!force && now - lastCheckpointAt < 350) return;
     lastCheckpointAt = now;
     state.requestCount = initialRequests + pooledRequestsUsed(lanes);
+    publishCheckpointProgress(options, state);
     const snapshot = structuredClone(state);
     checkpointTail = checkpointTail.then(() => saveState(options.statePath, snapshot));
     await checkpointTail;
@@ -170,6 +177,7 @@ export async function runPooledCommentFinder(
   try {
     state.strategy = "scan";
     state.strategyResolved = true;
+    let sourcesChanged = false;
     if (!state.sourcesLoaded) {
       const collected = await collectSongsPooled(lanes, options);
       state.sourceSongCount = collected.songs.length;
@@ -178,8 +186,11 @@ export async function runPooledCommentFinder(
       state.sourceErrors = collected.failures;
       state.sourcesLoaded = true;
       ensureSongProgress(state);
-      await checkpoint(true);
+      sourcesChanged = true;
     }
+    const hydratedSongs = await hydrateSongsFromPool(lanes, state.songs);
+    publishSongCatalog(options, state.songs);
+    if (sourcesChanged || hydratedSongs > 0) await checkpoint(true);
 
     ensureSongProgress(state);
     if (options.dryRun) {
@@ -260,7 +271,11 @@ export async function runPooledCommentFinder(
       return "reserved";
     };
 
-    const scanSongPage = async (lane: SourceScanLane, work: SourceScanWork): Promise<SourceScanWork[]> => {
+    const scanSongPage = async (
+      lane: SourceScanLane,
+      workerId: string,
+      work: SourceScanWork,
+    ): Promise<SourceScanWork[]> => {
       const { songIndex } = work;
       const song = state.songs[songIndex];
       const progress = state.songProgress![songIndex];
@@ -284,8 +299,10 @@ export async function runPooledCommentFinder(
       const requestStartedAt = Date.now();
       const requestActivity = {
         lane: lane.name,
+        workerId,
         operation: "comment-page" as const,
         songId: song.id,
+        songName: song.name,
         page: requestedPageNo,
         shardId: shard?.id,
       };
@@ -299,6 +316,7 @@ export async function runPooledCommentFinder(
             progress.pageInSong + 1,
             progress.commentOffset,
             progress.totalComments,
+            workerId,
           );
           return lane.client.getSongCommentsByCursor(
             song.id,
@@ -409,6 +427,7 @@ export async function runPooledCommentFinder(
         progress.pageInSong,
         progress.commentOffset,
         progress.totalComments,
+        workerId,
       );
       await checkpoint();
       if (added > 0 && options.stopAfterFirst) {
@@ -418,7 +437,8 @@ export async function runPooledCommentFinder(
       return stopRequested || progress.done ? [] : nextWork;
     };
 
-    const runWorker = async (lane: SourceScanLane): Promise<void> => {
+    const runWorker = async (lane: SourceScanLane, workerIndex: number): Promise<void> => {
+      const workerId = `${lane.name}:${workerIndex + 1}`;
       const recovery = laneRecovery.get(lane.name)!;
       while (!stopRequested && !blockedLanes.has(lane.name)) {
         await recovery.waitUntilReady();
@@ -431,7 +451,7 @@ export async function runPooledCommentFinder(
             requeue = stopRequested ? [] : [work];
             return;
           }
-          requeue = await scanSongPage(lane, work);
+          requeue = await scanSongPage(lane, workerId, work);
           recovery.recordSuccess();
         } catch (error) {
           if (error instanceof CooldownRequired) {
@@ -468,7 +488,7 @@ export async function runPooledCommentFinder(
     };
 
     await Promise.all(lanes.flatMap((lane) =>
-      Array.from({ length: options.workersPerLane }, () => runWorker(lane))
+      Array.from({ length: options.workersPerLane }, (_, workerIndex) => runWorker(lane, workerIndex))
     ));
     syncSongCursor(state);
     state.finished = state.songProgress!.every((progress) => progress.done);
@@ -594,6 +614,7 @@ async function runSongScan(
   checkpoint: () => Promise<void>,
   initialRequests: number,
 ): Promise<RunReport> {
+  let sourcesChanged = false;
   if (!state.sourcesLoaded) {
     const collected = await collectSongs(client, governor, options);
     const songs = collected.songs;
@@ -603,8 +624,11 @@ async function runSongScan(
     state.sourceErrors = collected.failures;
     state.sourcesLoaded = true;
     ensureSongProgress(state);
-    await checkpoint();
+    sourcesChanged = true;
   }
+  const hydratedSongs = await hydrateSongsFromClient(client, governor, state.songs);
+  publishSongCatalog(options, state.songs);
+  if (sourcesChanged || hydratedSongs > 0) await checkpoint();
 
   ensureSongProgress(state);
   syncSongCursor(state);
@@ -813,6 +837,70 @@ async function requestFromPool<T>(
     }
   }
   throw lastError ?? new Error(`${label} failed on every proxy lane.`);
+}
+
+async function requestBestEffortFromPool<T>(
+  lanes: SourceScanLane[],
+  label: string,
+  request: (client: NcmClient) => Promise<T>,
+  session?: { nextLaneIndex: number; cooldownLanes: Set<string> },
+): Promise<T> {
+  let lastError: unknown;
+  for (let offset = 0; offset < lanes.length; offset += 1) {
+    const laneIndex = ((session?.nextLaneIndex ?? 0) + offset) % lanes.length;
+    const lane = lanes[laneIndex];
+    if (session?.cooldownLanes.has(lane.name)) continue;
+    try {
+      const value = await executeBestEffortProxyRequest(lane, label, () => request(lane.client));
+      if (session) session.nextLaneIndex = (laneIndex + 1) % lanes.length;
+      return value;
+    } catch (error) {
+      if (error instanceof RunCancelled) throw error;
+      if (error instanceof CooldownRequired) session?.cooldownLanes.add(lane.name);
+      lastError = error;
+    }
+  }
+  throw lastError ?? new Error(`${label} failed on every proxy lane.`);
+}
+
+async function hydrateSongsFromClient(
+  client: NcmClient,
+  governor: RequestGovernor,
+  songs: SongCandidate[],
+): Promise<number> {
+  if (!client.getSongInfos) return 0;
+  const namedBefore = songs.filter((song) => Boolean(song.name)).length;
+  try {
+    return await hydrateMissingSongMetadata(songs, (songIds) =>
+      governor.executeBestEffort("song_detail_batch", () => client.getSongInfos!(songIds))
+    );
+  } catch (error) {
+    if (error instanceof RunCancelled) throw error;
+    return songs.filter((song) => Boolean(song.name)).length - namedBefore;
+  }
+}
+
+async function hydrateSongsFromPool(
+  lanes: SourceScanLane[],
+  songs: SongCandidate[],
+): Promise<number> {
+  const metadataLanes = lanes.filter((lane) => Boolean(lane.client.getSongInfos));
+  if (metadataLanes.length === 0) return 0;
+  const namedBefore = songs.filter((song) => Boolean(song.name)).length;
+  const session = { nextLaneIndex: 0, cooldownLanes: new Set<string>() };
+  try {
+    return await hydrateMissingSongMetadata(songs, (songIds) =>
+      requestBestEffortFromPool(
+        metadataLanes,
+        "song_detail_batch",
+        (client) => client.getSongInfos!(songIds),
+        session,
+      )
+    );
+  } catch (error) {
+    if (error instanceof RunCancelled) throw error;
+    return songs.filter((song) => Boolean(song.name)).length - namedBefore;
+  }
 }
 
 export function mergeSongs(songs: SongCandidate[]): SongCandidate[] {
@@ -1042,17 +1130,45 @@ function publishSongProgress(
   pageInSong: number,
   commentsProcessed: number,
   totalComments: number | undefined,
+  workerId?: string,
 ): void {
   try {
     options.onSongProgress?.({
       songId: song.id,
       songName: song.name,
+      workerId,
       pageInSong,
       commentsProcessed,
       totalComments,
     });
   } catch {
     // Status delivery must never interrupt the scan.
+  }
+}
+
+function publishCheckpointProgress(options: ScanOptions, state: ScanState): void {
+  try {
+    options.onCheckpoint?.({
+      songs: state.songs.length,
+      songsProcessed: completedSongs(state),
+      commentOffset: state.commentOffset,
+      matches: state.matchCount,
+      requestsTotal: state.requestCount,
+      pagesProcessed: state.pagesProcessed ?? 0,
+      coverageComplete: state.coverageComplete,
+      sourceErrors: [...state.sourceErrors],
+      blockedUntil: state.blockedUntil,
+    });
+  } catch {
+    // Status delivery must never interrupt the scan.
+  }
+}
+
+function publishSongCatalog(options: ScanOptions, songs: readonly SongCandidate[]): void {
+  try {
+    options.onSongCatalog?.(songs);
+  } catch {
+    // Optional UI metadata must never interrupt scanning.
   }
 }
 

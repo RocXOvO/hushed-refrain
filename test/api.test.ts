@@ -130,3 +130,34 @@ test("uses comment_new time cursors without a login cookie", async () => {
     mutable.comment_new = original;
   }
 });
+
+test("loads song metadata in one batch for liked-song names", async () => {
+  const mutable = upstream as unknown as {
+    song_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.song_detail;
+  let captured: Record<string, unknown> | undefined;
+  mutable.song_detail = async (params) => {
+    captured = params;
+    return {
+      status: 200,
+      body: {
+        code: 200,
+        songs: [
+          { id: 11, name: "first", ar: [{ name: "artist-a" }], al: { publishTime: 1 } },
+          { id: 12, name: "second", ar: [{ name: "artist-b" }], al: { publishTime: 2 } },
+        ],
+      },
+    };
+  };
+
+  try {
+    const client = new EnhancedNcmClient({ proxy: "http://127.0.0.1:7890/" });
+    const songs = await client.getSongInfos(["11", "12", "11"]);
+    assert.equal(captured?.ids, "11,12");
+    assert.equal(captured?.proxy, "http://127.0.0.1:7890/");
+    assert.deepEqual(songs.map((song) => [song.id, song.name]), [["11", "first"], ["12", "second"]]);
+  } finally {
+    mutable.song_detail = original;
+  }
+});
