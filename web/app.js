@@ -144,7 +144,9 @@ function renderSource(job) {
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
   el.workLabel.textContent = "已扫页面"; el.work.textContent = fmt(job.pagesProcessed); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
   const percent = job.songs ? Math.min(100, Math.round(job.songsProcessed / job.songs * 100)) : 0;
-  const current = job.currentSong ? `${job.currentSong.name || "未命名歌曲"} · ${job.currentSong.id}` : "尚未读取歌曲";
+  const current = job.currentSong
+    ? `${job.currentSong.name || "未命名歌曲"} · ${job.currentSong.id}${job.currentSong.pageInSong ? ` · 第 ${fmt(job.currentSong.pageInSong)} 页` : ""}`
+    : "尚未读取歌曲";
   const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程`;
   progress(percent, `${current} · ${topology}`, [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "));
   el.stop.disabled = !active; el.sourceStart.disabled = active; el.dryRun.disabled = active;
@@ -697,7 +699,7 @@ async function setupDesktopWindowControls() {
 function setBusy(value) { el.parallelStart.disabled = value; el.sourceStart.disabled = value; el.dryRun.disabled = value; }
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
-function date(value) { return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
+function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
 function dateOnly(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value)); }
 function duration(seconds) { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [days ? `${days}天` : "", hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", rest && !days ? `${rest}秒` : ""].filter(Boolean).join(" ") || "0秒"; }
 function fileSize(bytes) { return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`; }

@@ -28,6 +28,12 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /name="pageSize"[^>]*max="2000"[^>]*value="1000"/);
   assert.doesNotMatch(pageText, /首条命中后/);
 
+  const app = await fetch(`${base}/app.js`);
+  assert.equal(app.status, 200);
+  const appText = await app.text();
+  assert.match(appText, /year:\s*"numeric"/);
+  assert.match(appText, /currentSong\.pageInSong/);
+
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
   assert.match(icon.headers.get("content-type") ?? "", /image\/svg\+xml/);

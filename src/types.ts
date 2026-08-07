@@ -223,6 +223,13 @@ export interface ScanOptions {
   fresh: boolean;
   dryRun: boolean;
   onMatch?: (comment: FoundComment) => void;
+  onSongProgress?: (activity: SongScanActivity) => void;
+}
+
+export interface SongScanActivity {
+  songId: string;
+  songName?: string;
+  pageInSong: number;
 }
 
 export interface RunReport {

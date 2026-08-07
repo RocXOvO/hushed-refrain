@@ -206,14 +206,15 @@ export async function runPooledCommentFinder(
         const requestedPageNo = progress.commentPageNo!;
         let page;
         try {
-          page = await lane.governor.execute(`comment_new:${song.id}`, () =>
-            lane.client.getSongCommentsByCursor(
+          page = await lane.governor.execute(`comment_new:${song.id}`, () => {
+            publishSongProgress(options, song, requestedPageNo);
+            return lane.client.getSongCommentsByCursor(
               song.id,
               options.commentPageSize,
               requestedPageNo,
               requestedCursor,
-            ),
-          );
+            );
+          });
         } catch (error) {
           if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
           throw new SourceLaneFailure(lane.name, error);
@@ -462,14 +463,15 @@ async function runSongScan(
 
     const requestedCursor = songProgress.commentCursor!;
     const requestedPageNo = songProgress.commentPageNo!;
-    const page = await governor.execute(`comment_new:${song.id}`, () =>
-      client.getSongCommentsByCursor(
+    const page = await governor.execute(`comment_new:${song.id}`, () => {
+      publishSongProgress(options, song, requestedPageNo);
+      return client.getSongCommentsByCursor(
         song.id,
         options.commentPageSize,
         requestedPageNo,
         requestedCursor,
-      ),
-    );
+      );
+    });
     const nextCursor = nextCommentCursor(page.hasMore, page.nextCursor, requestedCursor, song.id);
 
     const matches = page.comments
@@ -740,6 +742,14 @@ function isPauseSignal(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
+}
+
+function publishSongProgress(options: ScanOptions, song: SongCandidate, pageInSong: number): void {
+  try {
+    options.onSongProgress?.({ songId: song.id, songName: song.name, pageInSong });
+  } catch {
+    // Status delivery must never interrupt the scan.
+  }
 }
 
 function nextCommentCursor(

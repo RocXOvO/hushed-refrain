@@ -12,7 +12,7 @@ The app finds NetEase Cloud Music comments authored by a numeric user UID. It ha
 
 There is no database. Durable scan state is JSON; matches are append-only JSONL. Generated/runtime directories (`dist/`, `release/`, `.ncm/`, `data/`, `tmp/`) are ignored and must not be committed.
 
-The code version is authoritative in `package.json` and `package-lock.json` (currently `0.7.0`). GitHub's latest Release is external state: when publishing or evaluating an upgrade, verify its tag, commit, and assets in real time rather than treating this file as a release-status source.
+The code version is authoritative in `package.json` and `package-lock.json` (currently `0.7.1`). GitHub's latest Release is external state: when publishing or evaluating an upgrade, verify its tag, commit, and assets in real time rather than treating this file as a release-status source.
 
 ## Architecture and data flow
 
@@ -34,6 +34,8 @@ Two scan engines exist and must not be conflated:
 Common result flow:
 
 `EnhancedNcmClient` -> scanner -> `JsonlResultWriter` -> JSONL on disk -> optional `onMatch` callback -> server SSE -> `web/app.js` live table.
+
+During a user-source scan, every worker reports its latest song/page through `onSongProgress`; `JobManager` keeps the most recently active song in its in-memory snapshot so dashboard polling does not confuse the first unfinished checkpoint entry with the song currently being requested.
 
 The writer serializes concurrent appends and de-duplicates by `commentId`, including IDs already on disk. SSE/UI failure must never interrupt persistence.
 

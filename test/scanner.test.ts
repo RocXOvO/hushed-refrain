@@ -409,6 +409,8 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   const config = await options(directory);
   config.source = "record";
   config.commentPageSize = 100;
+  const activities: Array<{ songId: string; pageInSong: number }> = [];
+  config.onSongProgress = ({ songId, pageInSong }) => activities.push({ songId, pageInSong });
   const tracker = { active: 0, maxActive: 0, calls: [] as string[] };
   const songs: SongCandidate[] = Array.from({ length: 4 }, (_, index) => ({
     id: String(index + 1),
@@ -450,6 +452,8 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.equal(tracker.calls.length, 4);
   assert.ok(tracker.calls.some((call) => call.startsWith("a:")));
   assert.ok(tracker.calls.some((call) => call.startsWith("b:")));
+  assert.deepEqual(new Set(activities.map((activity) => activity.songId)), new Set(songs.map((song) => song.id)));
+  assert.ok(activities.every((activity) => activity.pageInSong === 1));
 });
 
 test("pooled source scan uses multiple workers on one proxy lane", async () => {

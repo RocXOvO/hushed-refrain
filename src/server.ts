@@ -72,7 +72,7 @@ interface JobSnapshot {
   songs: number;
   songsProcessed: number;
   commentOffset: number;
-  currentSong?: { id: string; name?: string };
+  currentSong?: { id: string; name?: string; pageInSong?: number };
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
@@ -224,6 +224,7 @@ class JobManager {
         forbiddenCooldownMs,
       }),
     }));
+    const activeId = randomUUID();
     const options: ScanOptions = {
       uid,
       strategy: "scan",
@@ -240,13 +241,23 @@ class JobManager {
       fresh: bool(input.fresh),
       dryRun: bool(input.dryRun),
       onMatch: (comment) => this.publishMatch(comment),
+      onSongProgress: (activity) => {
+        if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
+        this.snapshotValue = {
+          ...this.snapshotValue,
+          currentSong: {
+            id: activity.songId,
+            name: activity.songName,
+            pageInSong: activity.pageInSong,
+          },
+        };
+      },
     };
     this.snapshotValue = {
-      ...emptySnapshot(), id: randomUUID(), status: "running", uid, source, recordScope,
+      ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
       startedAt: new Date().toISOString(), proxyEnabled: poolEntries.length > 0 || Boolean(proxy),
       lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
     };
-    const activeId = this.snapshotValue.id;
     void runPooledCommentFinder(this.lanes, { ...options, workersPerLane, requestBudget })
       .then((report) => {
         if (this.snapshotValue.id !== activeId) return;
@@ -257,6 +268,7 @@ class JobManager {
           pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
           workers: report.workers ?? this.snapshotValue.workers,
           sourceErrors: report.sourceErrors, blockedUntil: report.resumeAfter, note: report.note,
+          currentSong: undefined,
         };
       })
       .catch((error) => this.fail(activeId, error))
@@ -278,11 +290,19 @@ class JobManager {
         const progress = state.songProgress ?? [];
         const currentIndex = progress.length > 0 ? progress.findIndex((item) => !item.done) : state.songIndex;
         const current = currentIndex < 0 ? undefined : state.songs[currentIndex];
+        const inferredCurrent = current ? {
+          id: current.id,
+          name: current.name,
+          pageInSong: (progress[currentIndex]?.pageInSong ?? state.pageInSong) + 1,
+        } : undefined;
+        const activeCurrent = ["running", "stopping"].includes(this.snapshotValue.status)
+          ? this.snapshotValue.currentSong
+          : undefined;
         this.snapshotValue = {
           ...this.snapshotValue, songs: state.songs.length,
           songsProcessed: progress.length > 0 ? progress.filter((item) => item.done).length : state.songIndex,
           commentOffset: currentIndex < 0 ? 0 : progress[currentIndex]?.commentOffset ?? state.commentOffset,
-          currentSong: current ? { id: current.id, name: current.name } : undefined,
+          currentSong: activeCurrent ?? inferredCurrent,
           matches: state.matchCount, requestsTotal: state.requestCount,
           pagesProcessed: state.pagesProcessed ?? 0,
           coverageComplete: state.coverageComplete, sourceErrors: state.sourceErrors,
