@@ -130,6 +130,30 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(state.songProgress[0].totalComments, 3);
 });
 
+test("a fresh source checkpoint counts a rediscovered JSONL match without appending it again", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-existing-output-"));
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", name: "one", sources: ["record"] }];
+  client.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "existing", userId: "42", content: "already persisted" }],
+    hasMore: false,
+  });
+  const config = await options(directory);
+  config.source = "record";
+  config.fresh = true;
+  config.stopAfterFirst = true;
+  await writeFile(config.outputPath, `${JSON.stringify({ commentId: "existing" })}\n`, "utf8");
+
+  const report = await runCommentFinder(client, governor(20), config);
+
+  assert.equal(report.status, "paused");
+  assert.equal(report.matches, 1);
+  assert.equal((await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/).length, 1);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.deepEqual(state.seenCommentIds, ["existing"]);
+  assert.equal(state.matchCount, 1);
+});
+
 test("pauses on budget and resumes at the exact comment cursor", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-resume-"));
   const client = new FakeClient();

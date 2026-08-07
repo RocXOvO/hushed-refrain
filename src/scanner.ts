@@ -5,6 +5,7 @@ import {
   RunCancelled,
 } from "./errors";
 import { RequestGovernor } from "./governor";
+import { CheckpointCoordinator } from "./checkpoint-coordinator";
 import { LaneRecovery } from "./lane-recovery";
 import { LaneAllocator } from "./lane-allocator";
 import {
@@ -14,6 +15,7 @@ import {
 } from "./proxy-transport-gate";
 import { mergeCommentTotal } from "./progress";
 import { nextDescendingCursor } from "./cursor-pagination";
+import { ResultAccumulator } from "./result-accumulator";
 import { JsonlResultWriter } from "./results";
 import { hydrateMissingSongMetadata } from "./song-metadata";
 import { createTimeShards, SOURCE_SCAN_START_TIME, splitRemainingTimeShard } from "./time-shards";
@@ -74,7 +76,6 @@ export async function runCommentFinder(
   const initialRequests = loadedState?.requestCount ?? 0;
   const provisionalStrategy = options.strategy === "history" ? "history" : "scan";
   const state = loadedState ?? createState(options, provisionalStrategy);
-  const seenCommentIds = new Set(state.seenCommentIds);
 
   if (state.blockedUntil) {
     const resumeAt = Date.parse(state.blockedUntil);
@@ -89,6 +90,7 @@ export async function runCommentFinder(
 
   const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
   await writer.initialize();
+  const results = new ResultAccumulator(writer, state);
 
   const checkpoint = async (): Promise<void> => {
     state.requestCount = initialRequests + governor.requestsUsed;
@@ -112,10 +114,10 @@ export async function runCommentFinder(
       if (!options.cookie) {
         throw new Error("The history strategy requires a logged-in cookie.");
       }
-      return await runHistory(client, governor, options, state, writer, seenCommentIds, checkpoint, initialRequests);
+      return await runHistory(client, governor, options, state, results, checkpoint, initialRequests);
     }
 
-    return await runSongScan(client, governor, options, state, writer, seenCommentIds, checkpoint, initialRequests);
+    return await runSongScan(client, governor, options, state, results, checkpoint, initialRequests);
   } catch (error) {
     if (error instanceof CooldownRequired) {
       state.blockedUntil = new Date(Date.now() + error.retryAfterMs).toISOString();
@@ -152,9 +154,9 @@ export async function runPooledCommentFinder(
   if (loadedState) assertCompatibleState(loadedState, options);
   const state = loadedState ?? createState(options, "scan");
   const initialRequests = state.requestCount;
-  const seenCommentIds = new Set(state.seenCommentIds);
   const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
   await writer.initialize();
+  const results = new ResultAccumulator(writer, state);
 
   if (state.blockedUntil) {
     const resumeAt = Date.parse(state.blockedUntil);
@@ -167,48 +169,17 @@ export async function runPooledCommentFinder(
     delete state.blockedUntil;
   }
 
-  let checkpointTail = Promise.resolve();
-  let lastCheckpointAt = 0;
-  let lastLiveCheckpointAt = 0;
-  let liveCheckpointTimer: NodeJS.Timeout | undefined;
-  let liveCheckpointDirty = false;
-  const publishLiveCheckpoint = (force: boolean): void => {
-    const now = Date.now();
-    if (force) {
-      if (liveCheckpointTimer) clearTimeout(liveCheckpointTimer);
-      liveCheckpointTimer = undefined;
-      liveCheckpointDirty = false;
-      lastLiveCheckpointAt = now;
-      publishCheckpointProgress(options, state);
-      return;
-    }
-    const remaining = 200 - (now - lastLiveCheckpointAt);
-    if (remaining <= 0 && !liveCheckpointTimer) {
-      lastLiveCheckpointAt = now;
-      publishCheckpointProgress(options, state);
-      return;
-    }
-    liveCheckpointDirty = true;
-    if (liveCheckpointTimer) return;
-    liveCheckpointTimer = setTimeout(() => {
-      liveCheckpointTimer = undefined;
-      if (!liveCheckpointDirty) return;
-      liveCheckpointDirty = false;
-      lastLiveCheckpointAt = Date.now();
-      publishCheckpointProgress(options, state);
-    }, Math.max(1, remaining));
-    liveCheckpointTimer.unref?.();
-  };
-  const checkpoint = async (force = false): Promise<void> => {
-    state.requestCount = initialRequests + pooledRequestsUsed(lanes);
-    const now = Date.now();
-    publishLiveCheckpoint(force);
-    if (!force && now - lastCheckpointAt < 350) return;
-    lastCheckpointAt = now;
-    const snapshot = structuredClone(state);
-    checkpointTail = checkpointTail.then(() => saveState(options.statePath, snapshot));
-    await checkpointTail;
-  };
+  const checkpointCoordinator = new CheckpointCoordinator({
+    state: () => state,
+    reconcile: () => {
+      state.requestCount = initialRequests + pooledRequestsUsed(lanes);
+    },
+    publish: () => publishCheckpointProgress(options, state),
+    persist: (snapshot) => saveState(options.statePath, snapshot),
+    liveIntervalMs: 200,
+    persistIntervalMs: 350,
+  });
+  const checkpoint = (force = false): Promise<void> => checkpointCoordinator.checkpoint(force);
 
   try {
     state.strategy = "scan";
@@ -491,7 +462,7 @@ export async function runPooledCommentFinder(
           route: "song-comments",
           capturedAt: new Date().toISOString(),
       }));
-      const added = await appendMatches(writer, state, seenCommentIds, matches);
+      const added = await appendMatches(results, matches);
       let nextWork: SourceScanWork[] = [];
       const pageCapReached = options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong;
       if (shard) {
@@ -684,6 +655,8 @@ export async function runPooledCommentFinder(
     }
     await checkpoint(true);
     throw error;
+  } finally {
+    checkpointCoordinator.dispose();
   }
 }
 
@@ -707,8 +680,7 @@ async function runHistory(
   governor: RequestGovernor,
   options: ScanOptions,
   state: ScanState,
-  writer: JsonlResultWriter,
-  seenCommentIds: Set<string>,
+  results: ResultAccumulator,
   checkpoint: () => Promise<void>,
   initialRequests: number,
 ): Promise<RunReport> {
@@ -723,7 +695,7 @@ async function runHistory(
     );
 
     const matches = page.comments.filter((comment) => comment.userId === options.uid);
-    const added = await appendMatches(writer, state, seenCommentIds, matches.map((comment) => ({
+    const added = await appendMatches(results, matches.map((comment) => ({
       ...comment,
       route: "user-history" as const,
       capturedAt: new Date().toISOString(),
@@ -756,8 +728,7 @@ async function runSongScan(
   governor: RequestGovernor,
   options: ScanOptions,
   state: ScanState,
-  writer: JsonlResultWriter,
-  seenCommentIds: Set<string>,
+  results: ResultAccumulator,
   checkpoint: () => Promise<void>,
   initialRequests: number,
 ): Promise<RunReport> {
@@ -851,7 +822,7 @@ async function runSongScan(
         route: "song-comments",
         capturedAt: new Date().toISOString(),
       }));
-    const added = await appendMatches(writer, state, seenCommentIds, matches);
+    const added = await appendMatches(results, matches);
 
     songProgress.pageInSong += 1;
     songProgress.commentOffset += scannedComments.length;
@@ -1104,22 +1075,10 @@ export function mergeSongs(songs: SongCandidate[]): SongCandidate[] {
 }
 
 async function appendMatches(
-  writer: JsonlResultWriter,
-  state: ScanState,
-  seen: Set<string>,
+  results: ResultAccumulator,
   matches: FoundComment[],
 ): Promise<number> {
-  let added = 0;
-  for (const match of matches) {
-    if (seen.has(match.commentId) || writer.has(match.commentId)) continue;
-    if (await writer.append(match)) {
-      state.seenCommentIds.push(match.commentId);
-      seen.add(match.commentId);
-      state.matchCount += 1;
-      added += 1;
-    }
-  }
-  return added;
+  return results.recordMany(matches);
 }
 
 function advanceSong(state: ScanState): void {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -194,15 +194,15 @@ test("trailing-publishes a parallel page burst while the next request is still r
   let pageCalls = 0;
   let thirdPageFinished = false;
   client.getSongCommentsByCursor = async (...args) => {
-    pageCalls += 1;
-    if (pageCalls === 3) await new Promise((resolve) => setTimeout(resolve, 400));
+    const call = ++pageCalls;
+    if (call === 3) await new Promise((resolve) => setTimeout(resolve, 400));
     const page = await getPage(...args);
-    if (pageCalls === 3) thirdPageFinished = true;
+    if (call === 3) thirdPageFinished = true;
     return page;
   };
   const config = await options(directory);
-  config.shardCount = 4;
-  config.workersPerLane = 4;
+  config.shardCount = 3;
+  config.workersPerLane = 3;
   const pages: number[] = [];
   let sawBurstBeforeThirdFinished = false;
   config.onCheckpoint = (activity) => {
@@ -217,7 +217,7 @@ test("trailing-publishes a parallel page burst while the next request is still r
   }], config);
 
   assert.equal(sawBurstBeforeThirdFinished, true);
-  assert.equal(pages.at(-1), 4);
+  assert.equal(pages.at(-1), 3);
 });
 
 test("hard-caps parallel worker loops while rotating across every selected lane", async () => {
@@ -428,6 +428,30 @@ test("stops after one match while concurrent pages are in flight", async () => {
   assert.equal(report.matches, 1);
   const lines = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/);
   assert.equal(lines.length, 1);
+});
+
+test("a fresh parallel checkpoint counts a rediscovered JSONL match without appending it again", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-existing-output-"));
+  const client = new ParallelFakeClient();
+  const config = await options(directory);
+  config.fresh = true;
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  config.stopAfterFirst = true;
+  await writeFile(config.outputPath, `${JSON.stringify({ commentId: "comment-75" })}\n`, "utf8");
+
+  const report = await runParallelSongScan([{
+    name: "lane-1",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "matched");
+  assert.equal(report.matches, 1);
+  assert.equal((await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/).length, 1);
+  const state = await loadParallelState(config.statePath);
+  assert.deepEqual(state?.seenCommentIds, ["comment-75"]);
+  assert.equal(state?.matchCount, 1);
 });
 
 test("requeues a shard when one proxy lane fails", async () => {
