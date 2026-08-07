@@ -33,6 +33,8 @@ import type {
   SongCandidate,
 } from "./types";
 
+const MAX_CONSECUTIVE_LANE_FAILURES = 5;
+
 export interface SourceScanLane {
   name: string;
   client: NcmClient;
@@ -204,7 +206,9 @@ export async function runPooledCommentFinder(
       prepareSourceWork(state),
     );
     const blockedLanes = new Map<string, number>();
+    const unavailableLanes = new Set<string>();
     const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
+    const activeLaneRequests = new Map(lanes.map((lane) => [lane.name, 0]));
     const reservedSongPages = new Map(
       state.songProgress!.map((progress, index) => [index, progress.pageInSong]),
     );
@@ -215,15 +219,35 @@ export async function runPooledCommentFinder(
     let cancelled = false;
     let matched = false;
     let fatalError: unknown;
+    const allLanesUnavailable = (): boolean => lanes.every((lane) =>
+      blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)
+    );
 
     const stopScheduling = (): void => {
       stopRequested = true;
+      for (const recovery of laneRecovery.values()) recovery.cancel();
       queue.stop();
       for (const waiters of songPermitWaiters.values()) {
         for (const resolveWaiter of waiters) resolveWaiter();
         waiters.clear();
       }
     };
+    const maybeStopAfterLaneRequests = (): void => {
+      if (
+        !stopRequested &&
+        allLanesUnavailable() &&
+        [...activeLaneRequests.values()].every((count) => count === 0)
+      ) stopScheduling();
+    };
+    const abortListener = (): void => {
+      cancelled = true;
+      stopScheduling();
+    };
+    options.signal?.addEventListener("abort", abortListener, { once: true });
+    if (options.signal?.aborted) abortListener();
+    void queue.whenClosed().then(() => {
+      for (const recovery of laneRecovery.values()) recovery.cancel();
+    });
 
     const notifySongPermit = (songIndex: number): void => {
       const waiters = songPermitWaiters.get(songIndex);
@@ -440,33 +464,38 @@ export async function runPooledCommentFinder(
     const runWorker = async (lane: SourceScanLane, workerIndex: number): Promise<void> => {
       const workerId = `${lane.name}:${workerIndex + 1}`;
       const recovery = laneRecovery.get(lane.name)!;
-      while (!stopRequested && !blockedLanes.has(lane.name)) {
+      while (!stopRequested && !blockedLanes.has(lane.name) && !unavailableLanes.has(lane.name)) {
         await recovery.waitUntilReady();
-        if (stopRequested || blockedLanes.has(lane.name)) return;
+        if (stopRequested || queue.isClosed() || blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) return;
         const work = await queue.take();
         if (work === undefined) return;
         let requeue: SourceScanWork[] = [];
+        let laneRequestActive = false;
         try {
-          if (blockedLanes.has(lane.name)) {
+          if (blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) {
             requeue = stopRequested ? [] : [work];
             return;
           }
+          laneRequestActive = true;
+          activeLaneRequests.set(lane.name, (activeLaneRequests.get(lane.name) ?? 0) + 1);
           requeue = await scanSongPage(lane, workerId, work);
           recovery.recordSuccess();
+          unavailableLanes.delete(lane.name);
         } catch (error) {
           if (error instanceof CooldownRequired) {
             blockedLanes.set(lane.name, error.retryAfterMs);
+            unavailableLanes.delete(lane.name);
             requeue = state.songProgress![work.songIndex].done ? [] : [work];
-            if (blockedLanes.size === lanes.length) {
-              requeue = [];
-              stopScheduling();
-            }
             return;
           }
           if (error instanceof SourceLaneFailure) {
             recovery.recordFailure();
             requeue = state.songProgress![work.songIndex].done ? [] : [work];
-            return;
+            if (recovery.failureCount >= MAX_CONSECUTIVE_LANE_FAILURES) {
+              if (!blockedLanes.has(lane.name)) unavailableLanes.add(lane.name);
+              return;
+            }
+            continue;
           }
           if (error instanceof RequestBudgetExhausted) {
             budgetReached = true;
@@ -482,14 +511,23 @@ export async function runPooledCommentFinder(
           stopScheduling();
           return;
         } finally {
+          if (laneRequestActive) {
+            activeLaneRequests.set(lane.name, Math.max(0, (activeLaneRequests.get(lane.name) ?? 1) - 1));
+          }
+          maybeStopAfterLaneRequests();
+          if (stopRequested) requeue = [];
           queue.complete(requeue.length > 0 ? requeue : undefined);
         }
       }
     };
 
-    await Promise.all(lanes.flatMap((lane) =>
-      Array.from({ length: options.workersPerLane }, (_, workerIndex) => runWorker(lane, workerIndex))
-    ));
+    try {
+      await Promise.all(lanes.flatMap((lane) =>
+        Array.from({ length: options.workersPerLane }, (_, workerIndex) => runWorker(lane, workerIndex))
+      ));
+    } finally {
+      options.signal?.removeEventListener("abort", abortListener);
+    }
     syncSongCursor(state);
     state.finished = state.songProgress!.every((progress) => progress.done);
     state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0;
@@ -513,6 +551,7 @@ export async function runPooledCommentFinder(
       budgetReached ? `本轮已达到请求预算 ${options.requestBudget}，再次启动可从断点继续。` : undefined,
       matched ? "找到首条评论后已暂停；关闭“首条命中后暂停”可继续完整扫描。" : undefined,
       blockedLanes.size > 0 ? `进入冷却的出口：${[...blockedLanes.keys()].join(", ")}。` : undefined,
+      unavailableLanes.size > 0 ? `连续网络失败已暂停的出口：${[...unavailableLanes].join(", ")}。` : undefined,
     ].filter(Boolean).join(" ");
     return pooledReport(state, lanes, options, initialRequests, status, {
       note: notes || undefined,

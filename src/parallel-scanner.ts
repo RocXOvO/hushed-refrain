@@ -28,6 +28,8 @@ export interface ParallelCommentLane {
   transportGate?: ProxyTransportGate;
 }
 
+const MAX_CONSECUTIVE_LANE_FAILURES = 5;
+
 class LaneRequestFailure extends Error {
   constructor(public readonly lane: string, public readonly original: unknown) {
     super(`Comment lane ${lane} failed.`);
@@ -84,7 +86,9 @@ export async function runParallelSongScan(
       .sort((left, right) => right.endTime - left.endTime),
   );
   const blockedLanes = new Set<string>();
+  const unavailableLanes = new Set<string>();
   const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
+  const activeLaneRequests = new Map(lanes.map((lane) => [lane.name, 0]));
   const initialPages = state.pagesProcessed;
   let scheduledRequests = 0;
   let stopRequested = false;
@@ -93,11 +97,31 @@ export async function runParallelSongScan(
   let cancelled = false;
   let fatalError: unknown;
   let nextShardId = state.shards.reduce((maximum, shard) => Math.max(maximum, shard.id), -1) + 1;
+  const allLanesUnavailable = (): boolean => lanes.every((lane) =>
+    blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)
+  );
 
   const stopScheduling = (): void => {
     stopRequested = true;
+    for (const recovery of laneRecovery.values()) recovery.cancel();
     queue.stop();
   };
+  const maybeStopAfterLaneRequests = (): void => {
+    if (
+      !stopRequested &&
+      allLanesUnavailable() &&
+      [...activeLaneRequests.values()].every((count) => count === 0)
+    ) stopScheduling();
+  };
+  const abortListener = (): void => {
+    cancelled = true;
+    stopScheduling();
+  };
+  options.signal?.addEventListener("abort", abortListener, { once: true });
+  if (options.signal?.aborted) abortListener();
+  void queue.whenClosed().then(() => {
+    for (const recovery of laneRecovery.values()) recovery.cancel();
+  });
 
   const reserveRequest = (): boolean => {
     if (stopRequested) return false;
@@ -117,6 +141,7 @@ export async function runParallelSongScan(
 
   const scanShardPage = async (
     lane: ParallelCommentLane,
+    workerId: string,
     shard: CommentTimeShard,
   ): Promise<CommentTimeShard[]> => {
     if (stopRequested || shard.done || !reserveRequest()) return [];
@@ -125,8 +150,10 @@ export async function runParallelSongScan(
     const requestStartedAt = Date.now();
     const requestActivity = {
       lane: lane.name,
+      workerId,
       operation: "comment-page" as const,
       songId: options.songId,
+      songName: options.songName,
       page: shard.pageNo,
       shardId: shard.id,
     };
@@ -271,35 +298,41 @@ export async function runParallelSongScan(
     return stopRequested ? [] : nextWork;
   };
 
-  const runWorker = async (lane: ParallelCommentLane): Promise<void> => {
+  const runWorker = async (lane: ParallelCommentLane, workerIndex: number): Promise<void> => {
+    const workerId = `${lane.name}:${workerIndex + 1}`;
     const recovery = laneRecovery.get(lane.name)!;
-    while (!stopRequested && !blockedLanes.has(lane.name)) {
+    while (!stopRequested && !blockedLanes.has(lane.name) && !unavailableLanes.has(lane.name)) {
       await recovery.waitUntilReady();
-      if (stopRequested || blockedLanes.has(lane.name)) return;
+      if (stopRequested || queue.isClosed() || blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) return;
       const shard = await queue.take();
       if (!shard) return;
       let requeue: CommentTimeShard[] = [];
+      let laneRequestActive = false;
       try {
-        if (blockedLanes.has(lane.name)) {
+        if (blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) {
           requeue = stopRequested ? [] : [shard];
           return;
         }
-        requeue = await scanShardPage(lane, shard);
+        laneRequestActive = true;
+        activeLaneRequests.set(lane.name, (activeLaneRequests.get(lane.name) ?? 0) + 1);
+        requeue = await scanShardPage(lane, workerId, shard);
         recovery.recordSuccess();
+        unavailableLanes.delete(lane.name);
       } catch (error) {
         if (error instanceof CooldownRequired) {
           blockedLanes.add(lane.name);
+          unavailableLanes.delete(lane.name);
           requeue = shard.done ? [] : [shard];
-          if (blockedLanes.size === lanes.length) {
-            requeue = [];
-            stopScheduling();
-          }
           return;
         }
         if (error instanceof LaneRequestFailure) {
           recovery.recordFailure();
           requeue = shard.done ? [] : [shard];
-          return;
+          if (recovery.failureCount >= MAX_CONSECUTIVE_LANE_FAILURES) {
+            if (!blockedLanes.has(lane.name)) unavailableLanes.add(lane.name);
+            return;
+          }
+          continue;
         }
         if (error instanceof RequestBudgetExhausted) {
           budgetReached = true;
@@ -315,15 +348,24 @@ export async function runParallelSongScan(
         stopScheduling();
         return;
       } finally {
+        if (laneRequestActive) {
+          activeLaneRequests.set(lane.name, Math.max(0, (activeLaneRequests.get(lane.name) ?? 1) - 1));
+        }
+        maybeStopAfterLaneRequests();
+        if (stopRequested) requeue = [];
         queue.complete(requeue.length > 0 ? requeue : undefined);
       }
     }
   };
 
   const workers = lanes.flatMap((lane) =>
-    Array.from({ length: options.workersPerLane }, () => runWorker(lane))
+    Array.from({ length: options.workersPerLane }, (_, workerIndex) => runWorker(lane, workerIndex))
   );
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } finally {
+    options.signal?.removeEventListener("abort", abortListener);
+  }
   await checkpoint(true);
   if (fatalError) throw fatalError;
 
@@ -338,13 +380,12 @@ export async function runParallelSongScan(
     : blockedLanes.size === lanes.length
     ? "cooldown"
     : "paused";
-  const note = budgetReached
-    ? "The page or request budget was reached; rerun the same command to resume."
-    : blockedLanes.size > 0
-    ? `Cooldown lanes: ${[...blockedLanes].join(", ")}.`
-    : matched && options.stopAfterFirst
-    ? "Stopped after the first matching comment."
-    : undefined;
+  const note = [
+    budgetReached ? "The page or request budget was reached; rerun the same command to resume." : undefined,
+    blockedLanes.size > 0 ? `Cooldown lanes: ${[...blockedLanes].join(", ")}.` : undefined,
+    unavailableLanes.size > 0 ? `Paused after repeated network failures on lanes: ${[...unavailableLanes].join(", ")}.` : undefined,
+    matched && options.stopAfterFirst ? "Stopped after the first matching comment." : undefined,
+  ].filter(Boolean).join(" ") || undefined;
   return makeReport(status, state, lanes, options, initialRequests, startedAt, note);
 }
 

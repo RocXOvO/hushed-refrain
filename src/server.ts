@@ -13,6 +13,7 @@ import { timeCoveragePercent } from "./progress";
 import {
   DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
   DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+  DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
   executeProxyRequest,
   ProxyTransportGate,
 } from "./proxy-transport-gate";
@@ -120,6 +121,7 @@ interface JobSnapshot {
   workers: number;
   proxyTransportMaxConcurrent?: number;
   proxyTransportStartDelayMs?: number;
+  proxyTransportStartJitterMs?: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   blockedUntil?: string;
@@ -134,6 +136,7 @@ interface ParallelJobSnapshot {
   uid?: string;
   songId?: string;
   songName?: string;
+  activeSongs: ActiveSongSnapshot[];
   startedAt?: string;
   finishedAt?: string;
   lanes: number;
@@ -141,6 +144,7 @@ interface ParallelJobSnapshot {
   workers: number;
   proxyTransportMaxConcurrent?: number;
   proxyTransportStartDelayMs?: number;
+  proxyTransportStartJitterMs?: number;
   shards: number;
   shardsComplete: number;
   coveragePercent: number;
@@ -173,6 +177,7 @@ interface StartJobInput {
   allowDirect?: unknown;
   workersPerProxy?: unknown;
   maxProxyLanes?: unknown;
+  hostConcurrency?: unknown;
 }
 
 interface StartParallelInput {
@@ -180,6 +185,7 @@ interface StartParallelInput {
   songId?: unknown;
   workersPerProxy?: unknown;
   maxProxyLanes?: unknown;
+  hostConcurrency?: unknown;
   shards?: unknown;
   pageSize?: unknown;
   requestBudget?: unknown;
@@ -240,6 +246,7 @@ class JobManager {
   private statePath?: string;
   private outputPath?: string;
   private terminalStateSyncedId?: string;
+  private abortController?: AbortController;
   private readonly activeSongByWorker = new Map<string, { id: string; name?: string }>();
   private readonly songNameById = new Map<string, string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
@@ -271,11 +278,17 @@ class JobManager {
     const maxSongs = integer(input.maxSongs ?? 0, "maxSongs", 0, 100_000);
     const workersPerLane = integer(input.workersPerProxy ?? 1, "workersPerProxy", 1, 8);
     const maxProxyLanes = integer(input.maxProxyLanes ?? 0, "maxProxyLanes", 0, 32);
+    const hostConcurrency = integer(
+      input.hostConcurrency ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      "hostConcurrency",
+      1,
+      32,
+    );
     const proxy = proxyUrl(input.proxy);
     const allowDirect = bool(input.allowDirect);
     const jobKey = `${uid}-${source}`;
-    this.statePath = join(this.paths.data, `web-state-${jobKey}.json`);
-    this.outputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
+    const nextStatePath = join(this.paths.data, `web-state-${jobKey}.json`);
+    const nextOutputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
     const activePool = await readProxyPool(this.paths.pool);
     const activePoolExpected = proxyPoolStatusRunning(activePool);
     const poolEntries = activePoolExpected
@@ -291,13 +304,15 @@ class JobManager {
       poolEntries,
       maxProxyLanes,
       workersPerLane,
-      DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      hostConcurrency,
     );
     const selectedPoolEntries = selectedPool.entries;
     const endpoints = selectedPoolEntries.length > 0
       ? selectedPoolEntries.map((entry) => entry.endpoint)
       : [proxy];
-    this.transportGate = endpoints.some(Boolean) ? new ProxyTransportGate() : undefined;
+    this.transportGate = endpoints.some(Boolean)
+      ? new ProxyTransportGate({ maxConcurrent: hostConcurrency })
+      : undefined;
     this.lanes = endpoints.map((endpoint, index) => ({
       name: selectedPoolEntries[index]?.name ?? (endpoint ? "static-proxy" : "direct"),
       client: new EnhancedNcmClient({ proxy: endpoint }),
@@ -312,6 +327,7 @@ class JobManager {
       }),
     }));
     const activeId = randomUUID();
+    this.abortController = new AbortController();
     this.activeSongByWorker.clear();
     this.songNameById.clear();
     const logger = new TaskLogger(
@@ -325,8 +341,8 @@ class JobManager {
       source,
       recordScope,
       cookie,
-      statePath: this.statePath,
-      outputPath: this.outputPath,
+      statePath: nextStatePath,
+      outputPath: nextOutputPath,
       commentPageSize,
       historyPageSize: 50,
       maxCommentPagesPerSong,
@@ -334,6 +350,7 @@ class JobManager {
       stopAfterFirst: false,
       fresh: bool(input.fresh),
       dryRun: bool(input.dryRun),
+      signal: this.abortController.signal,
       onMatch: (comment) => this.publishMatch(comment),
       onCheckpoint: (activity) => {
         if (this.snapshotValue.id !== activeId) return;
@@ -369,13 +386,19 @@ class JobManager {
         };
       },
     };
+    // Publish the result descriptor and job id together, after every awaited
+    // startup preflight has succeeded. Failed starts keep the previous job's
+    // paths intact, and concurrent result reads can capture a consistent pair.
+    this.statePath = nextStatePath;
+    this.outputPath = nextOutputPath;
     this.snapshotValue = {
       ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
       startedAt, proxyEnabled: selectedPoolEntries.length > 0 || Boolean(proxy),
       lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
-      proxyTransportMaxConcurrent: this.transportGate ? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT : undefined,
+      proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
       proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
+      proxyTransportStartJitterMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS : undefined,
       logPath: logger.path,
     };
     this.terminalStateSyncedId = undefined;
@@ -388,8 +411,9 @@ class JobManager {
       workers: this.lanes.length * workersPerLane,
       requestBudget,
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
-      proxyTransportMaxConcurrent: this.transportGate ? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT : undefined,
+      proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
       proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
+      proxyTransportStartJitterMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS : undefined,
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
@@ -409,6 +433,7 @@ class JobManager {
           maxSongs,
           workersPerProxy: workersPerLane,
           maxProxyLanes,
+          hostConcurrency,
           allowDirect,
         },
       });
@@ -448,6 +473,7 @@ class JobManager {
       .finally(() => {
         if (this.snapshotValue.id === activeId) {
           this.activeSongByWorker.clear();
+          this.abortController = undefined;
           this.lanes = [];
           this.transportGate = undefined;
         }
@@ -457,6 +483,8 @@ class JobManager {
     return this.status();
     } finally {
       if (!launched) {
+        this.abortController?.abort();
+        this.abortController = undefined;
         this.transportGate?.cancel();
         this.transportGate = undefined;
         this.lanes = [];
@@ -468,6 +496,7 @@ class JobManager {
   async stop(): Promise<JobSnapshot> {
     if (this.snapshotValue.status !== "running") return this.status();
     this.snapshotValue.status = "stopping";
+    this.abortController?.abort();
     this.transportGate?.cancel();
     for (const lane of this.lanes) lane.governor.cancel();
     return this.status();
@@ -518,11 +547,17 @@ class JobManager {
     };
   }
 
-  async results(limit: number): Promise<FoundComment[]> {
-    const results = await readJsonl(this.outputPath, limit);
-    return results.map((comment) => comment.songName || !comment.songId
-      ? comment
-      : { ...comment, songName: this.songNameById.get(comment.songId) });
+  async results(limit: number): Promise<{ jobId?: string; results: FoundComment[] }> {
+    const jobId = this.snapshotValue.id;
+    const outputPath = this.outputPath;
+    const songNameById = new Map(this.songNameById);
+    const results = await readJsonl(outputPath, limit);
+    return {
+      jobId,
+      results: results.map((comment) => comment.songName || !comment.songId
+        ? comment
+        : { ...comment, songName: songNameById.get(comment.songId) }),
+    };
   }
   async logs(limit: number): Promise<{ path?: string; entries: Awaited<ReturnType<typeof readTaskLog>> }> {
     return { path: this.snapshotValue.logPath, entries: await readTaskLog(this.snapshotValue.logPath, limit) };
@@ -579,6 +614,8 @@ class ParallelJobManager {
   private statePath?: string;
   private outputPath?: string;
   private terminalStateSyncedId?: string;
+  private abortController?: AbortController;
+  private readonly activeWorkers = new Set<string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
 
   constructor(
@@ -596,6 +633,12 @@ class ParallelJobManager {
     const songId = numericId(input.songId, "歌曲 ID");
     const workersPerLane = integer(input.workersPerProxy ?? 3, "workersPerProxy", 1, 16);
     const maxProxyLanes = integer(input.maxProxyLanes ?? 0, "maxProxyLanes", 0, 32);
+    const hostConcurrency = integer(
+      input.hostConcurrency ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      "hostConcurrency",
+      1,
+      32,
+    );
     const shardCount = integer(input.shards ?? 96, "shards", 1, 512);
     const pageSize = integer(input.pageSize ?? 1_000, "pageSize", 1, 2_000);
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
@@ -613,9 +656,9 @@ class ParallelJobManager {
       entries,
       maxProxyLanes,
       workersPerLane,
-      DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      hostConcurrency,
     );
-    this.transportGate = new ProxyTransportGate();
+    this.transportGate = new ProxyTransportGate({ maxConcurrent: hostConcurrency });
     this.lanes = selectedPool.entries.map((entry, index) => ({
       name: `proxy-${index + 1}`,
       client: new EnhancedNcmClient({ proxy: entry.endpoint }),
@@ -631,6 +674,8 @@ class ParallelJobManager {
     this.statePath = previousPath;
     this.outputPath = join(this.paths.data, `parallel-comments-${uid}-${songId}.jsonl`);
     const activeId = randomUUID();
+    this.abortController = new AbortController();
+    this.activeWorkers.clear();
     const logger = new TaskLogger(
       join(this.paths.data, "logs", `parallel-${activeId}.jsonl`),
       "parallel",
@@ -638,11 +683,12 @@ class ParallelJobManager {
     );
     this.snapshotValue = {
       ...emptyParallelSnapshot(), id: activeId, status: "running", uid, songId,
-      songName: song.name, startedAt, lanes: this.lanes.length,
+      songName: song.name, activeSongs: [], startedAt, lanes: this.lanes.length,
       laneSelection: selectedPool.selection,
       workers: this.lanes.length * workersPerLane, shards: shardCount,
-      proxyTransportMaxConcurrent: DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      proxyTransportMaxConcurrent: hostConcurrency,
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+      proxyTransportStartJitterMs: DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
       logPath: logger.path,
     };
     this.terminalStateSyncedId = undefined;
@@ -656,8 +702,9 @@ class ParallelJobManager {
       workers: this.lanes.length * workersPerLane,
       requestBudget,
       laneSelection: selectedPool.selection,
-      proxyTransportMaxConcurrent: DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      proxyTransportMaxConcurrent: hostConcurrency,
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+      proxyTransportStartJitterMs: DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
@@ -669,6 +716,7 @@ class ParallelJobManager {
           songId,
           workersPerProxy: workersPerLane,
           maxProxyLanes,
+          hostConcurrency,
           shards: shardCount,
           pageSize,
           requestBudget,
@@ -688,12 +736,16 @@ class ParallelJobManager {
       endTime: previous?.endTime ?? Date.now(), shardCount, pageSize, workersPerLane,
       requestBudget, maxPages, stopAfterFirst: false,
       fresh: bool(input.fresh), statePath: this.statePath, outputPath: this.outputPath,
+      signal: this.abortController.signal,
       onMatch: (comment) => this.publishMatch(comment),
       onCheckpoint: (activity) => {
         if (this.snapshotValue.id !== activeId) return;
         this.snapshotValue = { ...this.snapshotValue, ...activity };
       },
-      onRequestActivity: (activity) => logger.request(activity),
+      onRequestActivity: (activity) => {
+        logger.request(activity);
+        this.trackActiveSong(activeId, activity);
+      },
       onSchedulerActivity: (activity) => logger.scheduler(activity),
     }).then(async (report) => {
       if (this.snapshotValue.id !== activeId) return;
@@ -708,15 +760,19 @@ class ParallelJobManager {
       });
       this.snapshotValue = {
         ...this.snapshotValue, ...report, status: report.status,
-        finishedAt: new Date().toISOString(), note: report.note,
+        activeSongs: [], finishedAt: new Date().toISOString(), note: report.note,
       };
+      this.activeWorkers.clear();
       this.terminalStateSyncedId = activeId;
     }).catch(async (error) => {
       await logger.write("error", "task_error", `单曲并行扫描异常结束：${message(error)}`, { error: message(error) });
       if (this.snapshotValue.id !== activeId) return;
-      this.snapshotValue = { ...this.snapshotValue, status: "error", finishedAt: new Date().toISOString(), error: message(error) };
+      this.activeWorkers.clear();
+      this.snapshotValue = { ...this.snapshotValue, activeSongs: [], status: "error", finishedAt: new Date().toISOString(), error: message(error) };
     }).finally(() => {
       if (this.snapshotValue.id === activeId) {
+        this.activeWorkers.clear();
+        this.abortController = undefined;
         this.lanes = [];
         this.transportGate = undefined;
       }
@@ -726,6 +782,8 @@ class ParallelJobManager {
     return this.status();
     } finally {
       if (!launched) {
+        this.abortController?.abort();
+        this.abortController = undefined;
         this.transportGate?.cancel();
         this.transportGate = undefined;
         this.lanes = [];
@@ -737,6 +795,7 @@ class ParallelJobManager {
   async stop(): Promise<ParallelJobSnapshot> {
     if (this.snapshotValue.status !== "running") return this.status();
     this.snapshotValue.status = "stopping";
+    this.abortController?.abort();
     this.transportGate?.cancel();
     for (const lane of this.lanes) lane.governor.cancel();
     return this.status();
@@ -765,10 +824,17 @@ class ParallelJobManager {
       this.snapshotValue.startedAt,
       this.snapshotValue.finishedAt,
     );
-    return { ...this.snapshotValue };
+    return {
+      ...this.snapshotValue,
+      activeSongs: this.snapshotValue.activeSongs.map((song) => ({ ...song })),
+    };
   }
 
-  results(limit: number): Promise<FoundComment[]> { return readJsonl(this.outputPath, limit); }
+  async results(limit: number): Promise<{ jobId?: string; results: FoundComment[] }> {
+    const jobId = this.snapshotValue.id;
+    const outputPath = this.outputPath;
+    return { jobId, results: await readJsonl(outputPath, limit) };
+  }
   async logs(limit: number): Promise<{ path?: string; entries: Awaited<ReturnType<typeof readTaskLog>> }> {
     return { path: this.snapshotValue.logPath, entries: await readTaskLog(this.snapshotValue.logPath, limit) };
   }
@@ -782,6 +848,25 @@ class ParallelJobManager {
     for (const subscriber of this.matchSubscribers) {
       try { subscriber(comment); } catch { /* One disconnected UI must not block other subscribers. */ }
     }
+  }
+
+  private trackActiveSong(activeId: string, activity: ScanRequestActivity): void {
+    if (this.snapshotValue.id !== activeId || !activity.workerId) return;
+    if (activity.phase === "start") {
+      this.activeWorkers.add(activity.workerId);
+    } else {
+      this.activeWorkers.delete(activity.workerId);
+    }
+    this.snapshotValue = {
+      ...this.snapshotValue,
+      activeSongs: this.activeWorkers.size > 0
+        ? [{
+          id: activity.songId,
+          name: activity.songName ?? this.snapshotValue.songName,
+          workers: this.activeWorkers.size,
+        }]
+        : [],
+    };
   }
 }
 
@@ -991,12 +1076,12 @@ async function route(
   if (method === "POST" && url.pathname === "/api/job") return json(response, 202, await jobs.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/job/stop") return json(response, 200, await jobs.stop());
   if (method === "GET" && url.pathname === "/api/results/stream") return streamMatches(request, response, (subscriber) => jobs.subscribeMatches(subscriber));
-  if (method === "GET" && url.pathname === "/api/results") return json(response, 200, { results: await jobs.results(limit(url)) });
+  if (method === "GET" && url.pathname === "/api/results") return json(response, 200, await jobs.results(limit(url)));
   if (method === "GET" && url.pathname === "/api/parallel/job") return json(response, 200, await parallel.status());
   if (method === "POST" && url.pathname === "/api/parallel/job") return json(response, 202, await parallel.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/parallel/job/stop") return json(response, 200, await parallel.stop());
   if (method === "GET" && url.pathname === "/api/parallel/results/stream") return streamMatches(request, response, (subscriber) => parallel.subscribeMatches(subscriber));
-  if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, { results: await parallel.results(limit(url)) });
+  if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, await parallel.results(limit(url)));
   if (method === "GET" && url.pathname === "/api/logs") {
     return json(response, 200, url.searchParams.get("mode") === "parallel"
       ? await parallel.logs(limit(url))
@@ -1020,6 +1105,12 @@ async function route(
       lanes: integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256),
       workersPerLane: integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16),
       proxyTransport: url.searchParams.get("proxyTransport") === "1",
+      proxyTransportMaxConcurrent: integer(
+        url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+        "hostConcurrency",
+        1,
+        32,
+      ),
     }));
   }
   if (method === "GET" && url.pathname === "/api/user") {
@@ -1203,7 +1294,7 @@ async function readJsonl(path: string | undefined, max: number): Promise<FoundCo
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
-function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
+function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
   return coordinator.activeMode() === "parallel"

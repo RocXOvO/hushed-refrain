@@ -1,6 +1,7 @@
 import {
   DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
   DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+  DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
 } from "./proxy-transport-gate";
 
 export interface EstimateInput {
@@ -12,6 +13,9 @@ export interface EstimateInput {
   lanes?: number;
   workersPerLane?: number;
   proxyTransport?: boolean;
+  proxyTransportMaxConcurrent?: number;
+  proxyTransportStartDelayMs?: number;
+  proxyTransportStartJitterMs?: number;
 }
 
 export interface ScanEstimate {
@@ -27,6 +31,7 @@ export interface ScanEstimate {
   effectiveWorkers?: number;
   proxyTransportMaxConcurrent?: number;
   proxyTransportStartDelayMs?: number;
+  proxyTransportStartJitterMs?: number;
 }
 
 export function estimateCommentScan(input: EstimateInput): ScanEstimate {
@@ -38,24 +43,36 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const lanes = positiveInteger(input.lanes ?? 1, "lanes");
   const workersPerLane = positiveInteger(input.workersPerLane ?? 1, "workersPerLane");
   const proxyTransport = Boolean(input.proxyTransport);
+  const proxyTransportMaxConcurrent = positiveInteger(
+    input.proxyTransportMaxConcurrent ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+    "proxyTransportMaxConcurrent",
+  );
+  const proxyTransportStartDelayMs = nonNegativeInteger(
+    input.proxyTransportStartDelayMs ?? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+    "proxyTransportStartDelayMs",
+  );
+  const proxyTransportStartJitterMs = nonNegativeInteger(
+    input.proxyTransportStartJitterMs ?? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
+    "proxyTransportStartJitterMs",
+  );
   const totalWorkers = lanes * workersPerLane;
   const pages = Math.ceil(comments / pageSize);
 
-  const duration = (spacingMs: number): number => {
+  const duration = (spacingMs: number, transportJitterFactor: number): number => {
     if (pages === 0) return 0;
     const perLaneCycleMs = Math.max(spacingMs, networkMs) / workersPerLane;
     const laneTopologyCycleMs = perLaneCycleMs / lanes;
     const transportCycleMs = proxyTransport
       ? Math.max(
-        DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
-        networkMs / DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+        proxyTransportStartDelayMs + proxyTransportStartJitterMs * transportJitterFactor,
+        networkMs / proxyTransportMaxConcurrent,
       )
       : 0;
     return Math.ceil(Math.max(networkMs, pages * Math.max(laneTopologyCycleMs, transportCycleMs)) / 1_000);
   };
-  const optimisticSeconds = duration(minDelayMs);
-  const expectedSeconds = duration(minDelayMs + jitterMs / 2);
-  const conservativeSeconds = duration(minDelayMs + jitterMs);
+  const optimisticSeconds = duration(minDelayMs, 0);
+  const expectedSeconds = duration(minDelayMs + jitterMs / 2, 0.5);
+  const conservativeSeconds = duration(minDelayMs + jitterMs, 1);
 
   return {
     comments,
@@ -70,9 +87,10 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     totalWorkers,
     ...(proxyTransport
       ? {
-        effectiveWorkers: Math.min(totalWorkers, DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT),
-        proxyTransportMaxConcurrent: DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
-        proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+        effectiveWorkers: Math.min(totalWorkers, proxyTransportMaxConcurrent),
+        proxyTransportMaxConcurrent,
+        proxyTransportStartDelayMs,
+        proxyTransportStartJitterMs,
       }
       : {}),
   };

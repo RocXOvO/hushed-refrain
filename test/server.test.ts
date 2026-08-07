@@ -34,6 +34,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="globalProgressContext"/);
   assert.match(pageText, /id="taskPanelOpenButton"/);
   assert.match(pageText, /id="taskExitLimit"[^>]*min="0"[^>]*max="32"/);
+  assert.match(pageText, /id="taskHostConcurrency"[^>]*min="1"[^>]*max="32"[^>]*value="8"/);
+  assert.match(pageText, /data-nav-view="activity"/);
+  assert.match(pageText, /id="activityPanel"/);
   assert.match(pageText, /id="activeSongCount"/);
   assert.match(pageText, /id="activeSongsList"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
@@ -43,6 +46,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /IPv4 \/24.*IPv6 \/48/);
   assert.match(pageText, /id="poolSize"[^>]*max="32"[^>]*value="8"/);
   assert.match(pageText, /id="poolCandidates"[^>]*max="128"[^>]*value="48"/);
+  assert.match(pageText, /id="clashConfigSelectAllButton"/);
   assert.match(pageText, /name="pageSize"[^>]*max="2000"[^>]*value="1000"/);
   assert.doesNotMatch(pageText, /首条命中后/);
 
@@ -66,8 +70,14 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /activateNavigation/);
   assert.match(appText, /syncToolbarContext/);
   assert.match(appText, /visibleResultOrder/);
+  assert.match(appText, /resultJobIds/);
+  assert.match(appText, /baselineIds/);
+  assert.match(appText, /tabSwitchVersion/);
   assert.match(appText, /renderActiveSongs/);
   assert.match(appText, /maxProxyLanes/);
+  assert.match(appText, /value\.hostConcurrency = Number\(el\.hostConcurrency\.value\)/);
+  assert.match(appText, /Math\.ceil\(hostConcurrency \/ Math\.max\(1, workersPerLane\)\)/);
+  assert.doesNotMatch(appText, /当前生效配置（合并）/);
   assert.doesNotMatch(appText, /resultTimestamp/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
 
@@ -81,11 +91,17 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /scrollbar-color:/);
   assert.match(styleText, /::-webkit-scrollbar-thumb/);
   assert.match(styleText, /\.navigation-rail/);
+  assert.match(styleText, /\.navigation-rail\s*\{[^}]*position:\s*sticky/s);
+  assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);
   assert.match(styleText, /body\.inspector-collapsed/);
   assert.match(styleText, /transform 210ms/);
   assert.match(styleText, /font-size:\s*16px/);
   assert.doesNotMatch(styleText, /backdrop-filter:/);
+
+  const results = await fetch(`${base}/api/results?limit=50`);
+  assert.equal(results.status, 200);
+  assert.deepEqual(await results.json(), { results: [] });
 
   const estimate = await fetch(`${base}/api/estimate?comments=500000`);
   assert.equal(estimate.status, 200);
@@ -108,9 +124,14 @@ test("dashboard serves UI assets and estimate API", async (context) => {
 
   const protectedEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=1000&minDelayMs=333&jitterMs=100&networkMs=400&lanes=4&workersPerLane=3&proxyTransport=1`);
   const protectedValue = await protectedEstimate.json() as { expectedSeconds: number; effectiveWorkers: number; proxyTransportMaxConcurrent: number };
-  assert.equal(protectedValue.expectedSeconds, 8);
+  assert.equal(protectedValue.expectedSeconds, 10);
   assert.equal(protectedValue.effectiveWorkers, 8);
   assert.equal(protectedValue.proxyTransportMaxConcurrent, 8);
+
+  const customProtectedEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=1000&minDelayMs=333&jitterMs=100&networkMs=400&lanes=4&workersPerLane=3&proxyTransport=1&hostConcurrency=4`);
+  const customProtectedValue = await customProtectedEstimate.json() as { effectiveWorkers: number; proxyTransportMaxConcurrent: number };
+  assert.equal(customProtectedValue.effectiveWorkers, 4);
+  assert.equal(customProtectedValue.proxyTransportMaxConcurrent, 4);
 });
 
 test("validates multiple Clash config selections against one discovery snapshot", () => {
@@ -274,6 +295,16 @@ test("dashboard validates UID before starting a job", async (context) => {
   assert.equal(excessiveExitLimit.status, 400);
   assert.match(await excessiveExitLimit.text(), /maxProxyLanes/);
 
+  for (const hostConcurrency of [0, 33]) {
+    const invalidHostConcurrency = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ uid: "42", source: "record", recordScope: "all", hostConcurrency }),
+    });
+    assert.equal(invalidHostConcurrency.status, 400);
+    assert.match(await invalidHostConcurrency.text(), /hostConcurrency/);
+  }
+
   const protectedDirect = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -289,6 +320,31 @@ test("dashboard validates UID before starting a job", async (context) => {
   });
   assert.equal(likedSongsWithoutLogin.status, 401);
   assert.match(await likedSongsWithoutLogin.text(), /二维码登录/);
+});
+
+test("a failed source start does not publish its result path", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-failed-start-results-"));
+  const dataRoot = join(runtimeRoot, "data");
+  await mkdir(dataRoot, { recursive: true });
+  await writeFile(join(dataRoot, "web-comments-123.jsonl"), `${JSON.stringify({
+    commentId: "foreign-result",
+    userId: "123",
+    content: "must stay hidden",
+  })}\n`);
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const start = await fetch(`${base}/api/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: "123", source: "record", recordScope: "all" }),
+  });
+  assert.equal(start.status, 409);
+
+  const results = await fetch(`${base}/api/results?limit=50`);
+  assert.deepEqual(await results.json(), { results: [] });
 });
 
 test("dashboard keeps proxy-pool state under the configured runtime root", async (context) => {

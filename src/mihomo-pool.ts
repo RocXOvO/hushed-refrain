@@ -15,6 +15,7 @@ import {
   type ProxyDefinition,
 } from "./clash-profile-merge";
 import { ProxyTransportGate } from "./proxy-transport-gate";
+import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 
 const execFileAsync = promisify(execFile);
 const POOL_RECHECK_CONCURRENCY = 4;
@@ -172,9 +173,11 @@ export async function startMihomoPool(
   const verificationGate = poolVerificationGate();
 
   try {
-    await Promise.all(candidates.map((_, index) =>
-      waitForPort(options.basePort + index, 15_000)
-    ));
+    await waitForPorts(
+      candidates.map((_, index) => options.basePort + index),
+      15_000,
+      16,
+    );
     const checks = await mapLimit(candidates, 6, async (proxy, index) => {
       const endpoint = `http://127.0.0.1:${options.basePort + index}`;
       const startedAt = Date.now();
@@ -265,8 +268,8 @@ export async function stopMihomoPool(poolPath: string): Promise<boolean> {
 }
 
 export async function readProxyPool(path: string): Promise<ProxyPoolFile | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as ProxyPoolFile;
+  return readAtomicJson(path, (value) => {
+    const parsed = value as ProxyPoolFile;
     if (parsed.version !== 1 || !Array.isArray(parsed.entries)) {
       throw new Error("Unsupported proxy pool file.");
     }
@@ -275,10 +278,7 @@ export async function readProxyPool(path: string): Promise<ProxyPoolFile | undef
     parsed.source ??= parsed.sourceConfigPaths?.length ? "clash-verge" : "external";
     parsed.active ??= true;
     return parsed;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
+  });
 }
 
 export function proxyPoolRunning(pool: ProxyPoolFile | undefined): boolean {
@@ -549,10 +549,13 @@ async function verifyProxyEndpoint(
   };
 }
 
-function waitForPort(port: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
+function waitForPort(port: number, deadline: number): Promise<void> {
   return new Promise((resolvePort, reject) => {
     const attempt = (): void => {
+      if (Date.now() >= deadline) {
+        reject(new Error(`Listener ${port} did not start.`));
+        return;
+      }
       const socket = net.createConnection({ host: "127.0.0.1", port });
       socket.setTimeout(500);
       socket.once("connect", () => {
@@ -572,6 +575,17 @@ function waitForPort(port: number, timeoutMs: number): Promise<void> {
     };
     attempt();
   });
+}
+
+export async function waitForPorts(
+  ports: number[],
+  timeoutMs: number,
+  concurrency = 16,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  await mapLimit(ports, Math.min(concurrency, ports.length), (port) =>
+    waitForPort(port, deadline)
+  );
 }
 
 async function mapLimit<T, R>(
@@ -597,6 +611,7 @@ function poolVerificationGate(): ProxyTransportGate {
   return new ProxyTransportGate({
     maxConcurrent: POOL_RECHECK_CONCURRENCY,
     minStartDelayMs: 80,
+    startJitterMs: 0,
   });
 }
 
@@ -678,8 +693,7 @@ function isCommandName(path: string): boolean {
 }
 
 async function writeProxyPool(path: string, pool: ProxyPoolFile): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, `${JSON.stringify(pool, null, 2)}\n`, "utf8");
+  await writeAtomicJson(path, pool);
   if (process.platform !== "win32") await chmod(path, 0o600);
 }
 

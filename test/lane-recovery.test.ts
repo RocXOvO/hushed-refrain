@@ -21,3 +21,37 @@ test("temporarily backs off a failed lane and fully restores it after success", 
   assert.deepEqual(waits, [100, 200]);
   assert.equal(recovery.recordFailure(), 100);
 });
+
+test("cancellation immediately wakes a lane waiting in backoff", async () => {
+  let resolveSleep!: () => void;
+  const recovery = new LaneRecovery(30_000, 30_000, {
+    now: () => 1_000,
+    sleep: () => new Promise<void>((resolve) => { resolveSleep = resolve; }),
+  });
+  recovery.recordFailure();
+  let settled = false;
+  const waiting = recovery.waitUntilReady().then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  recovery.cancel();
+  await waiting;
+  assert.equal(settled, true);
+  resolveSleep();
+});
+
+test("a concurrent success wakes workers waiting on an obsolete backoff", async () => {
+  let resolveSleep!: () => void;
+  const sleeping = new Promise<void>((resolve) => { resolveSleep = resolve; });
+  const recovery = new LaneRecovery(1_000, 30_000, {
+    now: () => 0,
+    sleep: () => sleeping,
+  });
+  recovery.recordFailure();
+  let ready = false;
+  const wait = recovery.waitUntilReady().then(() => { ready = true; });
+
+  recovery.recordSuccess();
+  await wait;
+  assert.equal(ready, true);
+  resolveSleep();
+});

@@ -7,7 +7,7 @@ const el = {
   songId: $("#songId"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
   poolStatus: $("#poolStatus"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
-  poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
+  poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
@@ -20,7 +20,7 @@ const el = {
   estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
   windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
-  toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), exitLimit: $("#taskExitLimit"),
+  toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"),
   activeSongCount: $("#activeSongCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
   appSplash: $("#appSplash"),
@@ -32,6 +32,8 @@ let poolSourceInitialized = false;
 let poolRunning = false;
 let poolStatus = "not-running";
 let poolChangeInFlight = false;
+let poolMutationVersion = 0;
+let poolSourceSwitchVersion = 0;
 let poolLaneCount = 1;
 let poolNetworkMs = 400;
 let knownMatches = -1;
@@ -41,13 +43,18 @@ let estimateRequest = 0;
 let refreshInFlight;
 let authRefreshInFlight;
 let clashConfigSignature = "";
+let clashConfigSelection;
 let poolEntriesSignature = "";
 let renderedJobSignature = "";
 let logsSignature = "";
 let logsRefreshInFlight;
+let logsRefreshMode;
+let logsRequest = 0;
 let lastLogsRefreshAt = 0;
 let resultStream;
 let resultMode = mode;
+let resultRequest = 0;
+const resultJobIds = { parallel: undefined, source: undefined };
 let resultRenderTimer;
 let pendingLiveCommentId;
 let resultsRenderPending = false;
@@ -59,12 +66,13 @@ let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
 let authRefreshTimer;
+let modeSwitchVersion = 0;
+let tabSwitchVersion = 0;
 const settlementPending = { parallel: undefined, source: undefined };
 const visibleResults = new Map();
 let visibleResultOrder = [];
 const disclosureAnimations = new WeakMap();
 let activeSongsSignature = "";
-const HOST_PROXY_CONCURRENCY = 8;
 
 async function api(path, options) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -83,44 +91,56 @@ function payload(form) {
 }
 
 async function startParallel() {
-  if (!el.parallelForm.reportValidity() || !el.exitLimit.reportValidity()) return;
+  if (!el.parallelForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
   if (poolChangeInFlight || poolStatus === "starting") {
     toast("代理池正在自动优选，请等待出口验证完成后再启动");
     return;
   }
   setBusy(true);
+  const requestedMode = mode;
+  const requestedModeVersion = modeSwitchVersion;
   try {
     const value = payload(el.parallelForm);
     value.fresh = $("#parallelFresh").checked;
     value.maxProxyLanes = Number(el.exitLimit.value);
+    value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/parallel/job", { method: "POST", body: JSON.stringify(value) });
+    syncResultJob("parallel", job.id);
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "parallel" : undefined;
     settlementPending.parallel = job.id;
-    renderParallel(job);
-    syncRuntimeTimer(job);
+    if (requestedMode === mode && requestedModeVersion === modeSwitchVersion) {
+      renderParallel(job);
+      syncRuntimeTimer(job);
+    } else void refresh();
     setTaskPanelCollapsed(true);
     toast("并行扫描已启动");
   } catch (error) { toast(error.message); } finally { setBusy(false); }
 }
 
 async function startSource(dryRun) {
-  if (!el.sourceForm.reportValidity() || !el.exitLimit.reportValidity()) return;
+  if (!el.sourceForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
   if (poolChangeInFlight || poolStatus === "starting") {
     toast("代理池正在自动优选，请等待出口验证完成后再启动");
     return;
   }
   setBusy(true);
+  const requestedMode = mode;
+  const requestedModeVersion = modeSwitchVersion;
   try {
     const value = payload(el.sourceForm);
     value.maxCommentPagesPerSong = value.maxPages; delete value.maxPages;
     value.fresh = $("#fresh").checked; value.dryRun = dryRun;
     value.allowDirect = el.sourceForm.elements.allowDirect.checked;
     value.maxProxyLanes = Number(el.exitLimit.value);
+    value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/job", { method: "POST", body: JSON.stringify(value) });
+    syncResultJob("source", job.id);
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "source" : undefined;
     settlementPending.source = job.id;
-    renderSource(job);
-    syncRuntimeTimer(job);
+    if (requestedMode === mode && requestedModeVersion === modeSwitchVersion) {
+      renderSource(job);
+      syncRuntimeTimer(job);
+    } else void refresh();
     setTaskPanelCollapsed(true);
     toast(dryRun ? "正在读取候选歌曲" : "来源扫描已启动");
   } catch (error) {
@@ -163,6 +183,7 @@ async function togglePool() {
   }
   el.poolToggle.disabled = true;
   poolChangeInFlight = true;
+  poolMutationVersion += 1;
   syncTaskStartAvailability();
   const stopping = poolRunning;
   if (!stopping) {
@@ -199,6 +220,7 @@ function refresh() {
 }
 
 async function performRefresh() {
+  const poolVersion = poolMutationVersion;
   try {
     const [parallelJob, sourceJob, pool] = await Promise.all([api("/api/parallel/job"), api("/api/job"), api("/api/pool")]);
     activeTaskMode = ["running", "stopping"].includes(parallelJob.status)
@@ -221,7 +243,7 @@ async function performRefresh() {
     syncRuntimeTimer(activeJob ?? job);
     const globallyActive = Boolean(activeTaskMode);
     el.stop.disabled = !globallyActive;
-    renderPool(pool);
+    if (!poolChangeInFlight && poolVersion === poolMutationVersion) renderPool(pool);
     syncTaskStartAvailability();
     el.connection.classList.add("ready");
     if (job.matches !== knownMatches) {
@@ -236,6 +258,7 @@ async function performRefresh() {
 }
 
 function renderParallel(job) {
+  syncResultJob("parallel", job.id);
   if (!shouldRenderJob("parallel", job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
@@ -252,7 +275,7 @@ function renderParallel(job) {
     note: job.note || job.error,
   });
   renderActiveSongs(
-    active && job.songId ? [{ id: job.songId, name: job.songName, workers: job.workers || 1 }] : [],
+    active ? job.activeSongs || [] : [],
     job.songId ? `${fmt(job.lanes || 1)} 出口 · ${fmt(job.workers || 1)} Worker` : "等待任务调度",
   );
   el.stop.disabled = !active;
@@ -260,6 +283,7 @@ function renderParallel(job) {
 }
 
 function renderSource(job) {
+  syncResultJob("source", job.id);
   if (!shouldRenderJob("source", job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
@@ -310,24 +334,30 @@ function renderActiveSongs(songs, summary) {
   el.activeSongCount.textContent = `${fmt(normalized.length)} 首`;
   el.activeSongSummary.textContent = summary;
   if (normalized.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "active-song-empty";
-    empty.textContent = "暂无正在扫描的歌曲";
-    el.activeSongsList.replaceChildren(empty);
+    const row = document.createElement("tr");
+    row.className = "empty-row";
+    const cell = document.createElement("td");
+    cell.colSpan = 4;
+    cell.textContent = "暂无正在扫描的歌曲";
+    row.append(cell);
+    el.activeSongsList.replaceChildren(row);
     return;
   }
   el.activeSongsList.replaceChildren(...normalized.map((song) => {
-    const row = document.createElement("div");
-    row.className = "active-song-row";
-    const copy = document.createElement("span");
-    const name = document.createElement("strong");
+    const row = document.createElement("tr");
+    const status = document.createElement("td");
+    const badge = document.createElement("span");
+    badge.className = "activity-status";
+    badge.textContent = "扫描中";
+    status.append(badge);
+    const name = document.createElement("td");
     name.textContent = song.name || "正在读取歌曲名称";
-    const id = document.createElement("small");
-    id.textContent = `ID ${song.id}`;
-    copy.append(name, id);
-    const workers = document.createElement("em");
+    const id = document.createElement("td");
+    id.textContent = song.id;
+    const workers = document.createElement("td");
+    workers.className = "activity-worker-count";
     workers.textContent = `${fmt(song.workers)} Worker`;
-    row.append(copy, workers);
+    row.append(status, name, id, workers);
     return row;
   }));
 }
@@ -481,19 +511,23 @@ function selectedClashConfigPaths() {
 }
 
 function renderClashConfigs(discovery, activePoolPaths, poolStatus) {
-  if (!discovery) { el.clashConfigField.hidden = true; return 0; }
-  const profilePaths = new Set((discovery.profiles || []).map((profile) => profile.path));
-  const choices = [];
-  if (discovery.configPath && !profilePaths.has(discovery.configPath)) {
-    choices.push({ path: discovery.configPath, label: "当前生效配置（合并）" });
+  if (!discovery) {
+    clashConfigSignature = "";
+    el.clashConfig.replaceChildren();
+    el.clashConfigField.hidden = true;
+    el.clashConfigSelectAll.disabled = true;
+    return 0;
   }
-  (discovery.profiles || []).forEach((profile) => choices.push({
+  const profiles = discovery.profiles || [];
+  const choices = profiles.map((profile) => ({
     path: profile.path,
     label: `${profile.name}${profile.active ? " · 当前订阅" : ""}`,
   }));
+  if (choices.length === 0 && discovery.configPath) {
+    choices.push({ path: discovery.configPath, label: "Clash Verge 默认配置" });
+  }
   const uniqueChoices = [...new Map(choices.map((choice) => [choice.path, choice])).values()];
   const signature = JSON.stringify(uniqueChoices);
-  const previous = new Set(selectedClashConfigPaths());
   const active = new Set(activePoolPaths || []);
   if (signature !== clashConfigSignature) {
     clashConfigSignature = signature;
@@ -510,36 +544,71 @@ function renderClashConfigs(discovery, activePoolPaths, poolStatus) {
     }));
   }
   const available = new Set(uniqueChoices.map((choice) => choice.path));
-  const preferred = poolStatus === "running" && active.size > 0
-    ? active
-    : previous.size > 0
-    ? previous
-    : new Set([
-      uniqueChoices.find((choice) => choice.label.includes("当前订阅"))?.path,
-      discovery.configPath,
-      uniqueChoices[0]?.path,
-    ].filter((path) => path && available.has(path)).slice(0, 1));
+  const activeAvailable = new Set([...active].filter((path) => available.has(path)));
+  if (clashConfigSelection === undefined) {
+    clashConfigSelection = poolStatus === "running" && activeAvailable.size > 0
+      ? new Set(activeAvailable)
+      : new Set(available);
+  }
+  const selectedAvailable = new Set([...clashConfigSelection].filter((path) => available.has(path)));
+  const preferred = poolStatus === "running" && activeAvailable.size > 0
+    ? activeAvailable
+    : selectedAvailable;
   $$('input[name="clashConfig"]').forEach((input) => {
     input.checked = preferred.has(input.value);
     input.disabled = poolStatus !== "not-running";
   });
-  el.clashConfigField.hidden = uniqueChoices.length <= 1;
+  el.clashConfigField.hidden = uniqueChoices.length === 0;
+  syncClashSelectAllButton(poolStatus);
   return uniqueChoices.length;
 }
 
+function syncClashSelectAllButton(status = poolStatus) {
+  const choices = $$('input[name="clashConfig"]');
+  const allSelected = choices.length > 0 && choices.every((input) => input.checked);
+  el.clashConfigSelectAll.textContent = allSelected ? "取消全选" : "全选";
+  el.clashConfigSelectAll.disabled = choices.length === 0 || status !== "not-running";
+}
+
+function toggleClashConfigs() {
+  const choices = $$('input[name="clashConfig"]:not(:disabled)');
+  const shouldSelect = choices.some((input) => !input.checked);
+  for (const input of choices) input.checked = shouldSelect;
+  clashConfigSelection = new Set(selectedClashConfigPaths());
+  syncClashSelectAllButton();
+}
+
 async function refreshResults() {
+  const request = ++resultRequest;
+  const requestedMode = mode;
+  const baselineIds = new Set(visibleResultOrder);
   try {
-    const requestedMode = mode;
     const data = await api(`${requestedMode === "parallel" ? "/api/parallel/results" : "/api/results"}?limit=50`);
-    if (requestedMode !== mode) return;
-    if (resultMode !== mode) resetVisibleResults();
-    visibleResults.clear();
-    visibleResultOrder = [];
+    if (request !== resultRequest || requestedMode !== mode) return;
+    if (resultMode !== mode) resetVisibleResults(false);
+    if (data.jobId !== resultJobIds[requestedMode]) {
+      resultJobIds[requestedMode] = data.jobId;
+      resetVisibleResults(false);
+      knownMatches = -1;
+    }
+    const mergedResults = new Map(visibleResults);
+    const snapshotOrder = [];
     data.results.forEach((item) => {
       const id = String(item.commentId);
-      if (!visibleResults.has(id)) visibleResultOrder.push(id);
-      visibleResults.set(id, item);
+      if (!snapshotOrder.includes(id)) snapshotOrder.push(id);
+      mergedResults.set(id, item);
     });
+    const snapshotIds = new Set(snapshotOrder);
+    const liveDuringRequest = visibleResultOrder.filter((id) =>
+      !baselineIds.has(id) && !snapshotIds.has(id)
+    );
+    const liveIds = new Set(liveDuringRequest);
+    const retainedOlder = visibleResultOrder.filter((id) =>
+      !snapshotIds.has(id) && !liveIds.has(id)
+    );
+    visibleResults.clear();
+    for (const [id, item] of mergedResults) visibleResults.set(id, item);
+    visibleResultOrder = [...liveDuringRequest, ...snapshotOrder, ...retainedOlder];
     clearTimeout(resultRenderTimer);
     resultRenderTimer = undefined;
     pendingLiveCommentId = undefined;
@@ -550,32 +619,39 @@ async function refreshResults() {
       renderResults();
     }
   }
-  catch (error) { toast(error.message); }
+  catch (error) {
+    if (request === resultRequest && requestedMode === mode) toast(error.message);
+  }
 }
 
 function refreshLogs(force = true) {
   if (!force && Date.now() - lastLogsRefreshAt < 3_000) return Promise.resolve();
-  if (logsRefreshInFlight) return logsRefreshInFlight;
+  const requestedMode = mode;
+  if (logsRefreshInFlight && logsRefreshMode === requestedMode) return logsRefreshInFlight;
   lastLogsRefreshAt = Date.now();
-  const pending = performLogsRefresh().finally(() => {
-    if (logsRefreshInFlight === pending) logsRefreshInFlight = undefined;
+  const request = ++logsRequest;
+  const pending = performLogsRefresh(request, requestedMode).finally(() => {
+    if (logsRefreshInFlight === pending) {
+      logsRefreshInFlight = undefined;
+      logsRefreshMode = undefined;
+    }
   });
   logsRefreshInFlight = pending;
+  logsRefreshMode = requestedMode;
   return pending;
 }
 
-async function performLogsRefresh() {
-  const requestedMode = mode;
+async function performLogsRefresh(request, requestedMode) {
   try {
     const data = await api(`/api/logs?mode=${encodeURIComponent(requestedMode)}&limit=200`);
-    if (requestedMode !== mode) return;
+    if (request !== logsRequest || requestedMode !== mode) return;
     const signature = JSON.stringify([requestedMode, data.path, data.entries]);
     if (signature === logsSignature) return;
     logsSignature = signature;
     el.logPath.textContent = data.path || "任务启动后将在本地生成结构化日志。";
     el.logs.replaceChildren(...(data.entries.length ? data.entries.map(logRow) : [emptyLogRow()]));
   } catch (error) {
-    toast(`读取日志失败：${error.message}`);
+    if (request === logsRequest && requestedMode === mode) toast(`读取日志失败：${error.message}`);
   }
 }
 
@@ -626,15 +702,32 @@ function connectResultStream() {
   resultStream = stream;
 }
 
-function resetVisibleResults() {
+function resetVisibleResults(invalidateRequest = true) {
+  if (invalidateRequest) resultRequest += 1;
   resultMode = mode;
   visibleResults.clear();
   visibleResultOrder = [];
   pendingLiveCommentId = undefined;
   resultsRenderPending = false;
-  resultsNeedRefresh = false;
+  resultsNeedRefresh = true;
   clearTimeout(resultRenderTimer);
   resultRenderTimer = undefined;
+  renderResults();
+}
+
+function syncResultJob(jobMode, jobId) {
+  if (resultJobIds[jobMode] === jobId) return;
+  resultJobIds[jobMode] = jobId;
+  if (jobMode !== mode) return;
+  knownMatches = -1;
+  resetVisibleResults();
+}
+
+function resetVisibleLogs() {
+  logsRequest += 1;
+  logsSignature = "";
+  el.logPath.textContent = "任务启动后将在本地生成结构化日志。";
+  el.logs.replaceChildren(emptyLogRow());
 }
 
 function renderResults(liveCommentId) {
@@ -718,6 +811,8 @@ function estimateInputs() {
   const form = estimateForm();
   return [
     el.estimateComments,
+    el.hostConcurrency,
+    el.exitLimit,
     form.elements.minDelayMs,
     form.elements.jitterMs,
     form.elements.workersPerProxy,
@@ -728,6 +823,7 @@ function estimateInputs() {
 function allEstimateInputs() {
   return [
     el.estimateComments,
+    el.hostConcurrency,
     el.exitLimit,
     el.parallelForm.elements.minDelayMs,
     el.parallelForm.elements.jitterMs,
@@ -760,7 +856,7 @@ async function refreshEstimate(reportInvalid = true) {
     const pageSize = Number(form.elements.pageSize.value);
     const proxyTransport = mode === "parallel" || poolRunning || Boolean(form.elements.proxy?.value.trim());
     const lanes = selectedTaskLaneCount(workersPerLane);
-    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(lanes), workersPerLane: String(workersPerLane), proxyTransport: proxyTransport ? "1" : "0" });
+    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(lanes), workersPerLane: String(workersPerLane), proxyTransport: proxyTransport ? "1" : "0", hostConcurrency: el.hostConcurrency.value });
     const value = await api(`/api/estimate?${params}`);
     if (request !== estimateRequest) return;
     el.estimatePages.textContent = fmt(value.pages);
@@ -769,7 +865,7 @@ async function refreshEstimate(reportInvalid = true) {
     el.estimateConservative.textContent = duration(value.conservativeSeconds);
     const scanMode = mode === "parallel" ? "单曲并行" : "用户来源";
     const transport = value.proxyTransportMaxConcurrent
-      ? ` · 主机聚合保护：总并发最多 ${fmt(value.proxyTransportMaxConcurrent)}，启动间隔至少 ${fmt(value.proxyTransportStartDelayMs)}ms`
+      ? ` · 主机聚合保护：总并发最多 ${fmt(value.proxyTransportMaxConcurrent)}，启动间隔 ${fmt(value.proxyTransportStartDelayMs)}..${fmt(value.proxyTransportStartDelayMs + value.proxyTransportStartJitterMs)}ms`
       : "";
     el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { if (request === estimateRequest) toast(error.message); }
@@ -985,12 +1081,16 @@ async function restoreResumeTask() {
     if (!descriptor || !["parallel", "source"].includes(descriptor.mode)) return false;
     const form = descriptor.mode === "parallel" ? el.parallelForm : el.sourceForm;
     const allowed = descriptor.mode === "parallel"
-      ? new Set(["uid", "songId", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxProxyLanes"])
-      : new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes"]);
+      ? new Set(["uid", "songId", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxProxyLanes", "hostConcurrency"])
+      : new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"]);
     for (const [savedName, value] of Object.entries(descriptor.input || {})) {
       if (!allowed.has(savedName)) continue;
       if (savedName === "maxProxyLanes") {
         el.exitLimit.value = String(value);
+        continue;
+      }
+      if (savedName === "hostConcurrency") {
+        el.hostConcurrency.value = String(value);
         continue;
       }
       const name = savedName === "maxCommentPagesPerSong" ? "maxPages" : savedName;
@@ -1023,24 +1123,49 @@ async function restoreResumeTask() {
 
 async function switchMode(value) {
   if (value === mode) return;
+  const switchVersion = ++modeSwitchVersion;
   const previous = mode;
   mode = value;
   document.body.dataset.mode = mode;
   syncToolbarContext();
   resetVisibleResults();
+  resetVisibleLogs();
   connectResultStream();
   await slideSwap(previous === "parallel" ? el.parallelForm : el.sourceForm, mode === "parallel" ? el.parallelForm : el.sourceForm, mode === "source" ? 1 : -1);
+  if (switchVersion !== modeSwitchVersion) {
+    syncModeVisibility();
+    return;
+  }
   knownMatches = -1;
   void refresh(); void refreshResults();
   if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
   if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
 }
+function syncModeVisibility() {
+  const parallel = mode === "parallel";
+  el.parallelForm.hidden = !parallel;
+  el.parallelForm.setAttribute("aria-hidden", String(!parallel));
+  el.sourceForm.hidden = parallel;
+  el.sourceForm.setAttribute("aria-hidden", String(parallel));
+}
 async function switchPoolSource(value) {
   if (value === poolSource) return;
+  const switchVersion = ++poolSourceSwitchVersion;
   const previous = poolSource;
   poolSource = value;
   await slideSwap(previous === "clash-verge" ? el.clashPoolPane : el.externalPoolPane, poolSource === "clash-verge" ? el.clashPoolPane : el.externalPoolPane, poolSource === "external" ? 1 : -1);
+  if (switchVersion !== poolSourceSwitchVersion) {
+    syncPoolSourceVisibility();
+    return;
+  }
   if (!poolRunning) el.poolToggle.querySelector("span").textContent = poolSource === "external" ? "验证并使用" : "自动优选";
+}
+function syncPoolSourceVisibility() {
+  const clash = poolSource === "clash-verge";
+  el.clashPoolPane.hidden = !clash;
+  el.clashPoolPane.setAttribute("aria-hidden", String(!clash));
+  el.externalPoolPane.hidden = clash;
+  el.externalPoolPane.setAttribute("aria-hidden", String(clash));
 }
 async function slideSwap(outgoing, incoming, direction = 1) {
   if (outgoing === incoming) return;
@@ -1140,12 +1265,14 @@ function syncTaskStartAvailability() {
   el.sourceStart.disabled = disabled;
   el.dryRun.disabled = disabled;
   el.toolbarStart.disabled = disabled;
+  el.hostConcurrency.disabled = disabled;
   el.exitLimit.disabled = disabled;
 }
 function selectedTaskLaneCount(workersPerLane) {
   if (!poolRunning) return 1;
   const requested = Math.max(0, Number(el.exitLimit.value || 0));
-  const automatic = Math.max(1, Math.ceil(HOST_PROXY_CONCURRENCY / Math.max(1, workersPerLane)));
+  const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
+  const automatic = Math.max(1, Math.ceil(hostConcurrency / Math.max(1, workersPerLane)));
   return Math.min(poolLaneCount, requested > 0 ? requested : automatic);
 }
 function syncToolbarContext() {
@@ -1153,12 +1280,13 @@ function syncToolbarContext() {
   const uid = mode === "parallel" ? el.parallelUid.value.trim() : el.uid.value.trim();
   const workers = Number(form.elements.workersPerProxy?.value || 1);
   const lanes = selectedTaskLaneCount(workers);
+  const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
   const laneMode = Number(el.exitLimit.value || 0) > 0 ? "手动" : "自动";
   el.toolbarUid.textContent = uid ? `UID ${uid}` : "UID 待填写";
   el.toolbarMode.textContent = mode === "parallel" ? "单曲并行" : `用户来源 · ${sourceName(form.elements.source?.value)}`;
   el.toolbarTopology.textContent = poolRunning
-    ? `${laneMode} ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · ${fmt(workers)} 线程/IP`
-    : `1 出口 · ${fmt(workers)} 线程/IP`;
+    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · 主机≤${fmt(hostConcurrency)}并发 · 每出口≤${fmt(workers)}线程`
+    : `1 出口 · 主机≤${fmt(hostConcurrency)}并发 · 每出口≤${fmt(workers)}线程`;
 }
 function setActiveNavigation(view) {
   $$('[data-nav-view]').forEach((item) => {
@@ -1169,17 +1297,34 @@ function setActiveNavigation(view) {
   });
 }
 async function activateNavigation(view) {
-  setActiveNavigation(view);
-  if (view === "search") {
+  if (["search", "settings"].includes(view)) {
+    const alreadyOpen = !document.body.classList.contains("task-panel-collapsed");
+    const alreadyActive = $('[data-nav-view].active')?.dataset.navView === view;
+    if (alreadyOpen && alreadyActive) {
+      setTaskPanelCollapsed(true);
+      return;
+    }
+    setActiveNavigation(view);
     setTaskPanelCollapsed(false);
-    return;
-  }
-  if (view === "settings") {
-    setTaskPanelCollapsed(false);
+    if (view === "search") {
+      el.taskSidebar.scrollTo({ top: 0, behavior: "auto" });
+      return;
+    }
     const details = (mode === "parallel" ? el.parallelForm : el.sourceForm).querySelector("details.advanced");
     if (details && details.dataset.expanded !== "true") await animateDisclosure(details, true);
+    if (details) el.taskSidebar.scrollTo({ top: Math.max(0, details.offsetTop - 12), behavior: "auto" });
     return;
   }
+  if (view === "pool") {
+    const alreadyOpen = !document.body.classList.contains("inspector-collapsed");
+    const alreadyActive = $('[data-nav-view].active')?.dataset.navView === "pool";
+    if (alreadyOpen && alreadyActive) {
+      setInspectorCollapsed(true);
+      setActiveNavigation($('.tab.active')?.dataset.tab || "results");
+      return;
+    }
+  }
+  setActiveNavigation(view);
   setTaskPanelCollapsed(true);
   if (view === "pool") setInspectorCollapsed(false);
   openTaskTab(view);
@@ -1189,7 +1334,10 @@ function setTaskPanelCollapsed(collapsed) {
   el.taskPanelToggle.setAttribute("aria-label", "收起任务面板");
   el.taskPanelToggle.title = "收起任务面板";
   el.taskPanelOpen.setAttribute("aria-expanded", String(!collapsed));
+  el.taskPanelOpen.setAttribute("aria-label", collapsed ? "打开任务配置" : "关闭任务配置");
+  el.taskPanelOpen.title = collapsed ? "打开任务配置" : "关闭任务配置";
   el.taskSidebar.setAttribute("aria-hidden", String(collapsed));
+  $$('[data-nav-view="search"], [data-nav-view="settings"]').forEach((item) => item.setAttribute("aria-expanded", String(!collapsed && item.classList.contains("active"))));
   const activeView = $('[data-nav-view].active')?.dataset.navView;
   if (collapsed && ["search", "settings"].includes(activeView)) {
     setActiveNavigation($('.tab.active')?.dataset.tab || "results");
@@ -1202,6 +1350,8 @@ function setInspectorCollapsed(collapsed) {
   document.body.classList.toggle("inspector-collapsed", collapsed);
   el.inspectorToggle.setAttribute("aria-label", collapsed ? "展开运行详情" : "收起运行详情");
   el.inspectorToggle.title = collapsed ? "展开运行详情" : "收起运行详情";
+  el.inspectorToggle.setAttribute("aria-expanded", String(!collapsed));
+  $('[data-nav-view="pool"]')?.setAttribute("aria-expanded", String(!collapsed));
 }
 function setBusy(value) {
   startSubmissionBusy = value;
@@ -1219,7 +1369,7 @@ function duration(seconds) { const days = Math.floor(seconds / 86400); const hou
 function clockDuration(milliseconds) { const seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [hours, minutes, rest].map((value) => String(value).padStart(2, "0")).join(":"); }
 function fileSize(bytes) { return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`; }
 function shortPath(value) { if (!value) return ""; const parts = value.split(/[\\/]/); return parts.slice(-3).join("/"); }
-function panelForTab(value) { return $({ results: "#resultsPanel", logs: "#logsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
+function panelForTab(value) { return $({ results: "#resultsPanel", activity: "#activityPanel", logs: "#logsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
 function escapeHtml(value) { const node = document.createElement("span"); node.textContent = value; return node.innerHTML; }
 function toast(message) { clearTimeout(toastTimer); el.toast.textContent = message; el.toast.hidden = false; toastTimer = setTimeout(() => { el.toast.hidden = true; }, 4500); }
 
@@ -1247,13 +1397,22 @@ el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); 
 el.sourceForm.addEventListener("submit", (event) => { event.preventDefault(); void startSource(false); });
 el.dryRun.addEventListener("click", () => void startSource(true)); el.songLookup.addEventListener("click", () => void lookupSong()); el.lookup.addEventListener("click", () => void lookupUser());
 el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEventListener("click", () => void stopJob()); el.refresh.addEventListener("click", () => void refresh());
+el.clashConfigSelectAll.addEventListener("click", toggleClashConfigs);
+el.clashConfig.addEventListener("change", () => {
+  clashConfigSelection = new Set(selectedClashConfigPaths());
+  syncClashSelectAllButton();
+});
 el.toolbarStart.addEventListener("click", () => (mode === "parallel" ? el.parallelForm : el.sourceForm).requestSubmit());
-el.taskPanelOpen.addEventListener("click", () => { setActiveNavigation("search"); setTaskPanelCollapsed(false); });
+el.taskPanelOpen.addEventListener("click", () => {
+  if (!document.body.classList.contains("task-panel-collapsed")) setTaskPanelCollapsed(true);
+  else void activateNavigation("search");
+});
 el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(true));
 el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
 $$('[data-nav-view]').forEach((item) => item.addEventListener("click", () => void activateNavigation(item.dataset.navView)));
 $$('#parallelForm input, #sourceForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
 el.exitLimit.addEventListener("input", syncToolbarContext);
+el.hostConcurrency.addEventListener("input", syncToolbarContext);
 el.estimateButton.addEventListener("click", () => void refreshEstimate());
 allEstimateInputs().forEach((input) => input.addEventListener("input", () => scheduleEstimateRefresh()));
 $$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
@@ -1271,7 +1430,22 @@ el.updateDownload.addEventListener("click", (event) => void activateUpdate(event
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
-$$('.tab').forEach((tab) => tab.addEventListener("click", () => void activateTaskTab(tab)));
+$$('.tab').forEach((tab) => {
+  tab.addEventListener("click", () => void activateTaskTab(tab));
+  tab.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = $$('.tab');
+    const current = tabs.indexOf(tab);
+    const next = event.key === "Home"
+      ? tabs[0]
+      : event.key === "End"
+      ? tabs.at(-1)
+      : tabs[(current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    next.focus();
+    void activateTaskTab(next);
+  });
+});
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));
 if (innerWidth <= 1120) setInspectorCollapsed(true);
@@ -1316,9 +1490,11 @@ addEventListener("pagehide", () => {
 });
 
 async function activateTaskTab(tab) {
+  const switchVersion = ++tabSwitchVersion;
   setTaskPanelCollapsed(true);
   const current = $('.tab.active');
   if (current === tab) {
+    syncTaskTabVisibility();
     if (tab.dataset.tab === "logs") await refreshLogs();
     if (tab.dataset.tab === "results") {
       if (resultsNeedRefresh) await refreshResults();
@@ -1332,13 +1508,35 @@ async function activateTaskTab(tab) {
     const active = item === tab;
     item.classList.toggle("active", active);
     item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
   });
   setActiveNavigation(tab.dataset.tab);
   await slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction);
+  if (switchVersion !== tabSwitchVersion) {
+    syncTaskTabVisibility();
+    return;
+  }
+  syncTaskTabVisibility();
   if (tab.dataset.tab === "estimate") await refreshEstimate();
   if (tab.dataset.tab === "logs") await refreshLogs();
   if (tab.dataset.tab === "results") {
     if (resultsNeedRefresh) await refreshResults();
     else if (resultsRenderPending) flushResultsRender();
+  }
+}
+
+function syncTaskTabVisibility() {
+  const activeName = $('.tab.active')?.dataset.tab || "results";
+  $$('.tab').forEach((item) => {
+    const active = item.dataset.tab === activeName;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
+  });
+  for (const name of ["results", "activity", "logs", "pool", "estimate"]) {
+    const panel = panelForTab(name);
+    if (!panel) continue;
+    panel.hidden = name !== activeName;
+    panel.setAttribute("aria-hidden", String(name !== activeName));
   }
 }

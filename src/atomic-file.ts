@@ -88,11 +88,17 @@ export async function readAtomicJson<T>(
   const candidates = await atomicCandidates(path);
   let primaryError: unknown;
   for (const candidate of candidates) {
+    let parsed: unknown;
     try {
-      return decode(JSON.parse(await readFile(candidate.path, "utf8")) as unknown);
+      parsed = JSON.parse(await readFile(candidate.path, "utf8")) as unknown;
     } catch (error) {
       if (candidate.primary && !isMissing(error)) primaryError = error;
+      continue;
     }
+    // The newest syntactically complete JSON document is authoritative.
+    // Falling back after a schema/decode failure would silently roll state
+    // back and could overwrite a future-version checkpoint.
+    return decode(parsed);
   }
   if (primaryError) throw primaryError;
   return undefined;

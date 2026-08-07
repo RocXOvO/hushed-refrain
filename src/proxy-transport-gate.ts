@@ -3,14 +3,17 @@ import type { RequestGovernor } from "./governor";
 
 export const DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT = 8;
 export const DEFAULT_PROXY_TRANSPORT_START_DELAY_MS = 80;
+export const DEFAULT_PROXY_TRANSPORT_START_JITTER_MS = 40;
 
 export interface ProxyTransportGateOptions {
   maxConcurrent?: number;
   minStartDelayMs?: number;
+  startJitterMs?: number;
 }
 
 export interface ProxyTransportGateRuntime {
   now: () => number;
+  random: () => number;
   sleep: (milliseconds: number) => Promise<void>;
 }
 
@@ -21,6 +24,7 @@ interface CapacityWaiter {
 
 const defaultRuntime: ProxyTransportGateRuntime = {
   now: () => Date.now(),
+  random: () => Math.random(),
   sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 };
 
@@ -36,9 +40,11 @@ export class ProxyTransportGate {
   private cancelled = false;
   private lastStartedAt = 0;
   private readonly waiters: CapacityWaiter[] = [];
+  private readonly sleepWaiters = new Set<() => void>();
   private startTail: Promise<void> = Promise.resolve();
   private readonly maxConcurrent: number;
   private readonly minStartDelayMs: number;
+  private readonly startJitterMs: number;
 
   constructor(
     options: ProxyTransportGateOptions = {},
@@ -46,11 +52,15 @@ export class ProxyTransportGate {
   ) {
     this.maxConcurrent = options.maxConcurrent ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT;
     this.minStartDelayMs = options.minStartDelayMs ?? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS;
+    this.startJitterMs = options.startJitterMs ?? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS;
     if (!Number.isInteger(this.maxConcurrent) || this.maxConcurrent <= 0) {
       throw new Error("maxConcurrent must be a positive integer.");
     }
     if (!Number.isInteger(this.minStartDelayMs) || this.minStartDelayMs < 0) {
       throw new Error("minStartDelayMs must be a non-negative integer.");
+    }
+    if (!Number.isInteger(this.startJitterMs) || this.startJitterMs < 0) {
+      throw new Error("startJitterMs must be a non-negative integer.");
     }
   }
 
@@ -58,6 +68,8 @@ export class ProxyTransportGate {
     if (this.cancelled) return;
     this.cancelled = true;
     for (const waiter of this.waiters.splice(0)) waiter.reject(new RunCancelled());
+    for (const wake of [...this.sleepWaiters]) wake();
+    this.sleepWaiters.clear();
   }
 
   async run<T>(request: () => Promise<T>): Promise<T> {
@@ -99,8 +111,14 @@ export class ProxyTransportGate {
     try {
       this.throwIfCancelled();
       if (this.lastStartedAt !== 0) {
-        const waitMs = this.lastStartedAt + this.minStartDelayMs - this.runtime.now();
-        if (waitMs > 0) await this.runtime.sleep(waitMs);
+        const sample = this.runtime.random();
+        const random = Number.isFinite(sample) ? Math.max(0, Math.min(1, sample)) : 0;
+        const jitterMs = Math.min(
+          this.startJitterMs,
+          Math.floor(random * (this.startJitterMs + 1)),
+        );
+        const waitMs = this.lastStartedAt + this.minStartDelayMs + jitterMs - this.runtime.now();
+        if (waitMs > 0) await this.cancellableSleep(waitMs);
       }
       this.throwIfCancelled();
       this.lastStartedAt = this.runtime.now();
@@ -111,6 +129,19 @@ export class ProxyTransportGate {
 
   private throwIfCancelled(): void {
     if (this.cancelled) throw new RunCancelled();
+  }
+
+  private async cancellableSleep(milliseconds: number): Promise<void> {
+    let wake = (): void => {};
+    const cancelled = new Promise<void>((resolve) => {
+      wake = resolve;
+      this.sleepWaiters.add(wake);
+    });
+    try {
+      await Promise.race([this.runtime.sleep(milliseconds), cancelled]);
+    } finally {
+      this.sleepWaiters.delete(wake);
+    }
   }
 }
 

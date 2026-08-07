@@ -721,6 +721,42 @@ test("pooled source scan uses multiple workers on one proxy lane", async () => {
   assert.equal(tracker.maxActive, 2);
 });
 
+test("a late concurrent success revives a source lane after clustered failures", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-late-lane-success-"));
+  const config = await options(directory);
+  config.source = "record";
+  const songs: SongCandidate[] = Array.from({ length: 6 }, (_, index) => ({
+    id: String(index + 1),
+    name: `song-${index + 1}`,
+    sources: ["record"],
+  }));
+  let calls = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      const call = ++calls;
+      if (call <= 5) throw { status: 502, body: { code: 502 } };
+      if (call === 6) await new Promise((resolve) => setTimeout(resolve, 30));
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runPooledCommentFinder([{
+    name: "recovering",
+    client,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 6, requestBudget: 100 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.songsProcessed, 6);
+  assert.ok(calls >= 11);
+  assert.doesNotMatch(report.note ?? "", /连续网络失败/);
+});
+
 test("pooled source scan splits one song across all waiting proxy lanes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-one-song-pool-"));
   const config = await options(directory);

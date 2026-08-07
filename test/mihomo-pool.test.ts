@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ import {
   selectFastestDistinct,
   stopMihomoPool,
   verifyProxyPool,
+  waitForPorts,
 } from "../src/mihomo-pool";
 import type { ProxyPoolEntry, ProxyPoolFile } from "../src/mihomo-pool";
 
@@ -81,6 +83,36 @@ test("migrates a legacy single-config pool file to the multi-config shape", asyn
   const pool = await readProxyPool(poolPath);
   assert.equal(pool?.source, "clash-verge");
   assert.deepEqual(pool?.sourceConfigPaths, ["/profiles/legacy.yaml"]);
+});
+
+test("recovers a completed atomic proxy-pool temp after an interrupted rename", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pool-atomic-recovery-"));
+  const poolPath = join(directory, "proxy-pool.json");
+  await writeFile(`${poolPath}.tmp-123-recovery`, JSON.stringify({
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    active: false,
+    source: "external",
+    entries: [],
+  }));
+
+  const pool = await readProxyPool(poolPath);
+  assert.equal(pool?.source, "external");
+  assert.equal(pool?.active, false);
+});
+
+test("listener probing shares one timeout across bounded batches", async () => {
+  const servers = Array.from({ length: 8 }, () => createServer());
+  await Promise.all(servers.map((server) => new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => resolve());
+  })));
+  const ports = servers.map((server) => (server.address() as { port: number }).port);
+  await Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  const startedAt = Date.now();
+
+  await assert.rejects(waitForPorts(ports, 100, 1), /did not start/);
+  assert.ok(Date.now() - startedAt < 700, "later batches must not receive a fresh timeout");
 });
 
 test("selects the fastest verified entries from distinct egress networks", () => {

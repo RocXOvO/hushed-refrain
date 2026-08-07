@@ -138,6 +138,28 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.ok(checkpoints.some((activity) => activity.shardsComplete === 2 && activity.pagesProcessed === 2 && activity.requestsTotal === 2));
 });
 
+test("publishes stable worker identity and song metadata for live activity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-activity-"));
+  const client = new ParallelFakeClient();
+  const config = await options(directory);
+  const activities: Array<{ phase: string; workerId?: string; songId: string; songName?: string }> = [];
+  config.onRequestActivity = (activity) => activities.push(activity);
+
+  await runParallelSongScan([{
+    name: "lane-1",
+    client,
+    governor: governor(),
+  }], config);
+
+  const starts = activities.filter((activity) => activity.phase === "start");
+  assert.equal(starts.length, 2);
+  assert.deepEqual(new Set(starts.map((activity) => activity.workerId)), new Set(["lane-1:1", "lane-1:2"]));
+  assert.ok(activities.every((activity) => activity.songId === "186016" && activity.songName === "song"));
+  for (const start of starts) {
+    assert.ok(activities.some((activity) => activity.phase === "success" && activity.workerId === start.workerId));
+  }
+});
+
 test("continues an empty page when its descending cursor advances", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-empty-page-"));
   const client = new ParallelFakeClient();
@@ -280,4 +302,79 @@ test("requeues a shard when one proxy lane fails", async () => {
   assert.equal(goodClient.maxActive, 1);
   assert.equal(failedCalls, 1);
   assert.doesNotMatch(report.note ?? "", /Failed lanes/);
+});
+
+test("an external stop signal wakes lane backoff without waiting for its retry deadline", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-stop-backoff-"));
+  const client = new ParallelFakeClient();
+  let calls = 0;
+  client.getSongCommentsByCursor = async () => {
+    calls += 1;
+    throw { status: 502, body: { code: 502 } };
+  };
+  const controller = new AbortController();
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  config.signal = controller.signal;
+  setTimeout(() => controller.abort(), 25);
+  const startedAt = Date.now();
+
+  const report = await runParallelSongScan([{
+    name: "failed",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "stopped");
+  assert.equal(calls, 1);
+  assert.ok(Date.now() - startedAt < 500, "stop should wake the one-second lane backoff");
+});
+
+test("pauses instead of retrying forever when every worker repeatedly loses its lane", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-failed-lane-limit-"));
+  const client = new ParallelFakeClient();
+  let calls = 0;
+  client.getSongCommentsByCursor = async () => {
+    calls += 1;
+    throw { status: 502, body: { code: 502 } };
+  };
+  const config = await options(directory);
+  config.shardCount = 5;
+  config.workersPerLane = 5;
+
+  const report = await runParallelSongScan([{
+    name: "failed",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "paused");
+  assert.equal(calls, 5);
+  assert.match(report.note ?? "", /repeated network failures/);
+});
+
+test("a late concurrent success keeps a temporarily failed lane available", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-late-lane-success-"));
+  const client = new ParallelFakeClient();
+  let calls = 0;
+  client.getSongCommentsByCursor = async () => {
+    const call = ++calls;
+    if (call <= 5) throw { status: 502, body: { code: 502 } };
+    if (call === 6) await new Promise((resolve) => setTimeout(resolve, 30));
+    return { comments: [], hasMore: false };
+  };
+  const config = await options(directory);
+  config.shardCount = 6;
+  config.workersPerLane = 6;
+
+  const report = await runParallelSongScan([{
+    name: "recovering",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "complete");
+  assert.ok(calls >= 11);
+  assert.doesNotMatch(report.note ?? "", /repeated network failures/);
 });

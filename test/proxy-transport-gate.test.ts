@@ -9,7 +9,7 @@ import {
 } from "../src/proxy-transport-gate";
 
 test("caps aggregate in-flight proxy requests across lanes", async () => {
-  const gate = new ProxyTransportGate({ maxConcurrent: 2, minStartDelayMs: 0 });
+  const gate = new ProxyTransportGate({ maxConcurrent: 2, minStartDelayMs: 0, startJitterMs: 0 });
   let active = 0;
   let peak = 0;
   const requests = Array.from({ length: 8 }, () => gate.run(async () => {
@@ -28,6 +28,7 @@ test("serializes aggregate request starts with the configured spacing", async ()
   const sleeps: number[] = [];
   const runtime: ProxyTransportGateRuntime = {
     now: () => now,
+    random: () => 0,
     sleep: async (milliseconds) => { sleeps.push(milliseconds); now += milliseconds; },
   };
   const gate = new ProxyTransportGate({ maxConcurrent: 3, minStartDelayMs: 80 }, runtime);
@@ -40,6 +41,40 @@ test("serializes aggregate request starts with the configured spacing", async ()
   assert.equal(started.length, 3);
   assert.deepEqual(sleeps, [80, 80]);
   assert.equal(now, 1_160);
+});
+
+test("adds deterministic bounded jitter between aggregate starts", async () => {
+  let now = 1_000;
+  const sleeps: number[] = [];
+  const randomValues = [0.5, 1];
+  const runtime: ProxyTransportGateRuntime = {
+    now: () => now,
+    random: () => randomValues.shift() ?? 0,
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); now += milliseconds; },
+  };
+  const gate = new ProxyTransportGate({
+    maxConcurrent: 3,
+    minStartDelayMs: 80,
+    startJitterMs: 120,
+  }, runtime);
+
+  await Promise.all(Array.from({ length: 3 }, () => gate.run(async () => undefined)));
+
+  assert.deepEqual(sleeps, [140, 200]);
+});
+
+test("clamps invalid and upper-bound random samples", async () => {
+  let now = 1_000;
+  const sleeps: number[] = [];
+  const randomValues = [Number.NaN, 1];
+  const gate = new ProxyTransportGate({ maxConcurrent: 3, minStartDelayMs: 80, startJitterMs: 120 }, {
+    now: () => now,
+    random: () => randomValues.shift() ?? 0,
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); now += milliseconds; },
+  });
+
+  await Promise.all(Array.from({ length: 3 }, () => gate.run(async () => undefined)));
+  assert.deepEqual(sleeps, [80, 200]);
 });
 
 test("releases capacity after a failed request", async () => {
@@ -59,6 +94,23 @@ test("cancellation rejects queued work without interrupting an in-flight request
   await assert.rejects(queued, RunCancelled);
   finish();
   await first;
+});
+
+test("cancellation wakes work waiting for aggregate start spacing", async () => {
+  let resolveSleep!: () => void;
+  const runtime: ProxyTransportGateRuntime = {
+    now: () => 1_000,
+    random: () => 0,
+    sleep: () => new Promise<void>((resolve) => { resolveSleep = resolve; }),
+  };
+  const gate = new ProxyTransportGate({ maxConcurrent: 2, minStartDelayMs: 10_000, startJitterMs: 0 }, runtime);
+  await gate.run(async () => undefined);
+  const waiting = gate.run(async () => "never");
+  await new Promise((resolve) => setImmediate(resolve));
+
+  gate.cancel();
+  await assert.rejects(waiting, RunCancelled);
+  resolveSleep();
 });
 
 test("governor retries reacquire the shared transport gate", async () => {

@@ -12,6 +12,8 @@ const defaultRuntime: LaneRecoveryRuntime = {
 export class LaneRecovery {
   private consecutiveFailures = 0;
   private retryAt = 0;
+  private cancelled = false;
+  private readonly wakeWaiters = new Set<() => void>();
 
   constructor(
     private readonly baseDelayMs = 1_000,
@@ -32,13 +34,42 @@ export class LaneRecovery {
     return delay;
   }
 
+  get failureCount(): number {
+    return this.consecutiveFailures;
+  }
+
   recordSuccess(): void {
     this.consecutiveFailures = 0;
     this.retryAt = 0;
+    for (const wake of [...this.wakeWaiters]) wake();
+    this.wakeWaiters.clear();
+  }
+
+  cancel(): void {
+    if (this.cancelled) return;
+    this.cancelled = true;
+    for (const wake of [...this.wakeWaiters]) wake();
+    this.wakeWaiters.clear();
   }
 
   async waitUntilReady(): Promise<void> {
+    if (this.cancelled) return;
     const waitMs = this.retryAt - this.runtime.now();
-    if (waitMs > 0) await this.runtime.sleep(waitMs);
+    if (waitMs <= 0) return;
+    let wake = (): void => {};
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancelled = new Promise<void>((resolve) => {
+      wake = resolve;
+      this.wakeWaiters.add(wake);
+    });
+    const sleeping = this.runtime === defaultRuntime
+      ? new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); })
+      : this.runtime.sleep(waitMs);
+    try {
+      await Promise.race([sleeping, cancelled]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      this.wakeWaiters.delete(wake);
+    }
   }
 }

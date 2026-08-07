@@ -135,6 +135,7 @@ export interface ParallelSongScanOptions {
   fresh: boolean;
   statePath: string;
   outputPath: string;
+  signal?: AbortSignal;
   onMatch?: (comment: FoundComment) => void;
   onCheckpoint?: (activity: ParallelCheckpointActivity) => void;
   onRequestActivity?: (activity: ScanRequestActivity) => void;
@@ -253,6 +254,7 @@ export interface ScanOptions {
   stopAfterFirst: boolean;
   fresh: boolean;
   dryRun: boolean;
+  signal?: AbortSignal;
   onMatch?: (comment: FoundComment) => void;
   onCheckpoint?: (activity: ScanCheckpointActivity) => void;
   onSongCatalog?: (songs: readonly SongCandidate[]) => void;

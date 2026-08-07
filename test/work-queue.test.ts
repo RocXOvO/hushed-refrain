@@ -23,6 +23,18 @@ test("wakes waiting workers when scheduling stops", async () => {
   queue.complete();
 });
 
+test("publishes closure when queued and in-flight work is finished", async () => {
+  const queue = new AsyncWorkQueue([1]);
+  assert.equal(queue.isClosed(), false);
+  assert.equal(await queue.take(), 1);
+  let closed = false;
+  const closure = queue.whenClosed().then(() => { closed = true; });
+  queue.complete();
+  await closure;
+  assert.equal(closed, true);
+  assert.equal(queue.isClosed(), true);
+});
+
 test("fans adaptive split work out to multiple waiting workers", async () => {
   const queue = new AsyncWorkQueue([1]);
   assert.equal(await queue.take(), 1);

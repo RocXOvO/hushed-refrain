@@ -97,3 +97,36 @@ test("recognizes the legacy fixed sibling temp left by an older Windows client",
   assert.deepEqual(await readAtomicJson(path, (value) => value as { generation: number }), { generation: 2 });
   assert.deepEqual(JSON.parse(await readFile(path, "utf8")), { generation: 1 });
 });
+
+test("does not hide an unsupported primary schema behind an older temp", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-atomic-schema-"));
+  const path = join(root, "state.json");
+  const temporary = `${path}.tmp-old`;
+  await writeFile(temporary, '{"version":1}\n', "utf8");
+  await utimes(temporary, new Date(0), new Date(0));
+  await writeFile(path, '{"version":2}\n', "utf8");
+
+  await assert.rejects(
+    readAtomicJson(path, (value) => {
+      if ((value as { version?: number }).version !== 1) throw new Error("unsupported schema");
+      return value;
+    }),
+    /unsupported schema/,
+  );
+});
+
+test("does not ignore an unsupported newer completed temp", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-atomic-temp-schema-"));
+  const path = join(root, "state.json");
+  await writeFile(path, '{"version":1}\n', "utf8");
+  await utimes(path, new Date(0), new Date(0));
+  await writeFile(`${path}.tmp-future`, '{"version":2}\n', "utf8");
+
+  await assert.rejects(
+    readAtomicJson(path, (value) => {
+      if ((value as { version?: number }).version !== 1) throw new Error("unsupported schema");
+      return value;
+    }),
+    /unsupported schema/,
+  );
+});

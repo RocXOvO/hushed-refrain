@@ -100,3 +100,26 @@ test("rejects an invalid page size", () => {
     jitterMs: 0,
   }), /pageSize/);
 });
+
+test("uses the configured host concurrency and randomized start interval", () => {
+  const estimate = estimateCommentScan({
+    comments: 100_000,
+    pageSize: 1_000,
+    minDelayMs: 0,
+    jitterMs: 0,
+    networkMs: 400,
+    lanes: 8,
+    workersPerLane: 2,
+    proxyTransport: true,
+    proxyTransportMaxConcurrent: 4,
+    proxyTransportStartDelayMs: 80,
+    proxyTransportStartJitterMs: 120,
+  });
+
+  assert.equal(estimate.effectiveWorkers, 4);
+  assert.equal(estimate.proxyTransportMaxConcurrent, 4);
+  assert.equal(estimate.proxyTransportStartJitterMs, 120);
+  assert.equal(estimate.optimisticSeconds, 10);
+  assert.equal(estimate.expectedSeconds, 14);
+  assert.equal(estimate.conservativeSeconds, 20);
+});

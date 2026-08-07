@@ -19,3 +19,11 @@ test("honors a manual exit cap without exceeding verified availability", () => {
   assert.deepEqual(selectProxyLanes(pool, 2, 1, 8).entries, ["a", "b"]);
   assert.deepEqual(selectProxyLanes(pool, 9, 1, 8).entries, pool);
 });
+
+test("auto selection follows custom host concurrency across supported bounds", () => {
+  const pool = Array.from({ length: 32 }, (_, index) => `proxy-${index + 1}`);
+  assert.equal(selectProxyLanes(pool, 0, 3, 1).entries.length, 1);
+  assert.equal(selectProxyLanes(pool, 0, 3, 8).entries.length, 3);
+  assert.equal(selectProxyLanes(pool, 0, 3, 12).entries.length, 4);
+  assert.equal(selectProxyLanes(pool, 0, 3, 32).entries.length, 11);
+});

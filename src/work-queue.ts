@@ -4,9 +4,14 @@ export class AsyncWorkQueue<T> {
   private readonly waiters: Array<(item: T | undefined) => void> = [];
   private inFlight = 0;
   private closed = false;
+  private readonly closedPromise: Promise<void>;
+  private resolveClosed!: () => void;
 
   constructor(initialItems: Iterable<T>) {
     this.items = [...initialItems];
+    this.closedPromise = new Promise<void>((resolve) => {
+      this.resolveClosed = resolve;
+    });
   }
 
   take(): Promise<T | undefined> {
@@ -17,7 +22,7 @@ export class AsyncWorkQueue<T> {
       return Promise.resolve(item);
     }
     if (this.inFlight === 0) {
-      this.closed = true;
+      this.close();
       return Promise.resolve(undefined);
     }
     return new Promise((resolve) => this.waiters.push(resolve));
@@ -37,9 +42,17 @@ export class AsyncWorkQueue<T> {
     return this.waiters.length;
   }
 
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  whenClosed(): Promise<void> {
+    return this.closedPromise;
+  }
+
   stop(): void {
     if (this.closed) return;
-    this.closed = true;
+    this.close();
     this.items.length = 0;
     this.head = 0;
     this.resolveWaiters();
@@ -53,7 +66,7 @@ export class AsyncWorkQueue<T> {
       waiter(item);
     }
     if (!this.closed && this.queuedCount() === 0 && this.inFlight === 0) {
-      this.closed = true;
+      this.close();
       this.resolveWaiters();
     }
   }
@@ -75,5 +88,11 @@ export class AsyncWorkQueue<T> {
 
   private resolveWaiters(): void {
     for (const waiter of this.waiters.splice(0)) waiter(undefined);
+  }
+
+  private close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.resolveClosed();
   }
 }
