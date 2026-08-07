@@ -110,6 +110,7 @@ export interface ParallelSongScanState {
   shards: CommentTimeShard[];
   pagesProcessed: number;
   commentsInspected: number;
+  totalComments?: number;
   requestCount: number;
   matchCount: number;
   seenCommentIds: string[];
@@ -149,6 +150,7 @@ export interface ParallelSongScanReport {
   shardsComplete: number;
   pagesProcessed: number;
   commentsInspected: number;
+  totalComments?: number;
   matches: number;
   requestsThisRun: number;
   requestsTotal: number;
@@ -172,6 +174,7 @@ export interface FoundComment extends CommentRecord {
 
 export interface SongScanProgress {
   commentOffset: number;
+  totalComments?: number;
   pageInSong: number;
   commentCursor?: string;
   commentPageNo?: number;
@@ -233,6 +236,8 @@ export interface SongScanActivity {
   songId: string;
   songName?: string;
   pageInSong: number;
+  commentsProcessed: number;
+  totalComments?: number;
 }
 
 export interface ScanRequestActivity {
@@ -244,6 +249,7 @@ export interface ScanRequestActivity {
   shardId?: number;
   elapsedMs?: number;
   comments?: number;
+  totalComments?: number;
   hasMore?: boolean;
   status?: number;
   rateLimited?: boolean;

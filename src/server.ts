@@ -7,6 +7,14 @@ import { EnhancedNcmClient, type NcmUserProfile } from "./api";
 import { CooldownRequired } from "./errors";
 import { estimateCommentScan } from "./estimate";
 import { RequestGovernor } from "./governor";
+import { readJsonlTail } from "./jsonl-tail";
+import { timeCoveragePercent } from "./progress";
+import {
+  DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+  DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+  executeProxyRequest,
+  ProxyTransportGate,
+} from "./proxy-transport-gate";
 import {
   defaultMihomoPoolOptions,
   discoverClashVerge,
@@ -82,7 +90,13 @@ interface JobSnapshot {
   songs: number;
   songsProcessed: number;
   commentOffset: number;
-  currentSong?: { id: string; name?: string; pageInSong?: number };
+  currentSong?: {
+    id: string;
+    name?: string;
+    pageInSong?: number;
+    commentsProcessed: number;
+    totalComments?: number;
+  };
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
@@ -90,6 +104,8 @@ interface JobSnapshot {
   logPath?: string;
   lanes: number;
   workers: number;
+  proxyTransportMaxConcurrent?: number;
+  proxyTransportStartDelayMs?: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   blockedUntil?: string;
@@ -108,10 +124,14 @@ interface ParallelJobSnapshot {
   finishedAt?: string;
   lanes: number;
   workers: number;
+  proxyTransportMaxConcurrent?: number;
+  proxyTransportStartDelayMs?: number;
   shards: number;
   shardsComplete: number;
+  coveragePercent: number;
   pagesProcessed: number;
   commentsInspected: number;
+  totalComments?: number;
   matches: number;
   requestsTotal: number;
   elapsedMs: number;
@@ -135,6 +155,7 @@ interface StartJobInput {
   fresh?: unknown;
   dryRun?: unknown;
   proxy?: unknown;
+  allowDirect?: unknown;
   workersPerProxy?: unknown;
 }
 
@@ -197,6 +218,7 @@ const iconRoot = join(projectRoot, "node_modules", "lucide-static", "icons");
 class JobManager {
   private snapshotValue: JobSnapshot = emptySnapshot();
   private lanes: SourceScanLane[] = [];
+  private transportGate?: ProxyTransportGate;
   private statePath?: string;
   private outputPath?: string;
   private readonly matchSubscribers = new Set<MatchSubscriber>();
@@ -224,15 +246,25 @@ class JobManager {
     const maxSongs = integer(input.maxSongs ?? 0, "maxSongs", 0, 100_000);
     const workersPerLane = integer(input.workersPerProxy ?? 1, "workersPerProxy", 1, 8);
     const proxy = proxyUrl(input.proxy);
+    const allowDirect = bool(input.allowDirect);
     const jobKey = `${uid}-${source}`;
     this.statePath = join(this.paths.data, `web-state-${jobKey}.json`);
     this.outputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
     const activePool = await readProxyPool(this.paths.pool);
-    const poolEntries = activePool && proxyPoolRunning(activePool) ? await verifyProxyPool(activePool) : [];
+    const activePoolExpected = Boolean(activePool && proxyPoolRunning(activePool));
+    const poolEntries = activePoolExpected ? await verifyProxyPool(activePool!) : [];
+    if (activePoolExpected && poolEntries.length === 0) {
+      throw new HttpError(409, "代理池复核后没有可用出口；已阻止回退到本机直连，请重新构建代理池。");
+    }
+    if (!activePoolExpected && !proxy && !allowDirect) {
+      throw new HttpError(409, "未检测到可用代理。为防止静默暴露本机出口，任务未启动；请先运行代理池、填写单代理，或明确勾选允许本机直连。");
+    }
     const endpoints = poolEntries.length > 0 ? poolEntries.map((entry) => entry.endpoint) : [proxy];
+    this.transportGate = endpoints.some(Boolean) ? new ProxyTransportGate() : undefined;
     this.lanes = endpoints.map((endpoint, index) => ({
       name: poolEntries[index]?.name ?? (endpoint ? "static-proxy" : "direct"),
       client: new EnhancedNcmClient({ proxy: endpoint }),
+      transportGate: this.transportGate,
       governor: new RequestGovernor({
         requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2),
         concurrency: workersPerLane,
@@ -273,6 +305,8 @@ class JobManager {
             id: activity.songId,
             name: activity.songName,
             pageInSong: activity.pageInSong,
+            commentsProcessed: activity.commentsProcessed,
+            totalComments: activity.totalComments,
           },
         };
       },
@@ -281,6 +315,8 @@ class JobManager {
       ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
       startedAt, proxyEnabled: poolEntries.length > 0 || Boolean(proxy),
       lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
+      proxyTransportMaxConcurrent: this.transportGate ? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT : undefined,
+      proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
       logPath: logger.path,
     };
     await logger.write("info", "task_started", "用户来源扫描已启动。", {
@@ -291,6 +327,8 @@ class JobManager {
       lanes: this.lanes.length,
       workers: this.lanes.length * workersPerLane,
       requestBudget,
+      proxyTransportMaxConcurrent: this.transportGate ? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT : undefined,
+      proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
@@ -309,6 +347,7 @@ class JobManager {
           maxCommentPagesPerSong,
           maxSongs,
           workersPerProxy: workersPerLane,
+          allowDirect,
         },
       });
     } catch (error) {
@@ -343,19 +382,28 @@ class JobManager {
         this.fail(activeId, error);
       })
       .finally(() => {
-        if (this.snapshotValue.id === activeId) this.lanes = [];
+        if (this.snapshotValue.id === activeId) {
+          this.lanes = [];
+          this.transportGate = undefined;
+        }
         lease.release();
       });
     launched = true;
     return this.status();
     } finally {
-      if (!launched) lease.release();
+      if (!launched) {
+        this.transportGate?.cancel();
+        this.transportGate = undefined;
+        this.lanes = [];
+        lease.release();
+      }
     }
   }
 
   async stop(): Promise<JobSnapshot> {
     if (this.snapshotValue.status !== "running") return this.status();
     this.snapshotValue.status = "stopping";
+    this.transportGate?.cancel();
     for (const lane of this.lanes) lane.governor.cancel();
     return this.status();
   }
@@ -371,6 +419,8 @@ class JobManager {
           id: current.id,
           name: current.name,
           pageInSong: (progress[currentIndex]?.pageInSong ?? state.pageInSong) + 1,
+          commentsProcessed: progress[currentIndex]?.commentOffset ?? state.commentOffset,
+          totalComments: progress[currentIndex]?.totalComments,
         } : undefined;
         const activeCurrent = ["running", "stopping"].includes(this.snapshotValue.status)
           ? this.snapshotValue.currentSong
@@ -419,6 +469,7 @@ class JobManager {
 class ParallelJobManager {
   private snapshotValue: ParallelJobSnapshot = emptyParallelSnapshot();
   private lanes: ParallelCommentLane[] = [];
+  private transportGate?: ProxyTransportGate;
   private statePath?: string;
   private outputPath?: string;
   private readonly matchSubscribers = new Set<MatchSubscriber>();
@@ -447,15 +498,20 @@ class ParallelJobManager {
     const pool = await readProxyPool(this.paths.pool);
     if (!pool || !proxyPoolRunning(pool)) throw new HttpError(409, "代理池尚未运行。");
     const entries = await verifyProxyPool(pool);
+    if (entries.length === 0) {
+      throw new HttpError(409, "代理池复核后没有可用出口；已阻止回退到本机直连，请重新构建代理池。");
+    }
+    this.transportGate = new ProxyTransportGate();
     this.lanes = entries.map((entry, index) => ({
       name: `proxy-${index + 1}`,
       client: new EnhancedNcmClient({ proxy: entry.endpoint }),
+      transportGate: this.transportGate,
       governor: new RequestGovernor({
         requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2), concurrency: workersPerLane, minDelayMs, jitterMs,
         maxRetries: 2, forbiddenCooldownMs,
       }),
     }));
-    const song = await this.lanes[0].governor.execute(`song_detail:${songId}`, () => this.lanes[0].client.getSongInfo(songId));
+    const song = await executeProxyRequest(this.lanes[0], `song_detail:${songId}`, () => this.lanes[0].client.getSongInfo(songId));
     const previousPath = join(this.paths.data, `parallel-state-${uid}-${songId}.json`);
     const previous = bool(input.fresh) ? undefined : await loadParallelState(previousPath);
     this.statePath = previousPath;
@@ -470,6 +526,8 @@ class ParallelJobManager {
       ...emptyParallelSnapshot(), id: activeId, status: "running", uid, songId,
       songName: song.name, startedAt, lanes: this.lanes.length,
       workers: this.lanes.length * workersPerLane, shards: shardCount,
+      proxyTransportMaxConcurrent: DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
       logPath: logger.path,
     };
     await logger.write("info", "task_started", "单曲并行扫描已启动。", {
@@ -481,6 +539,8 @@ class ParallelJobManager {
       lanes: this.lanes.length,
       workers: this.lanes.length * workersPerLane,
       requestBudget,
+      proxyTransportMaxConcurrent: DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
@@ -533,19 +593,28 @@ class ParallelJobManager {
       if (this.snapshotValue.id !== activeId) return;
       this.snapshotValue = { ...this.snapshotValue, status: "error", finishedAt: new Date().toISOString(), error: message(error) };
     }).finally(() => {
-      if (this.snapshotValue.id === activeId) this.lanes = [];
+      if (this.snapshotValue.id === activeId) {
+        this.lanes = [];
+        this.transportGate = undefined;
+      }
       lease.release();
     });
     launched = true;
     return this.status();
     } finally {
-      if (!launched) lease.release();
+      if (!launched) {
+        this.transportGate?.cancel();
+        this.transportGate = undefined;
+        this.lanes = [];
+        lease.release();
+      }
     }
   }
 
   async stop(): Promise<ParallelJobSnapshot> {
     if (this.snapshotValue.status !== "running") return this.status();
     this.snapshotValue.status = "stopping";
+    this.transportGate?.cancel();
     for (const lane of this.lanes) lane.governor.cancel();
     return this.status();
   }
@@ -557,7 +626,9 @@ class ParallelJobManager {
         this.snapshotValue = {
           ...this.snapshotValue, shards: state.shards.length,
           shardsComplete: state.shards.filter((item) => item.done).length,
+          coveragePercent: timeCoveragePercent(state.startTime, state.endTime, state.shards),
           pagesProcessed: state.pagesProcessed, commentsInspected: state.commentsInspected,
+          totalComments: state.totalComments,
           matches: state.matchCount, requestsTotal: state.requestCount,
         };
       }
@@ -797,6 +868,7 @@ async function route(
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
       lanes: integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256),
       workersPerLane: integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16),
+      proxyTransport: url.searchParams.get("proxyTransport") === "1",
     }));
   }
   if (method === "GET" && url.pathname === "/api/user") {
@@ -975,17 +1047,13 @@ async function probeUser(uid: string, proxy: string | undefined, cookiePath: str
 
 async function readJsonl(path: string | undefined, max: number): Promise<FoundComment[]> {
   if (!path) return [];
-  try {
-    return (await readFile(path, "utf8")).split(/\r?\n/).filter(Boolean).slice(-max).flatMap((line) => {
-      try { return [JSON.parse(line) as FoundComment]; } catch { return []; }
-    }).reverse();
-  } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return []; throw error; }
+  return readJsonlTail<FoundComment>(path, max);
 }
 
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
 function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, matches: 0, requestsTotal: 0, pagesProcessed: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
-function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", lanes: 0, workers: 0, shards: 0, shardsComplete: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
+function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
   return coordinator.activeMode() === "parallel"

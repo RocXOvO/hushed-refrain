@@ -49,6 +49,7 @@ class FakeClient implements NcmClient {
         ],
         hasMore: true,
         nextCursor: "100",
+        total: 3,
       };
     }
     if (songId === "1") {
@@ -56,6 +57,7 @@ class FakeClient implements NcmClient {
         comments: [{ commentId: "c2", userId: "42", content: "second" }],
         hasMore: false,
         nextCursor: "90",
+        total: 0,
       };
     }
     return { comments: [], hasMore: false };
@@ -125,6 +127,7 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   const state = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(state.finished, true);
   assert.equal(state.songIndex, 3);
+  assert.equal(state.songProgress[0].totalComments, 3);
 });
 
 test("pauses on budget and resumes at the exact comment cursor", async () => {
@@ -409,8 +412,8 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   const config = await options(directory);
   config.source = "record";
   config.commentPageSize = 100;
-  const activities: Array<{ songId: string; pageInSong: number }> = [];
-  config.onSongProgress = ({ songId, pageInSong }) => activities.push({ songId, pageInSong });
+  const activities: Array<{ songId: string; pageInSong: number; commentsProcessed: number; totalComments?: number }> = [];
+  config.onSongProgress = (activity) => activities.push(activity);
   const tracker = { active: 0, maxActive: 0, calls: [] as string[] };
   const songs: SongCandidate[] = Array.from({ length: 4 }, (_, index) => ({
     id: String(index + 1),
@@ -432,6 +435,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
       return {
         comments: songId === "3" ? [{ commentId: "pool-match", userId: "42", content: "found" }] : [],
         hasMore: false,
+        total: songId === "3" ? 1 : 0,
       };
     },
     getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
@@ -454,6 +458,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(tracker.calls.some((call) => call.startsWith("b:")));
   assert.deepEqual(new Set(activities.map((activity) => activity.songId)), new Set(songs.map((song) => song.id)));
   assert.ok(activities.every((activity) => activity.pageInSong === 1));
+  assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
 });
 
 test("pooled source scan uses multiple workers on one proxy lane", async () => {

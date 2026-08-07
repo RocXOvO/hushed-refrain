@@ -108,6 +108,11 @@ test("turns 403 into a persistent cooldown signal without retry", async () => {
       error instanceof CooldownRequired && error.retryAfterMs === 123_000,
   );
   assert.equal(calls, 1);
+  await assert.rejects(
+    governor.execute("still-blocked", async () => { calls += 1; }),
+    CooldownRequired,
+  );
+  assert.equal(calls, 1);
 });
 
 test("enforces the per-run request budget", async () => {
@@ -143,6 +148,29 @@ test("stops before starting another remote request", async () => {
     RunCancelled,
   );
   assert.equal(governor.requestsUsed, 0);
+});
+
+test("cancellation wakes a request waiting for its start slot", async () => {
+  let sleepStarted!: () => void;
+  const sleeping = new Promise<void>((resolve) => { sleepStarted = resolve; });
+  const governor = new RequestGovernor({
+    minDelayMs: 600_000,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, {
+    now: () => 1_000,
+    sleep: async () => { sleepStarted(); await new Promise(() => {}); },
+    random: () => 0,
+  });
+  await governor.execute("first", async () => "ok");
+  const waiting = governor.execute("waiting", async () => "unexpected");
+  await sleeping;
+
+  governor.cancel();
+  await assert.rejects(waiting, RunCancelled);
+  assert.equal(governor.requestsUsed, 1);
 });
 
 test("allows requests to overlap while serializing their start slots", async () => {

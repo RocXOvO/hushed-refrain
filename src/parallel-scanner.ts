@@ -6,6 +6,9 @@ import {
   RunCancelled,
 } from "./errors";
 import { RequestGovernor } from "./governor";
+import { LaneRecovery } from "./lane-recovery";
+import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-gate";
+import { mergeCommentTotal } from "./progress";
 import { JsonlResultWriter } from "./results";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { AsyncWorkQueue } from "./work-queue";
@@ -22,6 +25,7 @@ export interface ParallelCommentLane {
   name: string;
   client: NcmClient;
   governor: RequestGovernor;
+  transportGate?: ProxyTransportGate;
 }
 
 class LaneRequestFailure extends Error {
@@ -78,7 +82,7 @@ export async function runParallelSongScan(
       .sort((left, right) => right.endTime - left.endTime),
   );
   const blockedLanes = new Set<string>();
-  const failedLanes = new Map<string, string>();
+  const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
   const initialPages = state.pagesProcessed;
   let scheduledRequests = 0;
   let stopRequested = false;
@@ -127,7 +131,8 @@ export async function runParallelSongScan(
     publishRequestActivity(options, { ...requestActivity, phase: "start" });
     let page;
     try {
-      page = await lane.governor.execute(
+      page = await executeProxyRequest(
+        lane,
         `comment_new:${options.songId}:shard-${shard.id}`,
         () => lane.client.getSongCommentsByCursor(
           options.songId,
@@ -160,6 +165,7 @@ export async function runParallelSongScan(
       phase: "success",
       elapsedMs: Date.now() - requestStartedAt,
       comments: page.comments.length,
+      totalComments: page.total,
       hasMore: page.hasMore,
     });
 
@@ -187,6 +193,7 @@ export async function runParallelSongScan(
       comment.time < shard.endTime
     );
     state.commentsInspected += rangedComments.length;
+    state.totalComments = mergeCommentTotal(state.totalComments, page.total, state.commentsInspected);
 
     for (const comment of rangedComments) {
       if (comment.userId !== options.uid) continue;
@@ -273,33 +280,33 @@ export async function runParallelSongScan(
   };
 
   const runWorker = async (lane: ParallelCommentLane): Promise<void> => {
-    while (!stopRequested && !blockedLanes.has(lane.name) && !failedLanes.has(lane.name)) {
+    const recovery = laneRecovery.get(lane.name)!;
+    while (!stopRequested && !blockedLanes.has(lane.name)) {
+      await recovery.waitUntilReady();
+      if (stopRequested || blockedLanes.has(lane.name)) return;
       const shard = await queue.take();
       if (!shard) return;
       let requeue: CommentTimeShard[] = [];
       try {
-        if (blockedLanes.has(lane.name) || failedLanes.has(lane.name)) {
+        if (blockedLanes.has(lane.name)) {
           requeue = stopRequested ? [] : [shard];
           return;
         }
         requeue = await scanShardPage(lane, shard);
+        recovery.recordSuccess();
       } catch (error) {
         if (error instanceof CooldownRequired) {
           blockedLanes.add(lane.name);
           requeue = shard.done ? [] : [shard];
-          if (blockedLanes.size + failedLanes.size === lanes.length) {
+          if (blockedLanes.size === lanes.length) {
             requeue = [];
             stopScheduling();
           }
           return;
         }
         if (error instanceof LaneRequestFailure) {
-          failedLanes.set(lane.name, errorMessage(error.original));
+          recovery.recordFailure();
           requeue = shard.done ? [] : [shard];
-          if (blockedLanes.size + failedLanes.size === lanes.length) {
-            requeue = [];
-            stopScheduling();
-          }
           return;
         }
         if (error instanceof RequestBudgetExhausted) {
@@ -336,15 +343,13 @@ export async function runParallelSongScan(
     ? "complete"
     : cancelled
     ? "stopped"
-    : blockedLanes.size > 0 && blockedLanes.size + failedLanes.size === lanes.length
+    : blockedLanes.size === lanes.length
     ? "cooldown"
     : "paused";
   const note = budgetReached
     ? "The page or request budget was reached; rerun the same command to resume."
     : blockedLanes.size > 0
     ? `Cooldown lanes: ${[...blockedLanes].join(", ")}.`
-    : failedLanes.size > 0
-    ? `Failed lanes: ${[...failedLanes].map(([lane, message]) => `${lane}: ${message}`).join("; ")}.`
     : matched && options.stopAfterFirst
     ? "Stopped after the first matching comment."
     : undefined;
@@ -498,6 +503,7 @@ function makeReport(
     shardsComplete: state.shards.filter((shard) => shard.done).length,
     pagesProcessed: state.pagesProcessed,
     commentsInspected: state.commentsInspected,
+    totalComments: state.totalComments,
     matches: state.matchCount,
     requestsThisRun,
     requestsTotal: initialRequests + requestsThisRun,

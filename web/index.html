@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>云评检索台</title>
   <link rel="icon" type="image/png" href="/app-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=16">
+  <link rel="stylesheet" href="/styles.css?v=18">
 </head>
 <body>
   <div id="appSplash" class="app-splash" role="status" aria-label="云评检索台正在启动">
@@ -68,6 +68,7 @@
         </div>
         <div id="poolEntries" class="pool-entries"><div class="pool-empty">等待代理节点</div></div>
         <p class="pool-discovery">安全优选：同一 IPv4 /24 或 IPv6 /48 网段只保留延迟最低的一个出口；在线期间约每 60 秒后台复测。</p>
+        <p class="pool-discovery">主机保护：代理请求全局最多 8 个并发、启动间隔至少 80ms；代理池复核失败会停止，不回退本机直连。上游仍可看到主机 IP，长期高负载建议分散到不同服务商或账号。</p>
       </section>
 
       <form id="parallelForm" class="control-form mode-panel" aria-hidden="false">
@@ -100,7 +101,7 @@
           <summary aria-expanded="false"><img src="/icons/settings-2.svg" alt="">运行参数</summary>
           <div class="advanced-content">
             <div class="settings-grid"><label class="field compact"><span>每页评论</span><input name="pageSize" type="number" min="1" max="2000" value="1000"></label><label class="field compact"><span>每 IP 并发</span><input name="workersPerProxy" type="number" min="1" max="8" value="1"></label><label class="field compact"><span>每线程间隔 ms</span><input name="minDelayMs" type="number" min="0" value="2500"></label><label class="field compact"><span>随机抖动 ms</span><input name="jitterMs" type="number" min="0" value="800"></label><label class="field compact"><span>请求预算（0 不限）</span><input name="requestBudget" type="number" min="0" value="0"></label><label class="field compact"><span>每首最大页数</span><input name="maxPages" type="number" min="0" value="0"></label><label class="field compact wide"><span>单代理（代理池未运行时）</span><input name="proxy" type="url" placeholder="http://127.0.0.1:7890"></label></div>
-            <div class="check-row"><label><input id="fresh" type="checkbox">新建状态</label><span class="continuous-hint">会持续扫描并实时输出，直到完成或手动停止</span></div>
+            <div class="check-row"><label><input id="fresh" type="checkbox">新建状态</label><label><input name="allowDirect" type="checkbox">允许本机直连（不推荐）</label><span class="continuous-hint">会持续扫描并实时输出，直到完成或手动停止</span></div>
           </div>
         </details>
         <div class="form-actions"><button id="sourceStartButton" class="button primary" type="submit"><img src="/icons/play.svg" alt="">开始扫描</button><button id="dryRunButton" class="button secondary" type="button"><img src="/icons/list-music.svg" alt="">仅获取歌曲</button></div>
@@ -108,7 +109,7 @@
     </aside>
 
     <section class="main-pane">
-      <div class="task-header"><div><p class="eyebrow">LIVE TASK</p><h2 id="taskTitle">等待任务</h2></div><div class="task-actions"><button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态"><img src="/icons/refresh-cw.svg" alt=""></button><button id="stopButton" class="button danger" type="button" disabled><img src="/icons/square.svg" alt="">停止</button></div></div>
+      <div class="task-header"><div><p class="eyebrow">LIVE TASK</p><h2 id="taskTitle">等待任务</h2></div><div class="task-actions"><button id="refreshButton" class="icon-button" type="button" title="刷新状态" aria-label="刷新状态"><img src="/icons/refresh-cw.svg" alt=""></button><div id="runtimeTimer" class="runtime-timer" title="当前任务运行时长" hidden><img src="/icons/timer.svg" alt=""><span id="runtimeTimerLabel">已运行</span><strong id="runtimeTimerValue">00:00:00</strong></div><button id="stopButton" class="button danger" type="button" disabled><img src="/icons/square.svg" alt="">停止</button></div></div>
       <div class="metrics" aria-label="任务指标">
         <div class="metric"><span>状态</span><strong id="statusMetric">空闲</strong></div>
         <div class="metric"><span id="progressLabel">分片进度</span><strong id="progressMetric">0 / 0</strong></div>
@@ -116,7 +117,18 @@
         <div class="metric accent"><span>命中评论</span><strong id="matchesMetric">0</strong></div>
         <div class="metric"><span>累计请求</span><strong id="requestsMetric">0</strong></div>
       </div>
-      <div class="progress-band"><div class="progress-copy"><span id="currentSong">尚未开始</span><span id="progressPercent">0%</span></div><div class="progress-track"><span id="progressBar"></span></div><div id="taskNote" class="task-note" hidden></div></div>
+      <div class="progress-stack">
+        <section class="progress-band" aria-label="全局任务进度">
+          <div class="progress-copy"><div><span class="progress-label">全局进度</span><strong id="globalProgressContext">尚未开始</strong></div><span id="progressPercent">0%</span></div>
+          <div class="progress-track"><span id="progressBar"></span></div>
+        </section>
+        <section class="progress-band song-progress-band" aria-label="当前歌曲完成进度">
+          <div class="progress-copy"><div><span class="progress-label">当前歌曲</span><strong id="currentSong">等待歌曲调度</strong></div><span id="songProgressPercent">--</span></div>
+          <div class="progress-track song-progress-track"><span id="songProgressBar"></span></div>
+          <p id="songProgressMeta" class="song-progress-meta">开始读取后显示当前歌曲完成度</p>
+        </section>
+        <div id="taskNote" class="task-note" hidden></div>
+      </div>
       <div class="tabs" role="tablist" aria-label="任务视图"><button class="tab active" type="button" role="tab" data-tab="results" aria-selected="true">实时结果</button><button class="tab" type="button" role="tab" data-tab="logs" aria-selected="false">运行日志</button><button class="tab" type="button" role="tab" data-tab="pool" aria-selected="false">出口详情</button><button class="tab" type="button" role="tab" data-tab="estimate" aria-selected="false">速度估算</button></div>
       <section id="resultsPanel" class="tab-panel view-panel" role="tabpanel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>用户</th><th>歌曲</th><th>评论内容</th><th>点赞</th></tr></thead><tbody id="resultsBody" aria-live="polite" aria-relevant="additions"><tr class="empty-row"><td colspan="5">暂无命中</td></tr></tbody></table></div></section>
       <section id="logsPanel" class="tab-panel view-panel" role="tabpanel" hidden><p id="logPath" class="log-path">任务启动后将在本地生成结构化日志。</p><div class="table-wrap"><table class="logs-table"><thead><tr><th>时间</th><th>级别</th><th>事件</th><th>详情</th></tr></thead><tbody id="logsBody" aria-live="polite"><tr class="empty-row"><td colspan="4">暂无日志</td></tr></tbody></table></div></section>
@@ -173,6 +185,6 @@
     </div>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/app.js?v=19" defer></script>
+  <script src="/app.js?v=21" defer></script>
 </body>
 </html>

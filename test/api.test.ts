@@ -21,6 +21,7 @@ test("passes one static proxy and cookie to the upstream API", async () => {
     assert.equal(captured?.uid, "42");
     assert.equal(captured?.cookie, "MUSIC_U=test");
     assert.equal(captured?.proxy, "http://127.0.0.1:7890/");
+    assert.equal(captured?.timeout, 30_000);
   } finally {
     mutable.likelist = original;
   }

@@ -1,5 +1,8 @@
 import { CooldownRequired, RequestBudgetExhausted, RunCancelled } from "./errors";
 import { RequestGovernor } from "./governor";
+import { LaneRecovery } from "./lane-recovery";
+import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-gate";
+import { mergeCommentTotal } from "./progress";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { JsonlResultWriter } from "./results";
 import { AsyncWorkQueue } from "./work-queue";
@@ -22,6 +25,7 @@ export interface SourceScanLane {
   name: string;
   client: NcmClient;
   governor: RequestGovernor;
+  transportGate?: ProxyTransportGate;
 }
 
 export interface PooledScanOptions extends ScanOptions {
@@ -177,7 +181,7 @@ export async function runPooledCommentFinder(
       state.songs.map((_, index) => index).filter((index) => !state.songProgress![index].done),
     );
     const blockedLanes = new Map<string, number>();
-    const failedLanes = new Map<string, string>();
+    const laneRecovery = new Map(lanes.map((lane) => [lane.name, new LaneRecovery()]));
     let reservedRequests = pooledRequestsUsed(lanes);
     let stopRequested = false;
     let budgetReached = false;
@@ -225,8 +229,14 @@ export async function runPooledCommentFinder(
       publishRequestActivity(options, { ...requestActivity, phase: "start" });
       let page;
       try {
-        page = await lane.governor.execute(`comment_new:${song.id}`, () => {
-          publishSongProgress(options, song, requestedPageNo);
+        page = await executeProxyRequest(lane, `comment_new:${song.id}`, () => {
+          publishSongProgress(
+            options,
+            song,
+            requestedPageNo,
+            progress.commentOffset,
+            progress.totalComments,
+          );
           return lane.client.getSongCommentsByCursor(
             song.id,
             options.commentPageSize,
@@ -252,12 +262,14 @@ export async function runPooledCommentFinder(
         phase: "success",
         elapsedMs: Date.now() - requestStartedAt,
         comments: page.comments.length,
+        totalComments: page.total,
         hasMore: page.hasMore,
       });
 
       const nextCursor = nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}`);
       progress.pageInSong += 1;
       progress.commentOffset += page.comments.length;
+      progress.totalComments = mergeCommentTotal(progress.totalComments, page.total, progress.commentOffset);
       progress.commentPageNo = requestedPageNo + 1;
       state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
       const matches = page.comments
@@ -282,6 +294,13 @@ export async function runPooledCommentFinder(
         progress.commentCursor = nextCursor;
       }
       syncSongCursor(state);
+      publishSongProgress(
+        options,
+        song,
+        requestedPageNo,
+        progress.commentOffset,
+        progress.totalComments,
+      );
       await checkpoint();
       if (added > 0 && options.stopAfterFirst) {
         matched = true;
@@ -290,34 +309,34 @@ export async function runPooledCommentFinder(
     };
 
     const runWorker = async (lane: SourceScanLane): Promise<void> => {
-      while (!stopRequested && !blockedLanes.has(lane.name) && !failedLanes.has(lane.name)) {
+      const recovery = laneRecovery.get(lane.name)!;
+      while (!stopRequested && !blockedLanes.has(lane.name)) {
+        await recovery.waitUntilReady();
+        if (stopRequested || blockedLanes.has(lane.name)) return;
         const index = await queue.take();
         if (index === undefined) return;
         let requeue = false;
         try {
-          if (blockedLanes.has(lane.name) || failedLanes.has(lane.name)) {
+          if (blockedLanes.has(lane.name)) {
             requeue = !stopRequested;
             return;
           }
           await scanSongPage(lane, index);
+          recovery.recordSuccess();
           requeue = !state.songProgress![index].done && !stopRequested;
         } catch (error) {
           if (error instanceof CooldownRequired) {
             blockedLanes.set(lane.name, error.retryAfterMs);
             requeue = !state.songProgress![index].done;
-            if (blockedLanes.size + failedLanes.size === lanes.length) {
+            if (blockedLanes.size === lanes.length) {
               requeue = false;
               stopScheduling();
             }
             return;
           }
           if (error instanceof SourceLaneFailure) {
-            failedLanes.set(lane.name, errorMessage(error.original));
+            recovery.recordFailure();
             requeue = !state.songProgress![index].done;
-            if (blockedLanes.size + failedLanes.size === lanes.length) {
-              requeue = false;
-              stopScheduling();
-            }
             return;
           }
           if (error instanceof RequestBudgetExhausted) {
@@ -345,7 +364,7 @@ export async function runPooledCommentFinder(
     syncSongCursor(state);
     state.finished = state.songProgress!.every((progress) => progress.done);
     state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0;
-    if (!state.finished && blockedLanes.size > 0 && blockedLanes.size + failedLanes.size === lanes.length) {
+    if (!state.finished && blockedLanes.size === lanes.length) {
       const retryAfterMs = Math.max(...blockedLanes.values());
       if (Number.isFinite(retryAfterMs)) state.blockedUntil = new Date(Date.now() + retryAfterMs).toISOString();
     }
@@ -365,7 +384,6 @@ export async function runPooledCommentFinder(
       budgetReached ? `本轮已达到请求预算 ${options.requestBudget}，再次启动可从断点继续。` : undefined,
       matched ? "找到首条评论后已暂停；关闭“首条命中后暂停”可继续完整扫描。" : undefined,
       blockedLanes.size > 0 ? `进入冷却的出口：${[...blockedLanes.keys()].join(", ")}。` : undefined,
-      failedLanes.size > 0 ? `暂时失效的出口：${[...failedLanes.keys()].join(", ")}。` : undefined,
     ].filter(Boolean).join(" ");
     return pooledReport(state, lanes, options, initialRequests, status, {
       note: notes || undefined,
@@ -507,7 +525,13 @@ async function runSongScan(
     const requestedCursor = songProgress.commentCursor!;
     const requestedPageNo = songProgress.commentPageNo!;
     const page = await governor.execute(`comment_new:${song.id}`, () => {
-      publishSongProgress(options, song, requestedPageNo);
+      publishSongProgress(
+        options,
+        song,
+        requestedPageNo,
+        songProgress.commentOffset,
+        songProgress.totalComments,
+      );
       return client.getSongCommentsByCursor(
         song.id,
         options.commentPageSize,
@@ -533,6 +557,7 @@ async function runSongScan(
 
     songProgress.pageInSong += 1;
     songProgress.commentOffset += page.comments.length;
+    songProgress.totalComments = mergeCommentTotal(songProgress.totalComments, page.total, songProgress.commentOffset);
     songProgress.commentPageNo = requestedPageNo + 1;
     state.pageInSong = songProgress.pageInSong;
     state.commentOffset = songProgress.commentOffset;
@@ -543,6 +568,13 @@ async function runSongScan(
     } else {
       songProgress.commentCursor = nextCursor;
     }
+    publishSongProgress(
+      options,
+      song,
+      requestedPageNo,
+      songProgress.commentOffset,
+      songProgress.totalComments,
+    );
     await checkpoint();
 
     if (added > 0 && options.stopAfterFirst) {
@@ -632,7 +664,7 @@ async function requestFromPool<T>(
   let lastError: unknown;
   for (const lane of lanes) {
     try {
-      return await lane.governor.execute(label, () => request(lane.client));
+      return await executeProxyRequest(lane, label, () => request(lane.client));
     } catch (error) {
       if (error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
       lastError = error;
@@ -787,9 +819,21 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
 }
 
-function publishSongProgress(options: ScanOptions, song: SongCandidate, pageInSong: number): void {
+function publishSongProgress(
+  options: ScanOptions,
+  song: SongCandidate,
+  pageInSong: number,
+  commentsProcessed: number,
+  totalComments: number | undefined,
+): void {
   try {
-    options.onSongProgress?.({ songId: song.id, songName: song.name, pageInSong });
+    options.onSongProgress?.({
+      songId: song.id,
+      songName: song.name,
+      pageInSong,
+      commentsProcessed,
+      totalComments,
+    });
   } catch {
     // Status delivery must never interrupt the scan.
   }

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { RequestGovernor } from "./governor";
+import { executeProxyRequest, ProxyTransportGate } from "./proxy-transport-gate";
 import {
   defaultMihomoPoolOptions,
   importExternalProxyPool,
@@ -252,9 +253,11 @@ async function scanSongCommand(args: string[]): Promise<void> {
     }
   }
   const endpoints: Array<string | undefined> = proxies.length > 0 ? proxies : [undefined];
+  const transportGate = endpoints.some(Boolean) ? new ProxyTransportGate() : undefined;
   const lanes: ParallelCommentLane[] = endpoints.map((proxy, index) => ({
     name: proxy ? `proxy-${index + 1}` : "direct",
     client: new EnhancedNcmClient({ proxy }),
+    transportGate,
     governor: new RequestGovernor({
       requestBudget: Math.max(1_000, requestBudget * 2),
       concurrency: workersPerLane,
@@ -270,7 +273,7 @@ async function scanSongCommand(args: string[]): Promise<void> {
     ? timestamp(parsed.values["start-time"], "start-time")
     : previous?.startTime;
   if (!songName || startTime === undefined) {
-    const song = await lanes[0].governor.execute(`song_detail:${songId}`, () =>
+    const song = await executeProxyRequest(lanes[0], `song_detail:${songId}`, () =>
       lanes[0].client.getSongInfo(songId)
     );
     songName ??= song.name;

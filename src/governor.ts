@@ -32,7 +32,8 @@ const defaultRuntime: GovernorRuntime = {
 export class RequestGovernor {
   private lastRequestAt = 0;
   private used = 0;
-  private cancelled = false;
+  private terminalError?: RunCancelled | CooldownRequired;
+  private readonly waitCancellation = new Set<(error: unknown) => void>();
   private slotTail: Promise<void> = Promise.resolve();
   private readonly concurrency: number;
 
@@ -52,21 +53,27 @@ export class RequestGovernor {
   }
 
   cancel(): void {
-    this.cancelled = true;
+    const error = new RunCancelled();
+    this.terminalError = error;
+    this.wakeWaiters(error);
   }
 
   async execute<T>(label: string, request: () => Promise<T>): Promise<T> {
     let retry = 0;
     while (true) {
-      this.throwIfCancelled();
+      this.throwIfUnavailable();
       await this.reserveSlot();
 
       try {
         return await request();
       } catch (error) {
+        if (error instanceof RunCancelled) throw error;
         const status = errorStatus(error);
         if (status === 403 || status === 429) {
-          throw new CooldownRequired(status, this.options.forbiddenCooldownMs);
+          const cooldown = new CooldownRequired(status, this.options.forbiddenCooldownMs);
+          this.terminalError = cooldown;
+          this.wakeWaiters(cooldown);
+          throw cooldown;
         }
 
         if (!isRetryable(status) || retry >= this.options.maxRetries) {
@@ -78,8 +85,8 @@ export class RequestGovernor {
         const cap = this.options.retryCapMs ?? 30_000;
         const backoff = Math.min(cap, base * 2 ** retry);
         const jitter = Math.floor(this.runtime.random() * this.options.jitterMs);
-        await this.runtime.sleep(backoff + jitter);
-        this.throwIfCancelled();
+        await this.sleepOrStop(backoff + jitter);
+        this.throwIfUnavailable();
         retry += 1;
       }
     }
@@ -93,7 +100,7 @@ export class RequestGovernor {
     });
     await previous;
     try {
-      this.throwIfCancelled();
+      this.throwIfUnavailable();
       if (this.options.requestBudget > 0 && this.used >= this.options.requestBudget) {
         throw new RequestBudgetExhausted(this.options.requestBudget);
       }
@@ -102,9 +109,9 @@ export class RequestGovernor {
         const workerSpacingMs = Math.ceil((this.options.minDelayMs + jitter) / this.concurrency);
         const target = this.lastRequestAt + workerSpacingMs;
         const waitMs = target - this.runtime.now();
-        if (waitMs > 0) await this.runtime.sleep(waitMs);
+        if (waitMs > 0) await this.sleepOrStop(waitMs);
       }
-      this.throwIfCancelled();
+      this.throwIfUnavailable();
       this.used += 1;
       this.lastRequestAt = this.runtime.now();
     } finally {
@@ -112,8 +119,27 @@ export class RequestGovernor {
     }
   }
 
-  private throwIfCancelled(): void {
-    if (this.cancelled) throw new RunCancelled();
+  private async sleepOrStop(milliseconds: number): Promise<void> {
+    this.throwIfUnavailable();
+    if (milliseconds <= 0) return;
+    let rejectCancellation = (_error: unknown): void => {};
+    const cancelled = new Promise<never>((_resolve, reject) => {
+      rejectCancellation = reject;
+      this.waitCancellation.add(rejectCancellation);
+    });
+    try {
+      await Promise.race([this.runtime.sleep(milliseconds), cancelled]);
+    } finally {
+      this.waitCancellation.delete(rejectCancellation);
+    }
+  }
+
+  private wakeWaiters(error: unknown): void {
+    for (const reject of [...this.waitCancellation]) reject(error);
+  }
+
+  private throwIfUnavailable(): void {
+    if (this.terminalError) throw this.terminalError;
   }
 }
 

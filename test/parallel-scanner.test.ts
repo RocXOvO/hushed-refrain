@@ -62,6 +62,7 @@ class ParallelFakeClient implements NcmClient {
       }],
       hasMore: false,
       nextCursor: String(time),
+      total: 2,
     };
   }
 
@@ -125,6 +126,7 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.equal(report.status, "complete");
   assert.equal(report.pagesProcessed, 2);
   assert.equal(report.commentsInspected, 2);
+  assert.equal(report.totalComments, 2);
   assert.equal(report.matches, 1);
   assert.equal(client.maxActive, 2);
   const result = JSON.parse((await readFile(config.outputPath, "utf8")).trim());
@@ -257,7 +259,9 @@ test("requeues a shard when one proxy lane fails", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-lane-"));
   const goodClient = new ParallelFakeClient();
   const failedClient = new ParallelFakeClient();
+  let failedCalls = 0;
   failedClient.getSongCommentsByCursor = async () => {
+    failedCalls += 1;
     throw { status: 502, body: { code: 502 } };
   };
   const config = await options(directory);
@@ -271,5 +275,6 @@ test("requeues a shard when one proxy lane fails", async () => {
   assert.equal(report.status, "complete");
   assert.equal(report.matches, 1);
   assert.equal(goodClient.maxActive, 1);
-  assert.match(report.note ?? "", /Failed lanes: failed/);
+  assert.equal(failedCalls, 1);
+  assert.doesNotMatch(report.note ?? "", /Failed lanes/);
 });

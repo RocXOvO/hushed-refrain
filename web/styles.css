@@ -946,6 +946,45 @@ select:focus {
   min-height: 48px;
 }
 
+.runtime-timer {
+  min-height: 38px;
+  padding: 0 12px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #4b535b;
+  background: linear-gradient(180deg, #fff, #f6f8f9);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  box-shadow: 0 4px 14px rgb(30 36 43 / 5%);
+}
+
+.runtime-timer img {
+  width: 16px;
+  height: 16px;
+  opacity: 0.72;
+}
+
+.runtime-timer span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.runtime-timer strong {
+  min-width: 68px;
+  color: var(--ink);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.84rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+.runtime-timer[data-active="true"] {
+  border-color: rgb(8 127 140 / 28%);
+  box-shadow: 0 4px 16px rgb(8 127 140 / 8%);
+}
+
 .metrics {
   margin-top: 24px;
   display: grid;
@@ -983,25 +1022,67 @@ select:focus {
   color: var(--accent);
 }
 
-.progress-band {
+.progress-stack {
   margin-top: 18px;
-  padding: 14px 0 18px;
-  border-bottom: 1px solid var(--line);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.progress-band {
+  min-width: 0;
+  padding: 15px 16px;
+  background: linear-gradient(150deg, #fff, #f7f9fa);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 7px 22px rgb(30 36 43 / 4%);
+}
+
+.song-progress-band {
+  background: linear-gradient(150deg, #fff, #fff8f8);
+  border-color: rgb(217 54 62 / 18%);
 }
 
 .progress-copy {
   justify-content: space-between;
+  align-items: flex-end;
   gap: 15px;
   color: #4e555d;
   font-size: 0.82rem;
 }
 
-.progress-copy span:first-child {
+.progress-copy > div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.progress-copy strong {
   min-width: 0;
   overflow: hidden;
+  color: #333940;
+  font-size: 0.84rem;
+  font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.progress-label {
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.progress-copy > span {
+  flex: 0 0 auto;
+  color: var(--teal);
+  font-size: 0.88rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.song-progress-band .progress-copy > span { color: var(--accent); }
 
 .progress-track {
   height: 6px;
@@ -1020,9 +1101,29 @@ select:focus {
   transition: width 360ms cubic-bezier(.2,.8,.2,1);
 }
 
+.song-progress-track span {
+  background: linear-gradient(90deg, var(--accent), #ef6870);
+  box-shadow: 0 0 14px rgb(217 54 62 / 24%);
+}
+
+.progress-track.indeterminate span {
+  width: 34% !important;
+  animation: progress-scan 1.35s ease-in-out infinite;
+}
+
+.song-progress-meta {
+  margin: 8px 0 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .task-note {
-  margin-top: 12px;
+  margin: 0;
   padding: 10px 12px;
+  grid-column: 1 / -1;
   color: #5d3b00;
   background: #fff4dc;
   border-left: 3px solid var(--amber);
@@ -1646,6 +1747,12 @@ dialog::backdrop {
   to { opacity: 1; }
 }
 
+@keyframes progress-scan {
+  0% { transform: translateX(-115%); }
+  55% { transform: translateX(195%); }
+  100% { transform: translateX(195%); }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     scroll-behavior: auto !important;
@@ -1665,6 +1772,8 @@ dialog::backdrop {
   .estimate-results {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .progress-stack { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 740px) {
@@ -1733,6 +1842,9 @@ dialog::backdrop {
   }
 
   .task-header {
-    align-items: center;
+    align-items: flex-start;
   }
+
+  .task-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .runtime-timer span { display: none; }
 }

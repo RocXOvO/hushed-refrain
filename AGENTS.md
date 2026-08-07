@@ -12,7 +12,7 @@ The app finds NetEase Cloud Music comments authored by a numeric user UID. It ha
 
 There is no database. Durable scan state is JSON; matches are append-only JSONL. Generated/runtime directories (`dist/`, `release/`, `.ncm/`, `data/`, `tmp/`) are ignored and must not be committed.
 
-The code version is authoritative in `package.json` and `package-lock.json`. The current unreleased feature set targets `0.8.0`; keep both manifests aligned before packaging or publishing it. GitHub's latest Release is external state: verify its tag, commit, and assets in real time rather than treating this file as a release-status source.
+The code version is authoritative in `package.json` and `package-lock.json`. The current work is for the next, not-yet-published release; do not record a tentative version here or infer a successful GitHub Release from local files. Verify the live tag, commit, and assets only when releasing or evaluating an update.
 
 ## Architecture and data flow
 
@@ -31,6 +31,7 @@ Two scan engines exist and must not be conflated:
    - After a page advances, if Workers are waiting, the unread range `[shard.startTime, nextCursor)` is bisected into two non-overlapping half-open shards and both are requeued. The original configured `shardCount` remains the checkpoint compatibility key, while `state.shards.length` and report progress grow with adaptive splits.
    - Failed/cooling lanes return unfinished work to the shared queue for healthy lanes. An adaptive split or failover must never duplicate/skip a time range; JSONL de-duplication is a final idempotency guard, not a substitute for correct range math.
    - Cursor pages are filtered back to the shard's half-open range before UID matching. The endpoint is intentionally called without a login cookie.
+   - Dashboard global percentage is cursor-weighted time coverage, computed from the remaining time in every unfinished shard. It therefore survives adaptive splits without the artificial regression caused by `shardsComplete / shards`; it is time coverage, not an estimate of uniformly distributed comments.
 
 Common result flow:
 
@@ -46,23 +47,27 @@ The dashboard keeps separate in-memory snapshots for source and parallel history
 
 - Source live activity comes from `ScanOptions.onSongProgress`. It describes the latest request started by any Worker, so `currentSong` is an activity indicator, not the first unfinished checkpoint item and not a promise that other Workers are idle. Page numbering shown to users is one-based.
 - Checkpoint counters remain authoritative for durable progress (`songsProcessed`, pages/shards, requests, and matches). In-memory activity may be newer than the latest coalesced checkpoint, but must never mutate checkpoint cursor semantics.
+- The dashboard has two progress bars. Source global progress is completed songs over selected songs; its second bar is the latest active song's `commentsProcessed / totalComments`. Parallel global progress is cursor-weighted time coverage; its second bar is `commentsInspected / totalComments` for the song. `totalComments` is optional and may change between responses, so `mergeCommentTotal` keeps the maximum of the stored total, the latest credible total, and processed count. Unknown totals use an indeterminate bar while active; UI clamping never determines task completion.
 - Both snapshot shapes expose the same task-timing contract: `startedAt`, optional `finishedAt`, and non-negative `elapsedMs`. While status is `running`/`stopping`, elapsed time is `now - startedAt`; after a terminal transition it is frozen at `finishedAt - startedAt`. Polling a finished task must not keep increasing its duration.
 - `finishedAt` is assigned once when the manager settles a report or error. Use the manager's snapshot timestamps for UI timing in both modes rather than mixing them with scanner-local report timers, which start at slightly different points.
+- The renderer's single runtime clock is resynchronized from the active snapshot on each accepted poll, then advanced with `performance.now()` every 250 ms only while status is `running`/`stopping`; terminal display is frozen. Do not create timers inside render functions, and clear the singleton intervals on `pagehide`.
+- Combined job/pool refreshes use an increasing request sequence. A response may render only if it is still the newest request, so an older overlapping poll cannot roll progress, status, pool state, or the runtime clock backward.
 - Dashboard-terminal statuses are `complete`, `matched`, `paused`, `cooldown`, `dry-run`, `stopped`, and `error`. `idle`, `running`, and `stopping` must not produce a settlement screen. Paused/cooldown/stopped are resumable but still end the current invocation and therefore get a settlement.
 - The task-end settlement UI is keyed by scan mode plus snapshot UUID and opens at most once for that task, even though polling repeatedly renders the same terminal snapshot. Starting a new UUID clears the prior task's presentation state; dismissing a settlement must not let the next poll reopen it.
 - Settlement values come from the terminal snapshot: duration from `elapsedMs` and total hits from `matches`. Never derive hits from the renderer's visible-result map, which is capped and mode-local. `matches` is checkpoint-cumulative across resumptions; `elapsedMs` is for the current UUID/invocation. If product copy ever promises cross-restart cumulative runtime, add a persisted duration field to the state schema instead of relabeling this value.
 - The settlement is a presentation layer over the existing task/results view: results stay persisted and accessible, zero matches is a valid successful outcome, and error/cooldown notes remain visible. Render server text with `textContent`, give a dialog/overlay correct focus and close behavior, and honor `prefers-reduced-motion`.
-- Preserve behavioral tests for live/frozen elapsed time and renderer settlement de-duplication; a static HTML text assertion alone is insufficient evidence.
+- Preserve behavioral tests for live/frozen elapsed time, progress math, stale-refresh rejection, and renderer settlement de-duplication; a static HTML text assertion alone is insufficient evidence.
 
 ## Concurrency and rate-control invariants
 
-- A lane is one client/proxy endpoint plus one `RequestGovernor`.
+- A lane is one client/proxy endpoint plus one `RequestGovernor`; every proxy-backed lane in one scan also shares the task's `ProxyTransportGate`.
 - `workersPerLane` (UI name: `workersPerProxy`, label: "each IP concurrency") is the number of async workers created for every lane. Total workers are `lanes * workersPerLane`.
 - The governor serializes request **start slots** per lane using `ceil((minDelayMs + random jitter) / workersPerLane)`; requests already in flight may overlap. The configured per-IP concurrency therefore increases that lane's start rate while preserving one shared scheduler for the IP.
+- `ProxyTransportGate` independently protects the first hop seen by the upstream proxy provider: across all proxy lanes in one task it permits at most 8 in-flight requests and spaces actual starts by at least 80 ms. It runs inside the lane governor's request callback, so retries reacquire the gate and delay/backoff waits do not hold capacity. Cancellation rejects queued gate work; an already in-flight call is bounded by the API timeout.
 - UI topology settings must travel through the entire chain: form control -> `payload()` -> server input validation -> scanner options -> actual worker-array cardinality -> status/report. A speed-estimate-only change is not a runtime concurrency change. Add a test that observes overlapping requests when touching this chain.
-- `estimateCommentScan` must model the same topology: per-lane cycle is `max(spacingMs, networkMs) / workersPerLane`, then divide pages across lanes. The dashboard estimate reads the currently selected mode's page size/delay/jitter/concurrency plus the active pool's verified lane count and average NetEase latency. Both source and parallel scans have configurable page sizes (1..2000, default 1000).
+- `estimateCommentScan` models both layers: the per-lane cycle and, for proxy transport, the slower of the 80 ms aggregate start interval or network latency divided by 8. It reports configured Workers separately from `effectiveWorkers = min(totalWorkers, 8)`. The dashboard estimate reads the selected mode's page size/delay/jitter/concurrency plus verified lane count and measured NetEase latency.
 - GUI request budget `0` means unlimited. A positive pooled budget is enforced by the shared scheduler for comment-page reservations; source discovery happens before that reservation, and governor-internal retries do not consume the aggregate reservation, so this is not an absolute hard limit on every actual HTTP request. This is a known follow-up optimization point. CLI `scan` uses the governor budget directly.
-- Network/`5xx`/408/425 failures receive bounded exponential retry. `403` and `429` never loop-retry: they produce a persisted cooldown. Operator stop cancels governors before the next remote request.
+- Every `EnhancedNcmClient` request carries a 30-second upstream timeout by default. Network/`5xx`/408/425 failures first receive bounded Governor retry; a final ordinary lane failure is requeued through `LaneRecovery` with exponential 1..30 second backoff and a later success resets that lane. `403`/`429` are latched by the shared lane Governor, wake its waiters, and block that lane for the invocation instead of entering ordinary recovery; unfinished work remains checkpointed. Operator stop wakes Governor delay/backoff waiters and cancels queued transport work before another remote start.
 - `AsyncWorkQueue` is the completion detector for pooled scanners: `take()` waits when the visible queue is empty but work remains in flight; every taken item must call `complete()` exactly once; `stop()` wakes waiters and rejects further requeue. Do not replace it with a plain `shift()` loop, which recreates tail under-utilization.
 - The global `TaskCoordinator` lease is released idempotently on setup failure and in each async task's `finally`. Pool build/import/stop and background rechecks must not overlap an active scan, and source/parallel scans must not run together in the dashboard process.
 - Do not use routine tests to create high real-world traffic. Unit/integration tests use stubs and loopback servers; real NetEase or proxy-pool checks must be explicit and low-risk.
@@ -74,6 +79,7 @@ The dashboard keeps separate in-memory snapshots for source and parallel history
 - Legacy offset checkpoints are migrated only by safely rescanning songs that were unfinished or truncated: each starts at the task's immutable `createdAt` cursor, and JSONL `commentId` de-duplication makes the intentional overlap idempotent. Completed, non-truncated songs are not rescanned merely for migration.
 - `src/parallel-scanner.ts` owns `kind: "parallel-song"`, version 1 state with immutable scan range/shard/page-size identity plus per-shard cursor and counters. Writes are coalesced to about 500 ms and forced at task end.
 - Adaptive child shards are appended to and persisted in the same parallel checkpoint with fresh monotonically increasing IDs. Resume loads that expanded shard list; it must not reconstruct only the original configured shard count.
+- Source song progress and parallel state may persist optional `totalComments`; old version-1 checkpoints without it remain valid. The parallel `coveragePercent` is derived from persisted shard bounds/cursors at status time rather than stored as a compatibility field.
 - Reusing state with a different UID/source/scope/strategy, source cursor page size, or parallel range/shard/page-size is rejected. Use `--fresh` or a new state path.
 - `--fresh` ignores the checkpoint; it does not clear the JSONL output, which still de-duplicates existing comment IDs.
 - `coverageComplete` is true only when all selected work finished without source failures or configured truncation. A task may have status `complete` while coverage remains incomplete.
@@ -86,7 +92,7 @@ The dashboard keeps separate in-memory snapshots for source and parallel history
 - Each accepted GUI run writes `data/logs/{source|parallel}-{uuid}.jsonl`; packaged Electron resolves this under `userData`. Entries contain `timestamp`, `level`, `event`, `mode`, `runId`, a human message, and optional structured details.
 - Stable event meanings are `task_started`, `task_finished`, `task_error`, `page_start`, `page_success`, `page_failure`, `rate_limited`, `adaptive_split`, and `resume_descriptor_failure`. Request details may include lane, song/page/shard, elapsed time, count, `hasMore`, and remote status; never include Cookie, proxy credentials, tokens, or raw private configuration.
 - `TaskLogger` serializes appends. Callback/logger failures are deliberately swallowed: diagnostics must never affect request scheduling, checkpoints, results, status, or coverage.
-- `GET /api/logs?mode=source|parallel&limit=N` reads the current in-memory snapshot's log path, newest first. Old files persist locally after restart but are not an arbitrary-path API. The renderer uses `textContent`; log content is untrusted diagnostic text.
+- `GET /api/logs?mode=source|parallel&limit=N` reads the current snapshot's log path, newest first. Log and result-list endpoints use `readJsonlTail`, scanning backward in 64 KiB blocks only until the requested number of newest nonempty lines is reached, then skipping malformed JSON. This bounded UI read does not replace `JsonlResultWriter.initialize()`'s full-file ID scan for durable de-duplication. Old files persist locally but are not an arbitrary-path API; the renderer uses `textContent` for untrusted diagnostics.
 
 ## Proxy-pool design
 
@@ -97,6 +103,8 @@ The dashboard keeps separate in-memory snapshots for source and parallel history
 
 Verification has two gates: query the public egress IP, then call a real NetEase comment endpoint. Entries are sorted by combined IP-check and NetEase latency, de-duplicated by real egress IP, and only verified distinct IPs survive. Scans re-verify an active pool at task start.
 
+Dashboard scan starts are fail-closed for proxies. Parallel mode requires a running, fully reverified pool. Source mode requires that pool or an explicit static proxy; without either it rejects the start unless the user explicitly enables `allowDirect`, which is saved in the non-secret resume descriptor. An expected pool that fails verification never silently falls back to direct. This boundary applies to scan jobs: `/api/song` and `/api/user` remain direct when no optional proxy is supplied, and CLI proxy behavior remains explicit to each command.
+
 Pool selection treats an IPv4 `/24` or IPv6 `/48` as one network: only the fastest verified entry from each network may be selected. A managed or external pool that cannot fill its requested size with separate networks fails rather than using concentrated substitutes. While a pool is running and no coordinator lease is active, dashboard status schedules a non-overlapping background recheck about every 60 seconds; successful full rounds persist fresh latency/IP data and a temporary failure keeps the last known-good entries for a later retry.
 
 Default managed pool: 8 selected exits from 48 candidates, listeners beginning at port 17891, controller on 19097. The dashboard exposes both counts (selected exits 1..32, candidates 1..128); these are defaults, not assumptions for scan logic.
@@ -106,6 +114,7 @@ Security rules:
 - Generated listeners bind only to `127.0.0.1`; LAN, TUN, IPv6, and DNS are disabled in the generated Mihomo config.
 - Clash profile paths accepted by the dashboard must be in the discovered allowlist. `readClashVergeProfiles` additionally confines profile files to the profile directory and accepts only YAML remote/local entries.
 - Proxy URLs may contain credentials. Pool/config files use mode `0600` off Windows, dashboard responses mask credentials, and logs/errors must not expose them.
+- The 8-request/80-ms transport gate reduces aggregate bursts but cannot hide the host IP from the upstream proxy provider or guarantee that a provider will never rate-limit the account.
 - Never commit or print `.ncm/cookie.txt`, QR images, proxy-pool files, profile contents, tokens, `.env`, or user result/state data.
 
 ## Desktop and updates
@@ -126,15 +135,19 @@ Security rules:
 | Path | Responsibility |
 | --- | --- |
 | `src/types.ts` | Shared domain, state, option, and report contracts. |
-| `src/api.ts` | Adapter over pinned `@neteasecloudmusicapienhanced/api`; response/error normalization. |
+| `src/api.ts` | Adapter over pinned `@neteasecloudmusicapienhanced/api`; 30-second default timeout and response/error normalization. |
 | `src/auth.ts` | QR login polling and private cookie persistence. |
 | `src/governor.ts`, `src/errors.ts` | Start spacing, budgets, retries, cooldown/cancel signals. |
+| `src/proxy-transport-gate.ts` | Task-wide proxy first-hop concurrency and start smoothing. |
+| `src/lane-recovery.ts` | Recoverable per-lane failure backoff and success reset. |
 | `src/scanner.ts`, `src/state.ts` | User-source/history scans, pooled workers, checkpoints, coverage. |
 | `src/parallel-scanner.ts` | Cursor time shards, adaptive splitting, lane failover, parallel checkpoints. |
+| `src/progress.ts` | Comment-total reconciliation and split-stable parallel time coverage. |
 | `src/work-queue.ts` | Waitable, requeueable async work queue and completion detection. |
 | `src/cursor-pagination.ts` | Shared strict descending-cursor validation. |
 | `src/task-coordinator.ts` | Global source/parallel/pool lease and frozen elapsed-time calculation. |
 | `src/task-log.ts` | Serialized per-run structured JSONL diagnostics and reads. |
+| `src/jsonl-tail.ts` | Bounded reverse-block reads for newest JSONL rows. |
 | `src/results.ts` | Serialized JSONL append, de-duplication, NetEase comment URL. |
 | `src/mihomo-pool.ts` | Clash discovery, managed Mihomo, external pools, egress verification. |
 | `src/estimate.ts` | Pure throughput/duration estimator. |
@@ -172,15 +185,16 @@ The README may be reorganized or shortened, but a rewrite must preserve these us
 - User-source and single-song paths both use descending `comment_new` cursors now, but source scheduling/checkpoints and parallel half-open time shards remain different. Source comment pages default to 1000 and accept 1..2000.
 - The GUI defaults to continuous scanning (`requestBudget=0`, no stop-after-first); CLI `scan` retains its finite per-run default and resumes from JSON checkpoints. `403/429`, explicit truncation, partial source failure, and operator stop affect status/coverage exactly as documented in this memory.
 - Pooled scheduling is page-granular; parallel mode adaptively bisects unread ranges when Workers are waiting. Structured events distinguish ordinary failures, explicit rate limits, and scheduler splits.
+- The dashboard shows global and current-song progress separately. Source global progress counts completed songs; parallel global progress is cursor-weighted time coverage. Comment totals are optional live API estimates, not completion authority, and the runtime timer freezes at the server's terminal elapsed value.
 - There is no database. Results are de-duplicated JSONL and durable state is atomic JSON. CLI/web defaults use repository-local `.ncm/` and `data/`; packaged Electron uses its `userData` directory.
 - Cross-version GUI recovery uses both `data/resume-task.json` (form parameters only) and the mode-specific scan checkpoint (progress). Restore does not auto-start and must leave `fresh` disabled. Windows installation stops the active scan, waits for terminal status/final checkpoint, and aborts on timeout before calling the updater.
 - An old offset checkpoint is migrated by rescanning only unfinished/truncated songs from its immutable creation-time cursor. Changing cursor page size requires a fresh state, while existing JSONL still de-duplicates IDs.
-- A lane is a verified proxy endpoint/egress; per-IP Workers share one Governor. Managed/external pools are verified against both public egress IP and NetEase, isolated by IPv4 `/24` or IPv6 `/48`, configurable from the dashboard (current defaults 8 exits from 48 candidates), and rechecked in non-overlapping background rounds while online.
+- A lane is a verified proxy endpoint/egress; per-IP Workers share one Governor. Proxy-backed scan lanes also share the fixed host gate (8 in flight, 80 ms between starts), and ordinary lane failures back off and recover instead of permanently shrinking the pool. Managed/external pools are verified against both public egress IP and NetEase, isolated by IPv4 `/24` or IPv6 `/48`, configurable from the dashboard (current defaults 8 exits from 48 candidates), and rechecked in non-overlapping background rounds while online.
 - Proxy credentials, cookies, QR data, state, and results are local sensitive runtime data and never release assets. The application is a loopback-local dashboard; routine tests do not exercise high-volume real traffic.
 - Speed figures are estimates based on page size, thread spacing/jitter, verified lanes, Worker count, and measured latency. Cooldowns, source discovery, retries, and remote behavior can make reality slower.
 - Windows packaged clients support in-app updates only from updater-capable versions onward and a valid Release needs `.exe`, `.exe.blockmap`, and `latest.yml`. Web/macOS use the manual-release path; public macOS distribution still needs proper Developer ID signing/notarization beyond the local ad-hoc build.
 - Source requires Node.js 20+ and keeps `@neteasecloudmusicapienhanced/api` pinned. The documented check/test/build commands and Windows package-validation workflow are release gates.
-- Concrete version numbers, filenames, tags, download links, and "latest release" statements must match `package.json` and live GitHub state at publication time. Prefer version-neutral instructions in long-lived prose; never infer a published Release merely from local source version.
+- Concrete version numbers, filenames, tags, download links, and "latest release" statements must match `package.json` and live GitHub state at publication time. The current work is an upcoming release, not evidence of publication; prefer version-neutral instructions in long-lived prose.
 
 ## Development and verification
 
@@ -203,7 +217,7 @@ Before handing off a code change, run at least `npm run check && npm test && npm
 
 ## Release checklist
 
-1. For the current release, verify that both `package.json` and `package-lock.json` remain `0.8.0`. For later releases, keep the same semantic version in both manifests. Update README statements that name a concrete artifact/version.
+1. Before the next release, choose its semantic version and set the same value in `package.json` and `package-lock.json`. Update README statements that name a concrete artifact/version; source changes alone do not mean the release exists.
 2. Run the full verification above and build platform artifacts from the final source/version.
 3. For Windows, dispatch `Windows package validation`, require its packaged-app smoke test to pass, and use its uploaded artifacts. Inspect `latest.yml` and ensure the final `.exe`, `.exe.blockmap`, and `latest.yml` all exist. Do not rename one without regenerating metadata.
 4. Commit/push the source, create tag `vX.Y.Z` on that exact commit, and publish a **stable** GitHub Release with the platform assets. The repository configured in `package.json` and `src/update.ts` is `RocXOvO/ncm-comment-finder`.
@@ -216,11 +230,15 @@ Local verification, the Windows workflow, and post-upload checks are all release
 - Editing only the estimator/UI can make a concurrency number look changed while execution still uses an old/default worker count. Trace and test the full topology path.
 - Source scan and `scan-song` both use `comment_new` time cursors, but they retain different scheduling, state, defaults, and privacy/login behavior. `comment_music` is legacy compatibility only: endpoint evidence showed `limit=100` returned 100 records while 200/500/1000 returned only 20, which is why old offset pagination must not be extended for large pages.
 - Multiple workers share one governor per lane. Giving every worker its own governor would accidentally multiply the per-IP start rate.
+- Per-IP Governors and the task-wide proxy gate protect different boundaries. Do not remove either, place the gate outside Governor delay/backoff, or count configured Workers above 8 as guaranteed simultaneous proxy capacity.
+- A normal network failure is recoverable lane work, not permanent lane removal; only the explicit cooldown path blocks a lane for the run. Always requeue its unfinished page exactly once while applying `LaneRecovery`.
 - Pool entry count is not proof of independent capacity; only verified distinct egress IPs count as lanes.
 - Source `both` may finish with partial coverage when one source is restricted. Keep `sourceErrors` and coverage semantics visible.
 - A finished checkpoint returns immediately. When testing a changed configuration, use a fresh temp state path; do not silently mutate compatibility fields in old state.
 - The resume descriptor only restores UI parameters; the checkpoint remains authoritative. Do not mark a restored task `fresh`, auto-start it, store secrets in the descriptor, or silently coerce an incompatible checkpoint.
 - Dynamic parallel splits make `state.shards.length` larger than the configured `shardCount`. Status/settlement must report the actual array, while compatibility still compares the original configured count.
+- Neither progress bar is completion authority. Source's latest active song can change under multiple Workers, API comment totals can change, and parallel shard counts grow after a split; preserve monotonic total reconciliation and time-coverage math rather than forcing UI percentages into state.
+- Overlapping dashboard polls are normal. Keep the newest-request sequence guard before any render/clock synchronization so a slow older response cannot rewind live state.
 - A logger callback is observability only. Never branch scan correctness on successful logging, and never expose a caller-supplied log path through the HTTP API.
 - Runtime paths differ: source/CLI defaults use the project root; packaged Electron uses `userData`. Never hardcode repository runtime paths in desktop code.
 - `dist/` is generated from `src/` and ignored. Edit TypeScript sources, not compiled JavaScript.

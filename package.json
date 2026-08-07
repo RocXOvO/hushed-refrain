@@ -1,6 +1,6 @@
 {
   "name": "ncm-comment-finder",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music comment finder",
@@ -66,7 +66,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "NCM-Comment-Finder-Setup-${version}.${ext}"
@@ -80,7 +82,10 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64", "x64"]
+          "arch": [
+            "arm64",
+            "x64"
+          ]
         }
       ],
       "artifactName": "NCM-Comment-Finder-${version}-${arch}.${ext}"
@@ -93,8 +98,17 @@
         "height": 380
       },
       "contents": [
-        { "x": 150, "y": 190, "type": "file" },
-        { "x": 390, "y": 190, "type": "link", "path": "/Applications" }
+        {
+          "x": 150,
+          "y": 190,
+          "type": "file"
+        },
+        {
+          "x": 390,
+          "y": 190,
+          "type": "link",
+          "path": "/Applications"
+        }
       ]
     },
     "nsis": {

@@ -1,5 +1,6 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { readJsonlTail } from "./jsonl-tail";
 import type { ScanRequestActivity, ScanSchedulerActivity } from "./types";
 
 export type TaskLogLevel = "debug" | "info" | "warn" | "error";
@@ -91,19 +92,7 @@ export class TaskLogger {
 
 export async function readTaskLog(path: string | undefined, limit: number): Promise<TaskLogEntry[]> {
   if (!path) return [];
-  try {
-    return (await readFile(path, "utf8"))
-      .split(/\r?\n/)
-      .filter(Boolean)
-      .slice(-limit)
-      .flatMap((line) => {
-        try { return [JSON.parse(line) as TaskLogEntry]; } catch { return []; }
-      })
-      .reverse();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw error;
-  }
+  return readJsonlTail<TaskLogEntry>(path, limit);
 }
 
 function activityDetails(activity: ScanRequestActivity | ScanSchedulerActivity): Record<string, unknown> {

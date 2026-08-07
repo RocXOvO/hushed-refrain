@@ -10,7 +10,7 @@ const el = {
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
-  matches: $("#matchesMetric"), requests: $("#requestsMetric"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
+  matches: $("#matchesMetric"), requests: $("#requestsMetric"), globalContext: $("#globalProgressContext"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), songPercent: $("#songProgressPercent"), songBar: $("#songProgressBar"), songMeta: $("#songProgressMeta"), note: $("#taskNote"), results: $("#resultsBody"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
@@ -19,6 +19,7 @@ const el = {
   updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
   estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
   windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
+  runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
   appSplash: $("#appSplash"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
@@ -32,6 +33,7 @@ let knownMatches = -1;
 let toastTimer;
 let estimateTimer;
 let estimateRequest = 0;
+let refreshRequest = 0;
 let clashConfigSignature = "";
 let poolEntriesSignature = "";
 let poolRotationTimer;
@@ -40,6 +42,7 @@ let resultStream;
 let resultMode = mode;
 let nativeUpdateState;
 let activeTaskMode;
+let runtimeClock;
 const settlementPending = { parallel: undefined, source: undefined };
 const visibleResults = new Map();
 const disclosureAnimations = new WeakMap();
@@ -66,6 +69,7 @@ async function startParallel() {
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "parallel" : undefined;
     settlementPending.parallel = job.id;
     renderParallel(job);
+    syncRuntimeTimer(job);
     toast("并行扫描已启动");
   } catch (error) { toast(error.message); } finally { setBusy(false); }
 }
@@ -77,10 +81,12 @@ async function startSource(dryRun) {
     const value = payload(el.sourceForm);
     value.maxCommentPagesPerSong = value.maxPages; delete value.maxPages;
     value.fresh = $("#fresh").checked; value.dryRun = dryRun;
+    value.allowDirect = el.sourceForm.elements.allowDirect.checked;
     const job = await api("/api/job", { method: "POST", body: JSON.stringify(value) });
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "source" : undefined;
     settlementPending.source = job.id;
     renderSource(job);
+    syncRuntimeTimer(job);
     toast(dryRun ? "正在读取候选歌曲" : "来源扫描已启动");
   } catch (error) { toast(error.message); } finally { setBusy(false); }
 }
@@ -129,8 +135,10 @@ async function togglePool() {
 }
 
 async function refresh() {
+  const request = ++refreshRequest;
   try {
     const [parallelJob, sourceJob, pool] = await Promise.all([api("/api/parallel/job"), api("/api/job"), api("/api/pool")]);
+    if (request !== refreshRequest) return;
     activeTaskMode = ["running", "stopping"].includes(parallelJob.status)
       ? "parallel"
       : ["running", "stopping"].includes(sourceJob.status)
@@ -143,6 +151,12 @@ async function refresh() {
     observeTaskSettlement(sourceJob, "source");
     const job = mode === "parallel" ? parallelJob : sourceJob;
     mode === "parallel" ? renderParallel(job) : renderSource(job);
+    const activeJob = activeTaskMode === "parallel"
+      ? parallelJob
+      : activeTaskMode === "source"
+      ? sourceJob
+      : undefined;
+    syncRuntimeTimer(activeJob ?? job);
     const globallyActive = Boolean(activeTaskMode);
     el.parallelStart.disabled = globallyActive;
     el.sourceStart.disabled = globallyActive;
@@ -152,7 +166,10 @@ async function refresh() {
     el.connection.classList.add("ready");
     if (job.matches !== knownMatches) { knownMatches = job.matches; await refreshResults(); }
     if ($('.tab.active')?.dataset.tab === "logs") await refreshLogs();
-  } catch (error) { el.connection.classList.remove("ready"); toast(error.message); }
+  } catch (error) {
+    if (request !== refreshRequest) return;
+    el.connection.classList.remove("ready"); toast(error.message);
+  }
 }
 
 function renderParallel(job) {
@@ -160,8 +177,23 @@ function renderParallel(job) {
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "分片进度"; el.progress.textContent = `${fmt(job.shardsComplete)} / ${fmt(job.shards)}`;
   el.workLabel.textContent = "已读评论"; el.work.textContent = fmt(job.commentsInspected); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
-  const percent = job.shards ? Math.min(100, Math.round(job.shardsComplete / job.shards * 100)) : 0;
-  progress(percent, job.songId ? `${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个工作线程 · ${fmt(job.pagesProcessed)} 页` : "尚未开始", job.note || job.error);
+  const globalPercent = Number.isFinite(job.coveragePercent)
+    ? Math.max(0, Math.min(100, job.coveragePercent))
+    : job.shards ? Math.min(100, Math.round(job.shardsComplete / job.shards * 100)) : 0;
+  const songPercent = completionPercent(job.commentsInspected, job.totalComments, job.status);
+  renderProgress({
+    globalPercent,
+    globalContext: job.songId
+      ? `${fmt(job.shardsComplete)} / ${fmt(job.shards)} 个分片 · ${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个线程${job.proxyTransportMaxConcurrent ? ` · 主机总并发 ≤ ${fmt(job.proxyTransportMaxConcurrent)}` : ""}`
+      : "尚未开始",
+    songTitle: job.songId ? `${job.songName || "未命名歌曲"} · ${job.songId}` : "等待歌曲调度",
+    songPercent,
+    songActive: active,
+    songMeta: job.songId
+      ? songProgressMeta(job.commentsInspected, job.totalComments, job.pagesProcessed)
+      : "开始读取后显示当前歌曲完成度",
+    note: job.note || job.error,
+  });
   el.stop.disabled = !active; el.parallelStart.disabled = active;
   observeTaskSettlement(job, "parallel");
 }
@@ -171,17 +203,100 @@ function renderSource(job) {
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
   el.workLabel.textContent = "已扫页面"; el.work.textContent = fmt(job.pagesProcessed); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
-  const percent = job.songs ? Math.min(100, Math.round(job.songsProcessed / job.songs * 100)) : 0;
-  const current = job.currentSong
-    ? `${job.currentSong.name || "未命名歌曲"} · ${job.currentSong.id}${job.currentSong.pageInSong ? ` · 第 ${fmt(job.currentSong.pageInSong)} 页` : ""}`
-    : "尚未读取歌曲";
-  const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程`;
-  progress(percent, `${current} · ${topology}`, [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "));
+  const globalPercent = job.songs ? Math.min(100, Math.round(job.songsProcessed / job.songs * 100)) : 0;
+  const current = job.currentSong;
+  const songPercent = current
+    ? completionPercent(current.commentsProcessed, current.totalComments, job.status)
+    : job.status === "complete"
+    ? 100
+    : undefined;
+  const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程${job.proxyTransportMaxConcurrent ? ` · 主机总并发 ≤ ${fmt(job.proxyTransportMaxConcurrent)}` : ""}`;
+  renderProgress({
+    globalPercent,
+    globalContext: job.uid
+      ? `${fmt(job.songsProcessed)} / ${fmt(job.songs)} 首歌曲 · ${topology}`
+      : "尚未开始",
+    songTitle: current
+      ? `${current.name || "未命名歌曲"} · ${current.id}`
+      : job.status === "complete"
+      ? "全部歌曲已处理完成"
+      : "等待歌曲调度",
+    songPercent,
+    songActive: active && Boolean(current),
+    songMeta: current
+      ? songProgressMeta(current.commentsProcessed, current.totalComments, undefined, current.pageInSong)
+      : job.status === "complete"
+      ? "当前任务已完成"
+      : "开始读取后显示最近活跃歌曲的完成度",
+    note: [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "),
+  });
   el.stop.disabled = !active; el.sourceStart.disabled = active; el.dryRun.disabled = active;
   observeTaskSettlement(job, "source");
 }
 
-function progress(percent, current, note) { el.bar.style.width = `${percent}%`; el.percent.textContent = `${percent}%`; el.current.textContent = current; el.note.hidden = !note; el.note.textContent = note || ""; }
+function renderProgress({ globalPercent, globalContext, songTitle, songPercent, songActive, songMeta, note }) {
+  setProgressBar(el.bar, globalPercent, false);
+  el.percent.textContent = `${globalPercent}%`;
+  el.globalContext.textContent = globalContext;
+  setProgressBar(el.songBar, songPercent, songActive);
+  el.songPercent.textContent = Number.isFinite(songPercent) ? `${songPercent}%` : "--";
+  el.current.textContent = songTitle;
+  el.songMeta.textContent = songMeta;
+  el.note.hidden = !note;
+  el.note.textContent = note || "";
+}
+
+function setProgressBar(bar, percent, indeterminate) {
+  const known = Number.isFinite(percent);
+  bar.parentElement.classList.toggle("indeterminate", !known && indeterminate);
+  bar.style.width = known ? `${Math.max(0, Math.min(100, percent))}%` : "0%";
+}
+
+function completionPercent(processed, total, status) {
+  const completed = Number(processed || 0);
+  const available = Number(total);
+  if (Number.isFinite(available) && available > 0) {
+    return Math.max(0, Math.min(100, Math.round(completed / available * 100)));
+  }
+  return status === "complete" ? 100 : undefined;
+}
+
+function songProgressMeta(processed, total, pages, pageInSong) {
+  const details = [];
+  const available = Number(total);
+  if (Number.isFinite(available) && available > 0) {
+    details.push(`${fmt(processed)} / ${fmt(available)} 条评论`);
+  } else {
+    details.push(`${fmt(processed)} 条评论已读取`, "总量等待接口返回");
+  }
+  if (pageInSong) details.push(`第 ${fmt(pageInSong)} 页`);
+  else if (pages) details.push(`${fmt(pages)} 页`);
+  return details.join(" · ");
+}
+
+function syncRuntimeTimer(job) {
+  if (!job?.id || job.status === "idle") {
+    runtimeClock = undefined;
+    el.runtimeTimer.hidden = true;
+    return;
+  }
+  runtimeClock = {
+    id: job.id,
+    elapsedMs: Math.max(0, Number(job.elapsedMs || 0)),
+    syncedAt: performance.now(),
+    active: ["running", "stopping"].includes(job.status),
+  };
+  el.runtimeTimer.hidden = false;
+  el.runtimeTimer.dataset.active = String(runtimeClock.active);
+  el.runtimeTimerLabel.textContent = runtimeClock.active ? "已运行" : "总用时";
+  renderRuntimeTimer();
+}
+
+function renderRuntimeTimer() {
+  if (!runtimeClock || el.runtimeTimer.hidden) return;
+  const elapsedMs = runtimeClock.elapsedMs + (runtimeClock.active ? performance.now() - runtimeClock.syncedAt : 0);
+  el.runtimeTimerValue.textContent = clockDuration(elapsedMs);
+}
 
 function observeTaskSettlement(job, jobMode) {
   if (!job.id) return;
@@ -504,6 +619,7 @@ function allEstimateInputs() {
     el.sourceForm.elements.jitterMs,
     el.sourceForm.elements.workersPerProxy,
     el.sourceForm.elements.pageSize,
+    el.sourceForm.elements.proxy,
   ];
 }
 
@@ -524,7 +640,8 @@ async function refreshEstimate(reportInvalid = true) {
     const jitterMs = Number(form.elements.jitterMs.value);
     const workersPerLane = Number(form.elements.workersPerProxy.value);
     const pageSize = Number(form.elements.pageSize.value);
-    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(poolLaneCount), workersPerLane: String(workersPerLane) });
+    const proxyTransport = mode === "parallel" || poolRunning || Boolean(form.elements.proxy?.value.trim());
+    const params = new URLSearchParams({ comments: el.estimateComments.value, pageSize: String(pageSize), minDelayMs: String(minDelayMs), jitterMs: String(jitterMs), networkMs: String(poolNetworkMs), lanes: String(poolLaneCount), workersPerLane: String(workersPerLane), proxyTransport: proxyTransport ? "1" : "0" });
     const value = await api(`/api/estimate?${params}`);
     if (request !== estimateRequest) return;
     el.estimatePages.textContent = fmt(value.pages);
@@ -532,7 +649,10 @@ async function refreshEstimate(reportInvalid = true) {
     el.estimateExpected.textContent = duration(value.expectedSeconds);
     el.estimateConservative.textContent = duration(value.conservativeSeconds);
     const scanMode = mode === "parallel" ? "单曲并行" : "用户来源";
-    el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+    const transport = value.proxyTransportMaxConcurrent
+      ? ` · 主机聚合保护：总并发最多 ${fmt(value.proxyTransportMaxConcurrent)}，启动间隔至少 ${fmt(value.proxyTransportStartDelayMs)}ms`
+      : "";
+    el.estimateContext.textContent = `${scanMode} · ${fmt(value.lanes)} 个出口 × 每出口 ${fmt(value.workersPerLane)} 并发 · 每页 ${fmt(pageSize)} 条 · 每线程间隔 ${fmt(minDelayMs)}ms + 0..${fmt(jitterMs)}ms · 实测延迟约 ${fmt(poolNetworkMs)}ms${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { if (request === estimateRequest) toast(error.message); }
   finally { if (request === estimateRequest) el.estimateButton.disabled = false; }
 }
@@ -728,7 +848,7 @@ async function restoreResumeTask() {
     const form = descriptor.mode === "parallel" ? el.parallelForm : el.sourceForm;
     const allowed = descriptor.mode === "parallel"
       ? new Set(["uid", "songId", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs"])
-      : new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy"]);
+      : new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect"]);
     for (const [savedName, value] of Object.entries(descriptor.input || {})) {
       if (!allowed.has(savedName)) continue;
       const name = savedName === "maxCommentPagesPerSong" ? "maxPages" : savedName;
@@ -736,6 +856,8 @@ async function restoreResumeTask() {
       if (!control) continue;
       if (control instanceof RadioNodeList) {
         for (const item of control) item.checked = item.value === String(value);
+      } else if (control instanceof HTMLInputElement && control.type === "checkbox") {
+        control.checked = Boolean(value);
       } else {
         control.value = String(value);
       }
@@ -875,6 +997,7 @@ function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
 function dateOnly(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value)); }
 function duration(seconds) { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [days ? `${days}天` : "", hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", rest && !days ? `${rest}秒` : ""].filter(Boolean).join(" ") || "0秒"; }
+function clockDuration(milliseconds) { const seconds = Math.max(0, Math.floor(Number(milliseconds || 0) / 1000)); const hours = Math.floor(seconds / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [hours, minutes, rest].map((value) => String(value).padStart(2, "0")).join(":"); }
 function fileSize(bytes) { return `${(bytes / 1024 / 1024).toFixed(bytes >= 100 * 1024 * 1024 ? 0 : 1)} MB`; }
 function shortPath(value) { if (!value) return ""; const parts = value.split(/[\\/]/); return parts.slice(-3).join("/"); }
 function panelForTab(value) { return $({ results: "#resultsPanel", logs: "#logsPanel", pool: "#poolPanel", estimate: "#estimatePanel" }[value]); }
@@ -924,5 +1047,14 @@ $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
 $$('.tab').forEach((tab) => tab.addEventListener("click", () => { const current = $('.tab.active'); if (current === tab) { if (tab.dataset.tab === "logs") void refreshLogs(); return; } const tabs = $$('.tab'); const direction = tabs.indexOf(tab) > tabs.indexOf(current) ? 1 : -1; tabs.forEach((item) => { const active = item === tab; item.classList.toggle("active", active); item.setAttribute("aria-selected", String(active)); }); void slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction); if (tab.dataset.tab === "estimate") void refreshEstimate(); if (tab.dataset.tab === "logs") void refreshLogs(); }));
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
-void boot(); setInterval(() => void refresh(), 1500); setInterval(() => void refreshAuth(), 3000);
-addEventListener("pagehide", () => { resultStream?.close(); stopPoolRotation(); });
+void boot();
+const runtimeTimerInterval = setInterval(renderRuntimeTimer, 250);
+const refreshInterval = setInterval(() => void refresh(), 1500);
+const authRefreshInterval = setInterval(() => void refreshAuth(), 3000);
+addEventListener("pagehide", () => {
+  resultStream?.close();
+  stopPoolRotation();
+  clearInterval(runtimeTimerInterval);
+  clearInterval(refreshInterval);
+  clearInterval(authRefreshInterval);
+});

@@ -17,6 +17,7 @@ type ApiResponse = { status?: number; body?: unknown };
 
 export interface EnhancedNcmClientOptions {
   proxy?: string;
+  requestTimeoutMs?: number;
 }
 
 export interface NcmUserProfile {
@@ -205,10 +206,11 @@ export class EnhancedNcmClient implements NcmClient {
     };
   }
 
-  private requestConfig(cookie?: string): { cookie?: string; proxy?: string } {
+  private requestConfig(cookie?: string): { cookie?: string; proxy?: string; timeout: number } {
     return {
       cookie,
       proxy: this.options.proxy,
+      timeout: this.options.requestTimeoutMs ?? 30_000,
     };
   }
 }

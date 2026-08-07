@@ -25,6 +25,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="settlementDialog"/);
   assert.match(pageText, /本轮耗时/);
   assert.match(pageText, /累计命中/);
+  assert.match(pageText, /id="runtimeTimer"/);
+  assert.match(pageText, /id="globalProgressContext"/);
+  assert.match(pageText, /id="songProgressBar"/);
+  assert.match(pageText, /主机保护/);
+  assert.match(pageText, /允许本机直连/);
   assert.match(pageText, /id="logsPanel"/);
   assert.match(pageText, /IPv4 \/24.*IPv6 \/48/);
   assert.match(pageText, /id="poolSize"[^>]*max="32"[^>]*value="8"/);
@@ -36,7 +41,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(app.status, 200);
   const appText = await app.text();
   assert.match(appText, /year:\s*"numeric"/);
-  assert.match(appText, /currentSong\.pageInSong/);
+  assert.match(appText, /current\.totalComments/);
+  assert.match(appText, /clockDuration/);
+  assert.match(appText, /renderRuntimeTimer/);
+  assert.match(appText, /proxyTransportMaxConcurrent/);
   assert.match(appText, /observeTaskSettlement/);
   assert.match(appText, /\/api\/logs\?mode=/);
   assert.match(appText, /prepareTaskForUpdate/);
@@ -71,6 +79,12 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(parallelValue.pages, 100);
   assert.equal(parallelValue.expectedSeconds, 4);
   assert.equal(parallelValue.totalWorkers, 12);
+
+  const protectedEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=1000&minDelayMs=333&jitterMs=100&networkMs=400&lanes=4&workersPerLane=3&proxyTransport=1`);
+  const protectedValue = await protectedEstimate.json() as { expectedSeconds: number; effectiveWorkers: number; proxyTransportMaxConcurrent: number };
+  assert.equal(protectedValue.expectedSeconds, 8);
+  assert.equal(protectedValue.effectiveWorkers, 8);
+  assert.equal(protectedValue.proxyTransportMaxConcurrent, 8);
 });
 
 test("dashboard restores the last task descriptor from the persistent runtime root", async (context) => {
@@ -162,7 +176,8 @@ test("dashboard exposes the startup update check", async (context) => {
 });
 
 test("dashboard validates UID before starting a job", async (context) => {
-  const server = await startDashboard({ host: "127.0.0.1", port: 0 });
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-validation-"));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
   context.after(() => new Promise<void>((done) => server.close(() => done())));
   const address = server.address() as AddressInfo;
   const response = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
@@ -184,6 +199,14 @@ test("dashboard validates UID before starting a job", async (context) => {
   });
   assert.equal(oversizedPage.status, 400);
   assert.match(await oversizedPage.text(), /pageSize/);
+
+  const protectedDirect = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: "42", source: "record", recordScope: "all", allowDirect: false }),
+  });
+  assert.equal(protectedDirect.status, 409);
+  assert.match(await protectedDirect.text(), /允许本机直连/);
 });
 
 test("dashboard keeps proxy-pool state under the configured runtime root", async (context) => {

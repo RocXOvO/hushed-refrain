@@ -9,8 +9,10 @@ import { spawn, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { parse, stringify } from "yaml";
 import { EnhancedNcmClient } from "./api";
+import { ProxyTransportGate } from "./proxy-transport-gate";
 
 const execFileAsync = promisify(execFile);
+const POOL_RECHECK_CONCURRENCY = 4;
 
 type YamlObject = Record<string, unknown>;
 
@@ -139,6 +141,7 @@ export async function startMihomoPool(
   closeSync(output);
   child.unref();
   if (!child.pid) throw new Error("Mihomo pool process did not return a PID.");
+  const verificationGate = poolVerificationGate();
 
   try {
     await Promise.all(candidates.map((_, index) =>
@@ -148,7 +151,7 @@ export async function startMihomoPool(
       const endpoint = `http://127.0.0.1:${options.basePort + index}`;
       const startedAt = Date.now();
       try {
-        const egressIp = await fetchEgressIp(endpoint, 12_000);
+        const egressIp = await verificationGate.run(() => fetchEgressIp(endpoint, 12_000));
         return {
           name: String(proxy.name),
           endpoint,
@@ -174,8 +177,10 @@ export async function startMihomoPool(
     >(distinctChecks, 4, async (check) => {
       const startedAt = Date.now();
       try {
-        const page = await new EnhancedNcmClient({ proxy: check.endpoint })
-          .getSongCommentsByCursor("186016", 20, 2, String(Date.now()));
+        const page = await verificationGate.run(() =>
+          new EnhancedNcmClient({ proxy: check.endpoint })
+            .getSongCommentsByCursor("186016", 20, 2, String(Date.now()))
+        );
         if (page.comments.length === 0) return undefined;
         return {
           ...check,
@@ -259,9 +264,10 @@ export async function importExternalProxyPool(
   if (normalized.length === 0) {
     throw new Error("At least one HTTP/HTTPS proxy endpoint is required.");
   }
-  const checked = await mapLimit(normalized, Math.min(6, normalized.length), async (endpoint, index) => {
+  const verificationGate = poolVerificationGate();
+  const checked = await mapLimit(normalized, Math.min(POOL_RECHECK_CONCURRENCY, normalized.length), async (endpoint, index) => {
     try {
-      return await verifyProxyEndpoint(`external-${index + 1}`, endpoint);
+      return await verificationGate.run(() => verifyProxyEndpoint(`external-${index + 1}`, endpoint));
     } catch {
       return undefined;
     }
@@ -286,8 +292,9 @@ export async function importExternalProxyPool(
 
 export async function verifyProxyPool(pool: ProxyPoolFile): Promise<ProxyPoolEntry[]> {
   if (!proxyPoolRunning(pool)) throw new Error("The proxy pool is not active.");
-  const checked = await mapLimit(pool.entries, pool.entries.length, (entry) =>
-    verifyProxyEndpoint(entry.name, entry.endpoint)
+  const verificationGate = poolVerificationGate();
+  const checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) =>
+    verificationGate.run(() => verifyProxyEndpoint(entry.name, entry.endpoint))
   );
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
@@ -304,8 +311,9 @@ export async function refreshProxyPool(
 ): Promise<ProxyPoolFile> {
   const pool = await readProxyPool(poolPath);
   if (!pool || !proxyPoolRunning(pool)) throw new Error("The proxy pool is not active.");
-  const checked = await mapLimit(pool.entries, pool.entries.length, (entry) =>
-    verifier(entry.name, entry.endpoint)
+  const verificationGate = poolVerificationGate();
+  const checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) =>
+    verificationGate.run(() => verifier(entry.name, entry.endpoint))
   );
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
@@ -528,6 +536,13 @@ async function mapLimit<T, R>(
   });
   await Promise.all(workers);
   return results;
+}
+
+function poolVerificationGate(): ProxyTransportGate {
+  return new ProxyTransportGate({
+    maxConcurrent: POOL_RECHECK_CONCURRENCY,
+    minStartDelayMs: 80,
+  });
 }
 
 function isProcessAlive(pid: number): boolean {
