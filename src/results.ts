@@ -1,5 +1,7 @@
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
+import { createInterface } from "node:readline";
 import type { FoundComment } from "./types";
 
 export class JsonlResultWriter {
@@ -10,14 +12,17 @@ export class JsonlResultWriter {
   constructor(
     private readonly path: string,
     private readonly onAppend?: (record: FoundComment) => void,
+    private readonly initializationYield: () => Promise<void> = yieldToEventLoop,
   ) {}
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
     await mkdir(dirname(this.path), { recursive: true });
     try {
-      const content = await readFile(this.path, "utf8");
-      for (const line of content.split(/\r?\n/)) {
+      const input = createReadStream(this.path, { encoding: "utf8", highWaterMark: 64 * 1024 });
+      const lines = createInterface({ input, crlfDelay: Infinity });
+      let processed = 0;
+      for await (const line of lines) {
         if (!line.trim()) continue;
         try {
           const item = JSON.parse(line) as { commentId?: unknown };
@@ -25,6 +30,8 @@ export class JsonlResultWriter {
         } catch {
           // Preserve a partially written line and continue; new records remain valid JSONL.
         }
+        processed += 1;
+        if (processed % 1_000 === 0) await this.initializationYield();
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -54,6 +61,10 @@ export class JsonlResultWriter {
     await write;
     return added;
   }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 export function neteaseCommentUrl(songId: string | undefined, commentId: string): string | undefined {

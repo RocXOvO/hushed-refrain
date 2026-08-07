@@ -1,4 +1,5 @@
 import {
+  AuthenticationRequired,
   CooldownRequired,
   RequestBudgetExhausted,
   RunCancelled,
@@ -68,7 +69,9 @@ export class RequestGovernor {
         return await request();
       } catch (error) {
         if (error instanceof RunCancelled) throw error;
+        if (error instanceof AuthenticationRequired) throw error;
         const status = errorStatus(error);
+        if (status === 301) throw new AuthenticationRequired();
         if (status === 403 || status === 429) {
           const cooldown = new CooldownRequired(status, this.options.forbiddenCooldownMs);
           this.terminalError = cooldown;

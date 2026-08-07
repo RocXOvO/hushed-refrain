@@ -20,6 +20,8 @@ const el = {
   estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
   windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
+  toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"),
+  primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), navCollapse: $("#navCollapseButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"),
   appSplash: $("#appSplash"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
@@ -63,7 +65,11 @@ const disclosureAnimations = new WeakMap();
 async function api(path, options) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+  if (!response.ok) {
+    const error = new Error(payload.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
   return payload;
 }
 
@@ -109,7 +115,10 @@ async function startSource(dryRun) {
     renderSource(job);
     syncRuntimeTimer(job);
     toast(dryRun ? "正在读取候选歌曲" : "来源扫描已启动");
-  } catch (error) { toast(error.message); } finally { setBusy(false); }
+  } catch (error) {
+    toast(error.message);
+    if (error.status === 401) void startAuth();
+  } finally { setBusy(false); }
 }
 
 async function lookupSong() {
@@ -435,6 +444,7 @@ function renderPool(pool) {
       : `已找到 Clash Verge 配置与 Mihomo 内核 · ${shortPath(discovery.configPath)}`
     : "未自动找到 Clash Verge，可切换到“其他代理池”手动接入。";
   renderPoolEntries(poolRunning ? pool.entries : [], pool.status);
+  syncToolbarContext();
   syncTaskStartAvailability();
 }
 
@@ -790,7 +800,7 @@ function refreshAuth() {
 async function performAuthRefresh() {
   try {
     const auth = await api("/api/auth");
-    const connectionText = auth.cookiePresent ? "会话已登录" : "本地服务";
+    const connectionText = auth.cookiePresent ? "已保存登录会话" : "本地服务";
     if (el.connection.dataset.label !== connectionText) {
       el.connection.dataset.label = connectionText;
       el.connection.innerHTML = `<span class="status-dot"></span>${connectionText}`;
@@ -1013,6 +1023,7 @@ async function switchMode(value) {
   const previous = mode;
   mode = value;
   document.body.dataset.mode = mode;
+  syncToolbarContext();
   resetVisibleResults();
   connectResultStream();
   await slideSwap(previous === "parallel" ? el.parallelForm : el.sourceForm, mode === "parallel" ? el.parallelForm : el.sourceForm, mode === "source" ? 1 : -1);
@@ -1125,8 +1136,66 @@ function syncTaskStartAvailability() {
   el.parallelStart.disabled = disabled;
   el.sourceStart.disabled = disabled;
   el.dryRun.disabled = disabled;
+  el.toolbarStart.disabled = disabled;
 }
-function setBusy(value) { startSubmissionBusy = value; syncTaskStartAvailability(); }
+function syncToolbarContext() {
+  const form = mode === "parallel" ? el.parallelForm : el.sourceForm;
+  const uid = mode === "parallel" ? el.parallelUid.value.trim() : el.uid.value.trim();
+  const workers = Number(form.elements.workersPerProxy?.value || 1);
+  el.toolbarUid.textContent = uid ? `UID ${uid}` : "UID 待填写";
+  el.toolbarMode.textContent = mode === "parallel" ? "单曲并行" : `用户来源 · ${sourceName(form.elements.source?.value)}`;
+  el.toolbarTopology.textContent = `${fmt(poolRunning ? poolLaneCount : 1)} 出口 · ${fmt(workers)} 线程/IP`;
+}
+function setActiveNavigation(view) {
+  $$('[data-nav-view]').forEach((item) => {
+    const active = item.dataset.navView === view;
+    item.classList.toggle("active", active);
+    if (active) item.setAttribute("aria-current", "page");
+    else item.removeAttribute("aria-current");
+  });
+}
+async function activateNavigation(view) {
+  setActiveNavigation(view);
+  if (view === "search") {
+    setTaskPanelCollapsed(false);
+    el.taskSidebar?.scrollIntoView({ behavior: "auto", block: "start" });
+    return;
+  }
+  if (view === "settings") {
+    setTaskPanelCollapsed(false);
+    const details = (mode === "parallel" ? el.parallelForm : el.sourceForm).querySelector("details.advanced");
+    if (details && details.dataset.expanded !== "true") await animateDisclosure(details, true);
+    details?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "center" });
+    return;
+  }
+  setTaskPanelCollapsed(true);
+  if (view === "pool") setInspectorCollapsed(false);
+  openTaskTab(view);
+}
+function setNavigationCollapsed(collapsed) {
+  document.body.classList.toggle("nav-collapsed", collapsed);
+  el.navCollapse.setAttribute("aria-label", collapsed ? "展开导航" : "收起导航");
+  el.navCollapse.title = collapsed ? "展开导航" : "收起导航";
+  el.navCollapse.querySelector("img").src = collapsed ? "/icons/panel-left-open.svg" : "/icons/panel-left-close.svg";
+}
+function setTaskPanelCollapsed(collapsed) {
+  document.body.classList.toggle("task-panel-collapsed", collapsed);
+  el.taskPanelToggle.setAttribute("aria-label", collapsed ? "展开任务面板" : "收起任务面板");
+  el.taskPanelToggle.title = collapsed ? "展开任务面板" : "收起任务面板";
+}
+function setInspectorCollapsed(collapsed) {
+  document.body.classList.toggle("inspector-collapsed", collapsed);
+  el.inspectorToggle.setAttribute("aria-label", collapsed ? "展开运行详情" : "收起运行详情");
+  el.inspectorToggle.title = collapsed ? "展开运行详情" : "收起运行详情";
+}
+function setBusy(value) {
+  startSubmissionBusy = value;
+  el.toolbarStart.querySelector("span").textContent = value ? "启动中…" : "启动";
+  el.parallelStart.querySelector("span").textContent = value ? "正在启动…" : "开始并行扫描";
+  el.sourceStart.querySelector("span").textContent = value ? "正在启动…" : "开始扫描";
+  el.toolbarStart.setAttribute("aria-busy", String(value));
+  syncTaskStartAvailability();
+}
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
@@ -1163,6 +1232,12 @@ el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); 
 el.sourceForm.addEventListener("submit", (event) => { event.preventDefault(); void startSource(false); });
 el.dryRun.addEventListener("click", () => void startSource(true)); el.songLookup.addEventListener("click", () => void lookupSong()); el.lookup.addEventListener("click", () => void lookupUser());
 el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEventListener("click", () => void stopJob()); el.refresh.addEventListener("click", () => void refresh());
+el.toolbarStart.addEventListener("click", () => (mode === "parallel" ? el.parallelForm : el.sourceForm).requestSubmit());
+el.navCollapse.addEventListener("click", () => setNavigationCollapsed(!document.body.classList.contains("nav-collapsed")));
+el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(!document.body.classList.contains("task-panel-collapsed")));
+el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
+$$('[data-nav-view]').forEach((item) => item.addEventListener("click", () => void activateNavigation(item.dataset.navView)));
+$$('#parallelForm input, #sourceForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
 el.estimateButton.addEventListener("click", () => void refreshEstimate());
 allEstimateInputs().forEach((input) => input.addEventListener("input", () => scheduleEstimateRefresh()));
 $$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
@@ -1182,6 +1257,8 @@ $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
 $$('.tab').forEach((tab) => tab.addEventListener("click", () => void activateTaskTab(tab)));
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
+if (innerWidth <= 1120 && innerWidth > 820) setInspectorCollapsed(true);
+syncToolbarContext();
 void boot().finally(() => {
   scheduleRefreshLoop();
   scheduleAuthRefreshLoop();
@@ -1238,6 +1315,7 @@ async function activateTaskTab(tab) {
     item.classList.toggle("active", active);
     item.setAttribute("aria-selected", String(active));
   });
+  setActiveNavigation(tab.dataset.tab);
   await slideSwap(panelForTab(current.dataset.tab), panelForTab(tab.dataset.tab), direction);
   if (tab.dataset.tab === "estimate") await refreshEstimate();
   if (tab.dataset.tab === "logs") await refreshLogs();

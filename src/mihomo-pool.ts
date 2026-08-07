@@ -18,6 +18,7 @@ import { ProxyTransportGate } from "./proxy-transport-gate";
 
 const execFileAsync = promisify(execFile);
 const POOL_RECHECK_CONCURRENCY = 4;
+export const START_POOL_VERIFICATION_MAX_AGE_MS = 90_000;
 
 type YamlObject = Record<string, unknown>;
 
@@ -355,6 +356,20 @@ export async function verifyProxyPool(
     );
   }
   return distinct;
+}
+
+export function recentlyVerifiedProxyPoolEntries(
+  pool: ProxyPoolFile,
+  now = Date.now(),
+  maximumAgeMs = START_POOL_VERIFICATION_MAX_AGE_MS,
+): ProxyPoolEntry[] | undefined {
+  if (!proxyPoolStatusRunning(pool) || pool.entries.length === 0) return undefined;
+  const checkedAt = Date.parse(pool.lastCheckedAt ?? pool.generatedAt);
+  const age = now - checkedAt;
+  if (!Number.isFinite(checkedAt) || age < 0 || age > maximumAgeMs) return undefined;
+  if (pool.entries.some((entry) => !entry.ncmVerified)) return undefined;
+  const distinct = selectFastestDistinct(pool.entries, pool.entries.length);
+  return distinct.length === pool.entries.length ? distinct : undefined;
 }
 
 export async function refreshProxyPool(

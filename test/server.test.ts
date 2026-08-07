@@ -17,6 +17,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(page.status, 200);
   const pageText = await page.text();
   assert.match(pageText, /云评检索台/);
+  assert.match(pageText, /WORKSPACE UI/);
+  assert.match(pageText, /id="primaryNavigation"/);
+  assert.match(pageText, /id="taskSidebar"/);
+  assert.match(pageText, /id="runtimeInspector"/);
+  assert.match(pageText, /id="toolbarStartButton"/);
   assert.match(pageText, /持续扫描并实时输出/);
   assert.match(pageText, /updateProgress/);
   assert.match(pageText, /重启并安装|下载更新/);
@@ -55,6 +60,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /Date\.now\(\) - lastLogsRefreshAt < 3_000/);
   assert.match(appText, /poolStatus === "starting"/);
   assert.match(appText, /syncTaskStartAvailability/);
+  assert.match(appText, /activateNavigation/);
+  assert.match(appText, /syncToolbarContext/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
@@ -66,6 +73,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const styleText = await styles.text();
   assert.match(styleText, /scrollbar-color:/);
   assert.match(styleText, /::-webkit-scrollbar-thumb/);
+  assert.match(styleText, /\.navigation-rail/);
+  assert.match(styleText, /body\.task-panel-collapsed/);
+  assert.match(styleText, /body\.inspector-collapsed/);
+  assert.doesNotMatch(styleText, /backdrop-filter:/);
 
   const estimate = await fetch(`${base}/api/estimate?comments=500000`);
   assert.equal(estimate.status, 200);
@@ -130,6 +141,26 @@ test("dashboard restores the last task descriptor from the persistent runtime ro
     },
   };
   await writeFile(join(dataDirectory, "resume-task.json"), JSON.stringify(descriptor));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
+  assert.equal(response.status, 200);
+  assert.deepEqual(await response.json(), { task: descriptor });
+});
+
+test("dashboard restores a valid legacy temp descriptor after an interrupted Windows rename", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-temp-resume-"));
+  const dataDirectory = join(runtimeRoot, "data");
+  await mkdir(dataDirectory, { recursive: true });
+  const descriptor = {
+    version: 1,
+    mode: "source",
+    updatedAt: "2026-08-07T00:00:00.000Z",
+    input: { uid: "42", source: "record", pageSize: 1000 },
+  };
+  await writeFile(join(dataDirectory, "resume-task.json.tmp"), JSON.stringify(descriptor));
   const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
   context.after(() => new Promise<void>((done) => server.close(() => done())));
   const address = server.address() as AddressInfo;
@@ -233,6 +264,14 @@ test("dashboard validates UID before starting a job", async (context) => {
   });
   assert.equal(protectedDirect.status, 409);
   assert.match(await protectedDirect.text(), /允许本机直连/);
+
+  const likedSongsWithoutLogin = await fetch(`http://127.0.0.1:${address.port}/api/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: "42", source: "likes", recordScope: "all", allowDirect: true }),
+  });
+  assert.equal(likedSongsWithoutLogin.status, 401);
+  assert.match(await likedSongsWithoutLogin.text(), /二维码登录/);
 });
 
 test("dashboard keeps proxy-pool state under the configured runtime root", async (context) => {

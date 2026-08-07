@@ -1,5 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import {
   CooldownRequired,
   RequestBudgetExhausted,
@@ -408,24 +407,18 @@ function createParallelState(options: ParallelSongScanOptions): ParallelSongScan
 }
 
 export async function loadParallelState(path: string): Promise<ParallelSongScanState | undefined> {
-  try {
-    const state = JSON.parse(await readFile(path, "utf8")) as ParallelSongScanState;
+  return readAtomicJson(path, (value) => {
+    const state = value as ParallelSongScanState;
     if (state.version !== 1 || state.kind !== "parallel-song") {
       throw new Error("Unsupported parallel scan state.");
     }
     return state;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
+  });
 }
 
 async function saveParallelState(path: string, state: ParallelSongScanState): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
   state.updatedAt = new Date().toISOString();
-  const temporary = `${path}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  await rename(temporary, path);
+  await writeAtomicJson(path, state);
 }
 
 function assertCompatible(

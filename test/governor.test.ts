@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CooldownRequired, RequestBudgetExhausted, RunCancelled } from "../src/errors";
+import {
+  AuthenticationRequired,
+  CooldownRequired,
+  RequestBudgetExhausted,
+  RunCancelled,
+} from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
 function fakeRuntime() {
@@ -113,6 +118,28 @@ test("turns 403 into a persistent cooldown signal without retry", async () => {
     CooldownRequired,
   );
   assert.equal(calls, 1);
+});
+
+test("turns 301 into a login requirement without retrying", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 9,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  }, fake.runtime);
+  let calls = 0;
+
+  await assert.rejects(
+    governor.execute("likelist", async () => {
+      calls += 1;
+      throw { status: 301, body: { code: 301 } };
+    }),
+    AuthenticationRequired,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(fake.sleeps, []);
 });
 
 test("enforces the per-run request budget", async () => {

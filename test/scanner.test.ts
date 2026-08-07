@@ -461,6 +461,34 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
 });
 
+test("pooled liked-song discovery stops after the first authentication failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-auth-required-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.cookie = "expired-cookie";
+  let calls = 0;
+  const makeClient = (): NcmClient => ({
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => {
+      calls += 1;
+      throw { status: 301, body: { code: 301 } };
+    },
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  });
+
+  await assert.rejects(
+    runPooledCommentFinder([
+      { name: "lane-a", client: makeClient(), governor: governor(100) },
+      { name: "lane-b", client: makeClient(), governor: governor(100) },
+    ], { ...config, workersPerLane: 1, requestBudget: 100 }),
+    /二维码登录/,
+  );
+  assert.equal(calls, 1);
+});
+
 test("pooled source scan uses multiple workers on one proxy lane", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-workers-"));
   const config = await options(directory);

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { dirname, extname, join, resolve, sep } from "node:path";
+import { extname, join, resolve, sep } from "node:path";
 import { EnhancedNcmClient, type NcmUserProfile } from "./api";
+import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import { CooldownRequired } from "./errors";
 import { estimateCommentScan } from "./estimate";
 import { RequestGovernor } from "./governor";
@@ -20,6 +21,7 @@ import {
   discoverClashVerge,
   importExternalProxyPool,
   proxyPoolStatusRunning,
+  recentlyVerifiedProxyPoolEntries,
   readProxyPool,
   refreshProxyPool,
   startMihomoPool,
@@ -240,6 +242,10 @@ class JobManager {
     try {
     const uid = numericId(input.uid, "UID");
     const source = selection(input.source, ["record", "likes", "both"] as const, "source");
+    const cookie = await readCookie(this.paths.cookie);
+    if ((source === "likes" || source === "both") && !cookie) {
+      throw new HttpError(401, "喜欢歌曲需要网易云登录，请先点击“二维码登录”完成登录。");
+    }
     const recordScope = selection(input.recordScope ?? "all", ["all", "week"] as const, "recordScope");
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const minDelayMs = integer(input.minDelayMs ?? 2_500, "minDelayMs", 0, 600_000);
@@ -256,7 +262,9 @@ class JobManager {
     this.outputPath = join(this.paths.data, `web-comments-${uid}.jsonl`);
     const activePool = await readProxyPool(this.paths.pool);
     const activePoolExpected = proxyPoolStatusRunning(activePool);
-    const poolEntries = activePoolExpected ? await verifyProxyPool(activePool!) : [];
+    const poolEntries = activePoolExpected
+      ? recentlyVerifiedProxyPoolEntries(activePool!) ?? await verifyProxyPool(activePool!)
+      : [];
     if (activePoolExpected && poolEntries.length === 0) {
       throw new HttpError(409, "代理池复核后没有可用出口；已阻止回退到本机直连，请重新构建代理池。");
     }
@@ -289,7 +297,7 @@ class JobManager {
       strategy: "scan",
       source,
       recordScope,
-      cookie: await readCookie(this.paths.cookie),
+      cookie,
       statePath: this.statePath,
       outputPath: this.outputPath,
       commentPageSize,
@@ -510,7 +518,7 @@ class ParallelJobManager {
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const pool = await readProxyPool(this.paths.pool);
     if (!pool || !proxyPoolStatusRunning(pool)) throw new HttpError(409, "代理池尚未运行。");
-    const entries = await verifyProxyPool(pool);
+    const entries = recentlyVerifiedProxyPoolEntries(pool) ?? await verifyProxyPool(pool);
     if (entries.length === 0) {
       throw new HttpError(409, "代理池复核后没有可用出口；已阻止回退到本机直连，请重新构建代理池。");
     }
@@ -951,29 +959,28 @@ function runtimePaths(root: string): RuntimePaths {
 }
 
 async function saveResumeTask(path: string, descriptor: ResumeTaskDescriptor): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  const temporary = `${path}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(descriptor, null, 2)}\n`, "utf8");
-  await rename(temporary, path);
+  await writeAtomicJson(path, descriptor);
 }
 
 async function readResumeTask(path: string): Promise<ResumeTaskDescriptor | undefined> {
   try {
-    const value = JSON.parse(await readFile(path, "utf8")) as Partial<ResumeTaskDescriptor>;
-    if (
-      value.version !== 1 ||
-      (value.mode !== "source" && value.mode !== "parallel") ||
-      typeof value.updatedAt !== "string" ||
-      !value.input ||
-      typeof value.input !== "object" ||
-      Array.isArray(value.input) ||
-      !Object.values(value.input).every((item) =>
-        typeof item === "string" || typeof item === "number" || typeof item === "boolean"
-      )
-    ) return undefined;
-    return value as ResumeTaskDescriptor;
+    return await readAtomicJson(path, (parsed) => {
+      const value = parsed as Partial<ResumeTaskDescriptor>;
+      if (
+        value.version !== 1 ||
+        (value.mode !== "source" && value.mode !== "parallel") ||
+        typeof value.updatedAt !== "string" ||
+        !value.input ||
+        typeof value.input !== "object" ||
+        Array.isArray(value.input) ||
+        !Object.values(value.input).every((item) =>
+          typeof item === "string" || typeof item === "number" || typeof item === "boolean"
+        )
+      ) throw new SyntaxError("Invalid resume task descriptor.");
+      return value as ResumeTaskDescriptor;
+    });
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT" || error instanceof SyntaxError) return undefined;
+    if (error instanceof SyntaxError) return undefined;
     throw error;
   }
 }

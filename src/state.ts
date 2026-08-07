@@ -1,5 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import type { ScanOptions, ScanState } from "./types";
 
 export function createState(
@@ -39,8 +38,8 @@ export function createState(
 }
 
 export async function loadState(path: string): Promise<ScanState | undefined> {
-  try {
-    const parsed = JSON.parse(await readFile(path, "utf8")) as ScanState;
+  return readAtomicJson(path, (value) => {
+    const parsed = value as ScanState;
     if (parsed.version !== 1 && parsed.version !== 2) throw new Error(`Unsupported state version: ${parsed.version}`);
     parsed.version = 2;
     parsed.strategyResolved ??= true;
@@ -53,19 +52,12 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
     }));
     parsed.pagesProcessed ??= parsed.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
     return parsed;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT") return undefined;
-    throw error;
-  }
+  });
 }
 
 export async function saveState(path: string, state: ScanState): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
   state.updatedAt = new Date().toISOString();
-  const temporary = `${path}.tmp`;
-  await writeFile(temporary, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  await rename(temporary, path);
+  await writeAtomicJson(path, state);
 }
 
 export function assertCompatibleState(state: ScanState, options: ScanOptions): void {

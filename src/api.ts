@@ -1,5 +1,5 @@
 import api = require("@neteasecloudmusicapienhanced/api");
-import { ApiResponseError } from "./errors";
+import { ApiResponseError, AuthenticationRequired } from "./errors";
 import type {
   CommentPage,
   CommentRecord,
@@ -221,14 +221,17 @@ async function invoke(name: string, call: () => Promise<ApiResponse>): Promise<J
     const status = Number(response.status ?? 500);
     const body = object(response.body);
     if (status !== 200 || (typeof body.code === "number" && body.code !== 200)) {
+      if (status === 301 || body.code === 301) throw new AuthenticationRequired();
       throw new ApiResponseError(`${name} returned ${status}`, status, body);
     }
     return body;
   } catch (error) {
-    if (error instanceof ApiResponseError) throw error;
+    if (error instanceof ApiResponseError || error instanceof AuthenticationRequired) throw error;
     if (error && typeof error === "object") {
       const candidate = error as ApiResponse;
       const status = Number(candidate.status);
+      const body = object(candidate.body);
+      if (status === 301 || body.code === 301) throw new AuthenticationRequired();
       throw new ApiResponseError(
         `${name} request failed`,
         Number.isFinite(status) ? status : undefined,

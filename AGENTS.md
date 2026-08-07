@@ -20,6 +20,7 @@ Two scan engines exist and must not be conflated:
 
 1. User-source scan (`scan`, `/api/job`, `runPooledCommentFinder`)
    - Read candidate songs from listening rank (`user_record`), likes (`likelist`), or both.
+   - Liked-song discovery requires a saved NetEase login session. Treat upstream status/code `301` as authentication failure, not proxy failure: fail once with a re-login prompt and never fan the same request across pool lanes.
    - Merge songs by ID while preserving record-first order and source metadata.
    - Page each song through `comment_new` with a descending time cursor, match `comment.user.userId` exactly, and write results. The default page size is 1000 and the accepted range is 1..2000.
    - When `hasMore` is true, the next cursor must be strictly older than the prior cursor. An empty page may still continue when `hasMore` is true and the cursor advances; non-progress or an exception remains recoverable work and must not be reported as complete.
@@ -42,7 +43,7 @@ Common result flow:
 
 During a user-source scan, every worker reports its latest song/page through `onSongProgress`; `JobManager` keeps the most recently active song in its in-memory snapshot so dashboard polling does not confuse the first unfinished checkpoint entry with the song currently being requested.
 
-The writer serializes concurrent appends and de-duplicates by `commentId`, including IDs already on disk. SSE/UI failure must never interrupt persistence.
+The writer serializes concurrent appends and de-duplicates by `commentId`, including IDs already on disk. Its startup scan streams JSONL in 64 KiB chunks and periodically yields to the event loop; do not restore a whole-file `readFile().split()` path that can stall Electron when results are large. SSE/UI failure must never interrupt persistence.
 
 ## Task snapshots, live progress, and terminal settlement
 
@@ -80,7 +81,7 @@ Renderer button disabling during pool selection is only UX. `TaskCoordinator` le
 
 ## State, checkpoints, and coverage
 
-- `src/state.ts` owns source-scan state. State is written to a sibling `.tmp` and atomically renamed.
+- `src/state.ts` owns source-scan state. Source state, parallel state, and the GUI resume descriptor use `src/atomic-file.ts`: same-directory unique temporary names, fsync, and bounded `EPERM`/`EBUSY`/`EACCES` rename retry. A failed final rename never deletes the formal checkpoint and leaves the completed temp recoverable. Reads choose the newest valid formal/new-style temp/legacy sibling `.tmp` without deleting another process's file.
 - Current source state is version 2 and records `commentPagination: "cursor-v1"` and `commentPageSize`, plus UID, strategy/source/scope, candidates, per-song cursors/page counts/optional `commentShards`, seen IDs, request/match totals, truncation, source errors, cooldown, and coverage. Version-1 cursor state is upgraded on read; changing page size requires `--fresh` (or a new state path). Writing version 2 makes older clients reject shard-aware state instead of silently ignoring it.
 - Legacy offset checkpoints are migrated only by safely rescanning songs that were unfinished or truncated: each starts at the task's immutable `createdAt` cursor, and JSONL `commentId` de-duplication makes the intentional overlap idempotent. Completed, non-truncated songs are not rescanned merely for migration.
 - `src/parallel-scanner.ts` owns `kind: "parallel-song"`, version 1 state with immutable scan range/shard/page-size identity plus per-shard cursor and counters. Writes are coalesced to about 500 ms and forced at task end.
@@ -123,6 +124,7 @@ Security rules:
 - Clash profile paths accepted by the dashboard must be in one cached discovery allowlist; one to 32 paths may be selected. `readClashVergeProfiles` additionally confines profile files to the profile directory and accepts only YAML remote/local entries. All selected YAML and a staging `mihomo -t` validation must pass before replacing a live managed process.
 - Proxy URLs may contain credentials. Pool/config files use mode `0600` off Windows, dashboard responses mask credentials, and logs/errors must not expose them.
 - Scan traffic uses an 8-request/80-ms task-wide transport gate. Pool build/import/verify/refresh uses a separate 4-request/80-ms gate. These reduce aggregate bursts but cannot hide the host IP from the upstream proxy provider or guarantee that a provider will never rate-limit the account.
+- Task startup may reuse pool entries checked within the last 90 seconds only when the pool is still marked running, every entry is NetEase-verified, and all egress networks remain distinct. Stale or inconsistent entries still require full live verification; this avoids making every Start click repeat the background pool recheck.
 - Never commit or print `.ncm/cookie.txt`, QR images, proxy-pool files, profile contents, tokens, `.env`, or user result/state data.
 
 ## Desktop and updates
@@ -143,6 +145,7 @@ Security rules:
 | Path | Responsibility |
 | --- | --- |
 | `src/types.ts` | Shared domain, state, option, and report contracts. |
+| `src/atomic-file.ts` | Recoverable same-directory atomic JSON/text writes, Windows rename retry, and newest-valid temp recovery. |
 | `src/api.ts` | Adapter over pinned `@neteasecloudmusicapienhanced/api`; 30-second default timeout and response/error normalization. |
 | `src/auth.ts` | QR login polling and private cookie persistence. |
 | `src/governor.ts`, `src/errors.ts` | Start spacing, budgets, retries, cooldown/cancel signals. |
@@ -260,9 +263,9 @@ Local verification, the Windows workflow, and post-upload checks are all release
 
 Update this file in the same commit whenever a change alters module ownership, entry points, routes, state schema/compatibility, concurrency/rate semantics, proxy validation, security boundaries, build commands, artifacts, or release/update behavior. Verify claims against current code and tests, remove stale statements instead of appending history, and keep user instructions in `README.md` synchronized. If only implementation details change without affecting how a future agent navigates or reasons about the system, no memory edit is needed.
 
-## Deferred GUI direction (confirmation required)
+## Workspace GUI direction
 
-The user has approved recording, but not implementing, a future “Replit layout + v0 visual language” redesign. Do not expand an unrelated feature/release into this redesign. Before changing the production UI, first produce a complete effect mockup or runnable static prototype and obtain a new explicit user confirmation.
+The `codex/ui-v0-replit-redesign` branch is the user-requested visual prototype/implementation and deliberately remains separate from the legacy `main` UI until review. Preserve these characteristics when iterating on that branch; do not merge it into the production branch without explicit review.
 
 - Use a modern desktop productivity layout: collapsible left navigation, central work area, and a collapsible right runtime/node-detail pane.
 - Left navigation targets: search tasks, live results, proxy pool, runtime logs, and settings. A top task bar should concentrate UID, source mode, worker/exit counts, and start/pause/stop actions.
@@ -270,4 +273,4 @@ The user has approved recording, but not implementing, a future “Replit layout
 - Keep proxy nodes in a compact list showing name, latency, status, egress IP, and in-use/checking state; avoid full-screen card grids.
 - Visual direction: neutral surfaces, one accent color, thin borders, moderate radii, clear typography, small state labels, and collapsed advanced settings by default.
 - Avoid purple gradients, heavy glass effects, pervasive rounded cards, and long blur/animation work. Preserve the integrated scrollbars, polling/render throttles, and other low-cost performance protections.
-- Reference intent supplied by the user: Replit Project Editor for the split workspace and v0/shadcn-style restrained neutral visuals. Treat the references as inspiration, not authorization to copy or to bypass the prototype review gate.
+- Reference intent supplied by the user: Replit Project Editor for the split workspace and v0/shadcn-style restrained neutral visuals. Treat the references as inspiration rather than copied styling.

@@ -33,6 +33,15 @@ export class ApiResponseError extends Error {
   }
 }
 
+export class AuthenticationRequired extends Error {
+  readonly status = 301;
+
+  constructor() {
+    super("网易云登录已失效或当前数据源需要登录，请点击“二维码登录”重新登录。");
+    this.name = "AuthenticationRequired";
+  }
+}
+
 export class RunCancelled extends Error {
   constructor() {
     super("Run cancelled");

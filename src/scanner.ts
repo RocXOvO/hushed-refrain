@@ -1,4 +1,9 @@
-import { CooldownRequired, RequestBudgetExhausted, RunCancelled } from "./errors";
+import {
+  AuthenticationRequired,
+  CooldownRequired,
+  RequestBudgetExhausted,
+  RunCancelled,
+} from "./errors";
 import { RequestGovernor } from "./governor";
 import { LaneRecovery } from "./lane-recovery";
 import { executeProxyRequest, type ProxyTransportGate } from "./proxy-transport-gate";
@@ -799,7 +804,11 @@ async function requestFromPool<T>(
     try {
       return await executeProxyRequest(lane, label, () => request(lane.client));
     } catch (error) {
-      if (error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
+      if (
+        error instanceof AuthenticationRequired ||
+        error instanceof RequestBudgetExhausted ||
+        error instanceof RunCancelled
+      ) throw error;
       lastError = error;
     }
   }
@@ -1017,7 +1026,8 @@ function pooledRequestsUsed(lanes: SourceScanLane[]): number {
 }
 
 function isPauseSignal(error: unknown): boolean {
-  return error instanceof CooldownRequired ||
+  return error instanceof AuthenticationRequired ||
+    error instanceof CooldownRequired ||
     error instanceof RequestBudgetExhausted ||
     error instanceof RunCancelled;
 }

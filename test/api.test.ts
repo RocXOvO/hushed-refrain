@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import upstream = require("@neteasecloudmusicapienhanced/api");
 import { EnhancedNcmClient } from "../src/api";
+import { AuthenticationRequired } from "../src/errors";
 
 test("passes one static proxy and cookie to the upstream API", async () => {
   const mutable = upstream as unknown as {
@@ -22,6 +23,25 @@ test("passes one static proxy and cookie to the upstream API", async () => {
     assert.equal(captured?.cookie, "MUSIC_U=test");
     assert.equal(captured?.proxy, "http://127.0.0.1:7890/");
     assert.equal(captured?.timeout, 30_000);
+  } finally {
+    mutable.likelist = original;
+  }
+});
+
+test("turns NetEase 301 responses into a clear login requirement", async () => {
+  const mutable = upstream as unknown as {
+    likelist: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.likelist;
+  mutable.likelist = async () => {
+    throw { status: 301, body: { code: 301 } };
+  };
+
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getLikedSongs("42"),
+      (error: unknown) => error instanceof AuthenticationRequired && /二维码登录/.test(error.message),
+    );
   } finally {
     mutable.likelist = original;
   }

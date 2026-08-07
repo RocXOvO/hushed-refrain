@@ -12,6 +12,7 @@ import {
   mergeProxyDefinitions,
   proxyPoolRunning,
   proxyPoolStatusRunning,
+  recentlyVerifiedProxyPoolEntries,
   readClashVergeProfiles,
   readProxyPool,
   refreshProxyPool,
@@ -161,6 +162,36 @@ test("treats an active external pool as running without a managed PID", () => {
     active: false,
     entries: [entry("external", "8.8.8.8", 20, 30)],
   }), false);
+});
+
+test("reuses only fresh verified distinct pool entries when a task starts", () => {
+  const now = Date.now();
+  const entries = [
+    entry("lane-a", "1.1.1.1", 20, 30),
+    entry("lane-b", "2.2.2.2", 25, 35),
+  ];
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date(now - 30_000).toISOString(),
+    lastCheckedAt: new Date(now - 30_000).toISOString(),
+    source: "external",
+    active: true,
+    entries,
+  };
+
+  assert.deepEqual(recentlyVerifiedProxyPoolEntries(pool, now), entries);
+  assert.equal(recentlyVerifiedProxyPoolEntries({
+    ...pool,
+    lastCheckedAt: new Date(now - 120_000).toISOString(),
+  }, now), undefined);
+  assert.equal(recentlyVerifiedProxyPoolEntries({
+    ...pool,
+    entries: [entry("a", "103.151.17.10", 20, 30), entry("b", "103.151.17.20", 25, 35)],
+  }, now), undefined);
+  assert.equal(recentlyVerifiedProxyPoolEntries({
+    ...pool,
+    entries: [{ ...entries[0], ncmVerified: false }, entries[1]],
+  }, now), undefined);
 });
 
 test("uses a cheap PID liveness hint for frequently polled managed-pool status", () => {
