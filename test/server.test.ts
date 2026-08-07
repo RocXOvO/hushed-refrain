@@ -14,15 +14,20 @@ import {
 } from "../src/server";
 import type { ProxyPoolFile } from "../src/mihomo-pool";
 
-test("isolates target-owned likes while preserving the legacy record result path", () => {
-  assert.deepEqual(sourceTaskPaths("/data", "42", "record"), {
-    statePath: join("/data", "web-state-42-record.json"),
-    outputPath: join("/data", "web-comments-42.jsonl"),
-  });
+test("uses target-v3 per-source checkpoints with one canonical UID result and coverage ledger", () => {
+  const record = sourceTaskPaths("/data", "42", "record");
+  assert.match(record.statePath, /web-state-42-record-target-v3\.json$/);
+  assert.match(record.outputPath, /web-comments-42-target-v3\.jsonl$/);
+  assert.match(record.coveragePath, /web-song-coverage-42-target-v3\.json$/);
   const likes = sourceTaskPaths("/data", "42", "likes");
-  assert.match(likes.statePath, /web-state-42-likes-target-v2\.json$/);
-  assert.match(likes.outputPath, /web-comments-42-likes-target-v2\.jsonl$/);
-  assert.doesNotMatch(likes.statePath, /web-state-42-likes\.json$/);
+  const both = sourceTaskPaths("/data", "42", "both");
+  assert.match(likes.statePath, /web-state-42-likes-target-v3\.json$/);
+  assert.match(both.statePath, /web-state-42-both-target-v3\.json$/);
+  assert.equal(likes.outputPath, record.outputPath);
+  assert.equal(both.outputPath, record.outputPath);
+  assert.equal(likes.coveragePath, record.coveragePath);
+  assert.doesNotMatch(record.statePath, /web-state-42-record\.json$/);
+  assert.doesNotMatch(likes.outputPath, /target-v2/);
 });
 
 test("dashboard serves UI assets and estimate API", async (context) => {
@@ -63,8 +68,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /PDF 将包含截至导出时已经保存的全部结果/);
   assert.match(pageText, /评论读取进度/);
   assert.match(pageText, /主机并发会硬性限制总 Worker 数/);
-  assert.match(pageText, /styles\.css\?v=38/);
-  assert.match(pageText, /app\.js\?v=38/);
+  assert.match(pageText, /styles\.css\?v=40/);
+  assert.match(pageText, /app\.js\?v=39/);
+  assert.match(pageText, /id="settlementCoverage"/);
   assert.match(pageText, /id="speedMetric"/);
   assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
@@ -149,6 +155,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);
   assert.match(styleText, /body\.inspector-collapsed/);
+  assert.match(styleText, /body\.inspector-collapsed \.inspector-heading > div\s*\{[^}]*position:\s*absolute/s);
   assert.match(styleText, /\.inspector-body\s*\{[^}]*transition:/s);
   assert.match(styleText, /prefers-reduced-motion:\s*reduce/);
   assert.match(styleText, /transform 210ms/);

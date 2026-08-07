@@ -17,6 +17,7 @@ import { mergeCommentTotal } from "./progress";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { ResultAccumulator } from "./result-accumulator";
 import { JsonlResultWriter } from "./results";
+import { loadSongCoverage, mergeSongCoverage } from "./song-coverage";
 import { hydrateMissingSongMetadata } from "./song-metadata";
 import { createTimeShards, SOURCE_SCAN_START_TIME, splitRemainingTimeShard } from "./time-shards";
 import { AsyncWorkQueue } from "./work-queue";
@@ -26,6 +27,7 @@ import {
   createState,
   loadState,
   saveState,
+  SOURCE_CATALOG_VERSION,
 } from "./state";
 import type {
   FoundComment,
@@ -63,6 +65,11 @@ class SourceLaneFailure extends Error {
 interface SourceScanWork {
   songIndex: number;
   shardId?: number;
+}
+
+interface CollectedSongCatalog {
+  songs: SongCandidate[];
+  failures: string[];
 }
 
 export async function runCommentFinder(
@@ -106,11 +113,8 @@ export async function runCommentFinder(
       await checkpoint();
     }
 
-    if (state.finished) {
-      return report(state, governor, options, initialRequests, "complete");
-    }
-
     if (state.strategy === "history") {
+      if (state.finished) return report(state, governor, options, initialRequests, "complete");
       if (!options.cookie) {
         throw new Error("The history strategy requires a logged-in cookie.");
       }
@@ -184,22 +188,13 @@ export async function runPooledCommentFinder(
   try {
     state.strategy = "scan";
     state.strategyResolved = true;
-    let sourcesChanged = false;
-    if (!state.sourcesLoaded) {
-      const collected = await collectSongsPooled(lanes, options);
-      state.sourceSongCount = collected.songs.length;
-      state.sourceTruncated = options.maxSongs > 0 && collected.songs.length > options.maxSongs;
-      state.songs = options.maxSongs > 0 ? collected.songs.slice(0, options.maxSongs) : collected.songs;
-      state.sourceErrors = collected.failures;
-      state.sourcesLoaded = true;
-      ensureSongProgress(state);
-      sourcesChanged = true;
-    }
+    const sourcesChanged = await refreshSongCatalogPooled(lanes, options, state);
     const hydratedSongs = await hydrateSongsFromPool(lanes, state.songs);
     publishSongCatalog(options, state.songs);
     if (sourcesChanged || hydratedSongs > 0) await checkpoint(true);
 
     ensureSongProgress(state);
+    await persistEligibleCompletedCoverage(options, state);
     if (options.dryRun) {
       return pooledReport(state, lanes, options, initialRequests, "dry-run", {
         note: estimateNote(state, options),
@@ -465,6 +460,7 @@ export async function runPooledCommentFinder(
       const added = await appendMatches(results, matches);
       let nextWork: SourceScanWork[] = [];
       const pageCapReached = options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong;
+      const wasDone = progress.done;
       if (shard) {
         const numericNextCursor = nextCursor === undefined ? undefined : Number(nextCursor);
         const cursorPassedStart = numericNextCursor !== undefined && numericNextCursor <= shard.startTime;
@@ -505,6 +501,9 @@ export async function runPooledCommentFinder(
       }
       notifySongPermit(songIndex);
       syncSongCursor(state);
+      if (!wasDone && progress.done && !state.truncatedSongIds.includes(song.id)) {
+        await persistSongCoverageIfEligible(options, state, songIndex);
+      }
       publishSongProgress(
         options,
         song,
@@ -732,23 +731,13 @@ async function runSongScan(
   checkpoint: () => Promise<void>,
   initialRequests: number,
 ): Promise<RunReport> {
-  let sourcesChanged = false;
-  if (!state.sourcesLoaded) {
-    const collected = await collectSongs(client, governor, options);
-    const songs = collected.songs;
-    state.sourceSongCount = songs.length;
-    state.sourceTruncated = options.maxSongs > 0 && songs.length > options.maxSongs;
-    state.songs = options.maxSongs > 0 ? songs.slice(0, options.maxSongs) : songs;
-    state.sourceErrors = collected.failures;
-    state.sourcesLoaded = true;
-    ensureSongProgress(state);
-    sourcesChanged = true;
-  }
+  const sourcesChanged = await refreshSongCatalog(client, governor, options, state);
   const hydratedSongs = await hydrateSongsFromClient(client, governor, state.songs);
   publishSongCatalog(options, state.songs);
   if (sourcesChanged || hydratedSongs > 0) await checkpoint();
 
   ensureSongProgress(state);
+  await persistEligibleCompletedCoverage(options, state);
   syncSongCursor(state);
 
   if (options.dryRun) {
@@ -758,8 +747,9 @@ async function runSongScan(
   }
 
   while (state.songIndex < state.songs.length) {
-    const song = state.songs[state.songIndex];
-    const songProgress = state.songProgress![state.songIndex];
+    const currentSongIndex = state.songIndex;
+    const song = state.songs[currentSongIndex];
+    const songProgress = state.songProgress![currentSongIndex];
     state.commentOffset = songProgress.commentOffset;
     state.pageInSong = songProgress.pageInSong;
 
@@ -767,7 +757,7 @@ async function runSongScan(
       options.maxCommentPagesPerSong > 0 &&
       state.pageInSong >= options.maxCommentPagesPerSong
     ) {
-      markSongTruncated(state, state.songIndex);
+      markSongTruncated(state, currentSongIndex);
       syncSongCursor(state);
       await checkpoint();
       continue;
@@ -776,6 +766,7 @@ async function runSongScan(
     const shard = songProgress.commentShards?.find((candidate) => !candidate.done);
     if (songProgress.commentShards?.length && !shard) {
       advanceSong(state);
+      await persistSongCoverageIfEligible(options, state, currentSongIndex);
       await checkpoint();
       continue;
     }
@@ -827,6 +818,7 @@ async function runSongScan(
     songProgress.pageInSong += 1;
     songProgress.commentOffset += scannedComments.length;
     songProgress.totalComments = mergeCommentTotal(songProgress.totalComments, page.total, songProgress.commentOffset);
+    let naturallyCompleted = false;
     if (shard) {
       shard.pagesProcessed += 1;
       shard.pageNo = requestedPageNo + 1;
@@ -844,9 +836,13 @@ async function runSongScan(
       } else {
         shard.cursor = nextCursor;
       }
-      if (songProgress.commentShards!.every((candidate) => candidate.done)) advanceSong(state);
+      if (songProgress.commentShards!.every((candidate) => candidate.done)) {
+        advanceSong(state);
+        naturallyCompleted = true;
+      }
     } else if (nextCursor === undefined) {
       advanceSong(state);
+      naturallyCompleted = true;
     } else {
       songProgress.commentCursor = nextCursor;
     }
@@ -860,6 +856,7 @@ async function runSongScan(
       undefined,
       songProgress.done,
     );
+    if (naturallyCompleted) await persistSongCoverageIfEligible(options, state, currentSongIndex);
     await checkpoint();
 
     if (added > 0 && options.stopAfterFirst) {
@@ -878,11 +875,207 @@ async function runSongScan(
   return report(state, governor, options, initialRequests, "complete");
 }
 
+async function refreshSongCatalog(
+  client: NcmClient,
+  governor: RequestGovernor,
+  options: ScanOptions,
+  state: ScanState,
+): Promise<boolean> {
+  if (!shouldRefreshSongCatalog(state)) return false;
+  try {
+    const collected = await collectSongs(client, governor, options);
+    await reconcileSongCatalog(state, collected, options);
+  } catch (error) {
+    if (isPauseSignal(error) || !state.sourcesLoaded) throw error;
+    retainCatalogAfterRefreshFailure(state, options, error);
+  }
+  return true;
+}
+
+async function refreshSongCatalogPooled(
+  lanes: SourceScanLane[],
+  options: ScanOptions,
+  state: ScanState,
+): Promise<boolean> {
+  if (!shouldRefreshSongCatalog(state)) return false;
+  try {
+    const collected = await collectSongsPooled(lanes, options);
+    await reconcileSongCatalog(state, collected, options);
+  } catch (error) {
+    if (isPauseSignal(error) || !state.sourcesLoaded) throw error;
+    retainCatalogAfterRefreshFailure(state, options, error);
+  }
+  return true;
+}
+
+function shouldRefreshSongCatalog(state: ScanState): boolean {
+  return !state.sourcesLoaded || state.sourceCatalogVersion === SOURCE_CATALOG_VERSION;
+}
+
+async function reconcileSongCatalog(
+  state: ScanState,
+  collected: CollectedSongCatalog,
+  options: ScanOptions,
+): Promise<void> {
+  ensureSongProgress(state);
+  const previousSongs = state.songs;
+  const previousProgress = state.songProgress!;
+  const previousById = new Map(previousSongs.map((song, index) => [song.id, {
+    song,
+    progress: previousProgress[index],
+  }]));
+  const rawCatalogCount = collected.songs.length;
+  const sourceTruncated = options.maxSongs > 0 && rawCatalogCount > options.maxSongs;
+  const currentSongs = options.maxSongs > 0 ? collected.songs.slice(0, options.maxSongs) : collected.songs;
+  const coveredIds = options.coveragePath && !options.fresh
+    ? new Set(Object.keys((await loadSongCoverage(options.coveragePath, options.uid)).songs))
+    : new Set<string>();
+  const reconciledSongs: SongCandidate[] = [];
+  const reconciledProgress = [] as NonNullable<ScanState["songProgress"]>;
+  const currentIds = new Set<string>();
+  const reusedIds = new Set<string>();
+  let historicalCompletedSongs = 0;
+  let reusedSongs = 0;
+  let newPendingSongs = 0;
+  const initialCursor = String(Date.now());
+
+  for (const currentSong of currentSongs) {
+    currentIds.add(currentSong.id);
+    const previous = previousById.get(currentSong.id);
+    const progress = previous?.progress ?? initialSongProgress(initialCursor);
+    if (previous?.progress.done) historicalCompletedSongs += 1;
+    if (!progress.done && coveredIds.has(currentSong.id)) {
+      for (const shard of progress.commentShards ?? []) shard.done = true;
+      progress.done = true;
+      reusedSongs += 1;
+      reusedIds.add(currentSong.id);
+    } else if (!previous && !progress.done) {
+      newPendingSongs += 1;
+    }
+    reconciledSongs.push(previous
+      ? refreshSongMetadata(previous.song, currentSong, collected.failures.length > 0)
+      : cloneSongCandidate(currentSong));
+    reconciledProgress.push(progress);
+  }
+
+  for (let index = 0; index < previousSongs.length; index += 1) {
+    const previousSong = previousSongs[index];
+    if (currentIds.has(previousSong.id)) continue;
+    reconciledSongs.push(previousSong);
+    reconciledProgress.push(previousProgress[index]);
+  }
+
+  state.songs = reconciledSongs;
+  state.songProgress = reconciledProgress;
+  const failedSources = new Set(collected.failures.flatMap((failure) =>
+    failure.startsWith("record:") ? ["record" as const]
+      : failure.startsWith("likes:") ? ["likes" as const]
+      : []
+  ));
+  const trustworthyCatalogIds = new Set(currentIds);
+  if (failedSources.size > 0) {
+    for (const previousSong of previousSongs) {
+      if (previousSong.sources.some((source) => failedSources.has(source))) {
+        trustworthyCatalogIds.add(previousSong.id);
+      }
+    }
+  }
+  state.sourceSongCount = collected.failures.length > 0
+    ? Math.max(state.sourceSongCount, trustworthyCatalogIds.size)
+    : rawCatalogCount;
+  state.sourceTruncated = collected.failures.length > 0
+    ? state.sourceTruncated || sourceTruncated
+    : sourceTruncated;
+  state.sourceErrors = collected.failures;
+  state.sourceCatalogVersion = SOURCE_CATALOG_VERSION;
+  state.sourcesLoaded = true;
+  state.reusedSongs = reusedSongs;
+  state.historicalCompletedSongs = historicalCompletedSongs;
+  state.newPendingSongs = newPendingSongs;
+  state.truncatedSongIds = state.truncatedSongIds.filter((songId) => !reusedIds.has(songId));
+  state.finished = reconciledProgress.every((progress) => progress.done);
+  state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0;
+  syncSongCursor(state);
+}
+
+function retainCatalogAfterRefreshFailure(
+  state: ScanState,
+  options: ScanOptions,
+  error: unknown,
+): void {
+  ensureSongProgress(state);
+  state.sourceErrors = [`${options.source}: 目录刷新失败，已保留上次完整目录（${errorMessage(error)}）`];
+  state.reusedSongs = 0;
+  state.historicalCompletedSongs = completedSongs(state);
+  state.newPendingSongs = 0;
+  state.finished = state.songProgress!.every((progress) => progress.done);
+  state.coverageComplete = false;
+  syncSongCursor(state);
+}
+
+function initialSongProgress(initialCursor: string): NonNullable<ScanState["songProgress"]>[number] {
+  return {
+    commentOffset: 0,
+    pageInSong: 0,
+    commentCursor: initialCursor,
+    commentPageNo: 1,
+    done: false,
+  };
+}
+
+function refreshSongMetadata(
+  previous: SongCandidate,
+  current: SongCandidate,
+  partialCatalog: boolean,
+): SongCandidate {
+  const sources = partialCatalog
+    ? [...new Set([...previous.sources, ...current.sources])]
+    : [...current.sources];
+  return {
+    ...previous,
+    ...current,
+    name: current.name ?? previous.name,
+    artists: current.artists ? [...current.artists] : previous.artists && [...previous.artists],
+    sources,
+    sourceRank: current.sourceRank ?? previous.sourceRank,
+    playCount: current.playCount ?? previous.playCount,
+    score: current.score ?? previous.score,
+  };
+}
+
+function cloneSongCandidate(song: SongCandidate): SongCandidate {
+  return {
+    ...song,
+    sources: [...song.sources],
+    artists: song.artists && [...song.artists],
+  };
+}
+
+async function persistEligibleCompletedCoverage(options: ScanOptions, state: ScanState): Promise<void> {
+  if (!options.coveragePath || state.sourceErrors.length > 0 || state.sourceTruncated) return;
+  const truncated = new Set(state.truncatedSongIds);
+  const songIds = state.songs.flatMap((song, index) =>
+    state.songProgress?.[index]?.done && !truncated.has(song.id) ? [song.id] : []
+  );
+  if (songIds.length > 0) await mergeSongCoverage(options.coveragePath, options.uid, songIds);
+}
+
+async function persistSongCoverageIfEligible(
+  options: ScanOptions,
+  state: ScanState,
+  songIndex: number,
+): Promise<void> {
+  if (!options.coveragePath || state.sourceErrors.length > 0 || state.sourceTruncated) return;
+  const song = state.songs[songIndex];
+  if (!song || state.truncatedSongIds.includes(song.id) || !state.songProgress?.[songIndex]?.done) return;
+  await mergeSongCoverage(options.coveragePath, options.uid, [song.id]);
+}
+
 async function collectSongs(
   client: NcmClient,
   governor: RequestGovernor,
   options: ScanOptions,
-): Promise<{ songs: SongCandidate[]; failures: string[] }> {
+): Promise<CollectedSongCatalog> {
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
   if (options.source === "record" || options.source === "both") {
@@ -914,7 +1107,7 @@ async function collectSongs(
 async function collectSongsPooled(
   lanes: SourceScanLane[],
   options: ScanOptions,
-): Promise<{ songs: SongCandidate[]; failures: string[] }> {
+): Promise<CollectedSongCatalog> {
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
   if (options.source === "record" || options.source === "both") {
@@ -1102,6 +1295,10 @@ function report(
     uid: state.uid,
     songs: state.songs.length,
     songsProcessed: completedSongs(state),
+    catalogSongs: state.sourceSongCount,
+    reusedSongs: state.reusedSongs ?? 0,
+    historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
+    newPendingSongs: state.newPendingSongs ?? 0,
     matches: state.matchCount,
     requestsThisRun: governor.requestsUsed,
     requestsTotal: initialRequests + governor.requestsUsed,
@@ -1129,6 +1326,10 @@ function pooledReport(
     uid: state.uid,
     songs: state.songs.length,
     songsProcessed: completedSongs(state),
+    catalogSongs: state.sourceSongCount,
+    reusedSongs: state.reusedSongs ?? 0,
+    historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
+    newPendingSongs: state.newPendingSongs ?? 0,
     matches: state.matchCount,
     requestsThisRun,
     requestsTotal: initialRequests + requestsThisRun,
@@ -1355,6 +1556,10 @@ function publishCheckpointProgress(options: ScanOptions, state: ScanState): void
     options.onCheckpoint?.({
       songs: state.songs.length,
       songsProcessed: completedSongs(state),
+      catalogSongs: state.sourceSongCount,
+      reusedSongs: state.reusedSongs ?? 0,
+      historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
+      newPendingSongs: state.newPendingSongs ?? 0,
       commentOffset: state.commentOffset,
       matches: state.matchCount,
       requestsTotal: state.requestCount,

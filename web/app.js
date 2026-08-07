@@ -13,7 +13,7 @@ const el = {
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"), exportResults: $("#exportResultsButton"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
-  settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
+  settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementCoverage: $("#settlementCoverage"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
   updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
@@ -320,7 +320,7 @@ function renderSource(job) {
     globalContext: job.uid
       ? `${fmt(job.songsProcessed)} / ${fmt(job.songs)} 首歌曲 · ${topology}`
       : "尚未开始",
-    note: [job.note, job.error, ...(job.sourceErrors || []), topologyCapacityNote(job)].filter(Boolean).join(" · "),
+    note: [sourceCoverageSummary(job), job.note, job.error, ...(job.sourceErrors || []), topologyCapacityNote(job)].filter(Boolean).join(" · "),
   });
   renderActiveSongs(
     active ? job.activeSongs || [] : [],
@@ -345,6 +345,11 @@ function renderProgress({ globalPercent, globalContext, note }) {
   el.globalContext.textContent = globalContext;
   el.note.hidden = !note;
   el.note.textContent = note || "";
+}
+
+function sourceCoverageSummary(job) {
+  if (!job?.uid) return "";
+  return `目录总数 ${fmt(job.catalogSongs ?? job.songs)} · 历史已完成 ${fmt(job.historicalCompletedSongs)} · 已复用/跳过 ${fmt(job.reusedSongs)} · 新增待扫 ${fmt(job.newPendingSongs)}`;
 }
 
 function renderActiveSongs(songs, summary, configuredWorkers = 0) {
@@ -537,6 +542,8 @@ function renderSettlement(job, jobMode) {
   el.settlementMatches.textContent = fmt(job.matches);
   el.settlementPages.textContent = fmt(job.pagesProcessed);
   el.settlementRequests.textContent = fmt(job.requestsTotal);
+  el.settlementCoverage.hidden = jobMode !== "source";
+  el.settlementCoverage.textContent = jobMode === "source" ? sourceCoverageSummary(job) : "";
   el.settlementNote.textContent = [job.note, job.error, ...(job.sourceErrors || []), defaults[job.status]].filter(Boolean).join(" · ");
   el.settlementLogPath.textContent = job.logPath || "未生成日志文件";
   if (!el.settlementDialog.open) el.settlementDialog.showModal();

@@ -309,7 +309,8 @@ body.task-panel-collapsed.inspector-collapsed .workspace { grid-template-columns
 body.inspector-collapsed .inspector { padding: 12px 8px; overflow: hidden; }
 body.inspector-collapsed .inspector-heading > div,
 body.inspector-collapsed .inspector-body { opacity: 0; transform: translateX(22px); visibility: hidden; transition: transform 180ms cubic-bezier(.4,0,.2,1), opacity 120ms ease, visibility 0s 180ms; pointer-events: none; }
-body.inspector-collapsed .inspector-heading { justify-content: center; }
+body.inspector-collapsed .inspector-heading { position: relative; justify-content: center; }
+body.inspector-collapsed .inspector-heading > div { position: absolute; inset: 0 auto auto 0; }
 body.inspector-collapsed .inspector .panel-toggle img { transform: rotate(180deg); }
 
 .mode-switch { margin: 17px 0; }
@@ -677,6 +678,7 @@ dialog::backdrop { background: rgb(20 20 22 / 52%); }
 .settlement-footnote { color: var(--muted); font-size: .65rem; }
 .settlement-metrics strong { overflow-wrap: anywhere; font-size: .94rem; }
 .settlement-metrics > div:nth-child(2) strong { color: var(--accent); }
+.settlement-coverage { margin: 13px 0 0; color: var(--muted-strong); font-size: .69rem; line-height: 1.55; }
 .settlement-note { margin: 13px 0 0; padding: 9px 11px; color: var(--ink-soft); background: var(--surface-subtle); border: 1px solid var(--line); border-left: 3px solid var(--success); border-radius: var(--radius-sm); font-size: .7rem; line-height: 1.5; }
 .settlement-log-label { margin: 13px 0 5px; }
 .settlement-log-path { max-height: 54px; padding: 8px 9px; display: block; overflow: auto; color: var(--ink-soft); background: var(--surface-raised); border-radius: var(--radius-sm); font-size: .64rem; overflow-wrap: anywhere; white-space: normal; }

@@ -169,6 +169,10 @@ export interface ParallelCheckpointActivity {
 export interface ScanCheckpointActivity {
   songs: number;
   songsProcessed: number;
+  catalogSongs: number;
+  reusedSongs: number;
+  historicalCompletedSongs: number;
+  newPendingSongs: number;
   commentOffset: number;
   matches: number;
   requestsTotal: number;
@@ -222,7 +226,7 @@ export interface SongScanProgress {
 }
 
 export interface ScanState {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   commentPagination?: "cursor-v1";
   commentPageSize?: number;
   uid: string;
@@ -237,6 +241,9 @@ export interface ScanState {
   sourceTruncated: boolean;
   sourceErrors: string[];
   sourceCatalogVersion?: number;
+  reusedSongs?: number;
+  historicalCompletedSongs?: number;
+  newPendingSongs?: number;
   songIndex: number;
   commentOffset: number;
   pageInSong: number;
@@ -261,6 +268,7 @@ export interface ScanOptions {
   cookie?: string;
   statePath: string;
   outputPath: string;
+  coveragePath?: string;
   commentPageSize: number;
   historyPageSize: number;
   maxCommentPagesPerSong: number;
@@ -327,6 +335,10 @@ export interface RunReport {
   uid: string;
   songs: number;
   songsProcessed: number;
+  catalogSongs: number;
+  reusedSongs: number;
+  historicalCompletedSongs: number;
+  newPendingSongs: number;
   matches: number;
   requestsThisRun: number;
   requestsTotal: number;

@@ -1,7 +1,7 @@
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import type { ScanOptions, ScanState } from "./types";
 
-export const SOURCE_CATALOG_VERSION = 2;
+export const SOURCE_CATALOG_VERSION = 3;
 
 export function createState(
   options: ScanOptions,
@@ -9,7 +9,7 @@ export function createState(
 ): ScanState {
   const now = new Date().toISOString();
   return {
-    version: 2,
+    version: 3,
     commentPagination: "cursor-v1",
     commentPageSize: options.commentPageSize,
     uid: options.uid,
@@ -24,6 +24,9 @@ export function createState(
     sourceTruncated: false,
     sourceErrors: [],
     sourceCatalogVersion: SOURCE_CATALOG_VERSION,
+    reusedSongs: 0,
+    historicalCompletedSongs: 0,
+    newPendingSongs: 0,
     songIndex: 0,
     commentOffset: 0,
     pageInSong: 0,
@@ -43,11 +46,14 @@ export function createState(
 export async function loadState(path: string): Promise<ScanState | undefined> {
   return readAtomicJson(path, (value) => {
     const parsed = value as ScanState;
-    if (parsed.version !== 1 && parsed.version !== 2) throw new Error(`Unsupported state version: ${parsed.version}`);
-    parsed.version = 2;
+    if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) throw new Error(`Unsupported state version: ${parsed.version}`);
+    parsed.version = 3;
     parsed.strategyResolved ??= true;
     parsed.sourcesLoaded ??= parsed.songs.length > 0 || parsed.sourceSongCount > 0 || parsed.finished;
     parsed.sourceErrors ??= [];
+    parsed.reusedSongs ??= 0;
+    parsed.historicalCompletedSongs ??= 0;
+    parsed.newPendingSongs ??= 0;
     parsed.songProgress ??= parsed.songs.map((_, index) => ({
       commentOffset: index === parsed.songIndex ? parsed.commentOffset : 0,
       pageInSong: index === parsed.songIndex ? parsed.pageInSong : 0,

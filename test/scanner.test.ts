@@ -374,7 +374,7 @@ test("both mode keeps the available source and reports partial coverage", async 
   assert.match(report.sourceErrors[0], /^record:/);
 });
 
-test("an empty source list is checkpointed and not fetched again", async () => {
+test("an empty source list is refreshed on the next normal start without comment requests", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-empty-"));
   const config = await options(directory);
   config.source = "record";
@@ -390,7 +390,8 @@ test("an empty source list is checkpointed and not fetched again", async () => {
 
   assert.equal(first.status, "complete");
   assert.equal(second.status, "complete");
-  assert.equal(sourceCalls, 1);
+  assert.equal(sourceCalls, 2);
+  assert.deepEqual(client.commentCalls, []);
 });
 
 test("persists cooldown when auto strategy login probing receives 403", async () => {

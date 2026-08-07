@@ -123,6 +123,10 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   finishedAt?: string;
   songs: number;
   songsProcessed: number;
+  catalogSongs: number;
+  reusedSongs: number;
+  historicalCompletedSongs: number;
+  newPendingSongs: number;
   commentOffset: number;
   activeSongs: ActiveSongSnapshot[];
   currentSong?: {
@@ -420,6 +424,7 @@ class JobManager {
     const taskPaths = sourceTaskPaths(this.paths.data, uid, source);
     const nextStatePath = taskPaths.statePath;
     const nextOutputPath = taskPaths.outputPath;
+    const nextCoveragePath = taskPaths.coveragePath;
     const activePool = await readProxyPool(this.paths.pool);
     const activePoolExpected = proxyPoolStatusRunning(activePool);
     const poolEntries = activePoolExpected
@@ -477,6 +482,7 @@ class JobManager {
       cookie,
       statePath: nextStatePath,
       outputPath: nextOutputPath,
+      coveragePath: nextCoveragePath,
       commentPageSize,
       historyPageSize: 50,
       maxCommentPagesPerSong,
@@ -601,6 +607,8 @@ class JobManager {
         this.snapshotValue = {
           ...this.snapshotValue, status: report.status, finishedAt: new Date().toISOString(),
           songs: report.songs, songsProcessed: report.songsProcessed, matches: report.matches,
+          catalogSongs: report.catalogSongs, reusedSongs: report.reusedSongs,
+          historicalCompletedSongs: report.historicalCompletedSongs, newPendingSongs: report.newPendingSongs,
           requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
           pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
           workers: report.workers ?? this.snapshotValue.workers,
@@ -617,6 +625,10 @@ class JobManager {
           matches: report.matches,
           requestsTotal: report.requestsTotal,
           pagesProcessed: report.pagesProcessed ?? 0,
+          catalogSongs: report.catalogSongs,
+          historicalCompletedSongs: report.historicalCompletedSongs,
+          reusedSongs: report.reusedSongs,
+          newPendingSongs: report.newPendingSongs,
           coverageComplete: report.coverageComplete,
           sourceErrors: report.sourceErrors,
           note: report.note,
@@ -683,6 +695,10 @@ class JobManager {
         this.snapshotValue = {
           ...this.snapshotValue, songs: state.songs.length,
           songsProcessed: progress.length > 0 ? progress.filter((item) => item.done).length : state.songIndex,
+          catalogSongs: state.sourceSongCount,
+          reusedSongs: state.reusedSongs ?? 0,
+          historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
+          newPendingSongs: state.newPendingSongs ?? 0,
           commentOffset: currentIndex < 0 ? 0 : progress[currentIndex]?.commentOffset ?? state.commentOffset,
           currentSong: activeCurrent ?? inferredCurrent,
           matches: state.matchCount, requestsTotal: state.requestCount,
@@ -749,7 +765,9 @@ class JobManager {
       requestsTotal: snapshot.requestsTotal,
       pagesProcessed: snapshot.pagesProcessed,
       coverageLabel: snapshot.songs > 0
-        ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲`
+        ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲；`
+          + `目录 ${snapshot.catalogSongs.toLocaleString("zh-CN")}，历史完成 ${snapshot.historicalCompletedSongs.toLocaleString("zh-CN")}，`
+          + `复用 ${snapshot.reusedSongs.toLocaleString("zh-CN")}，新增待扫 ${snapshot.newPendingSongs.toLocaleString("zh-CN")}`
         : "等待歌曲目录",
       exportedAt: new Date().toISOString(),
       comments: comments.reverse(),
@@ -1685,7 +1703,7 @@ function requestStartedAt(value: string | undefined): number {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
@@ -1756,17 +1774,12 @@ export function sourceTaskPaths(
   dataRoot: string,
   uid: string,
   source: SourceSelection,
-): { statePath: string; outputPath: string } {
-  if (source === "record") {
-    return {
-      statePath: join(dataRoot, `web-state-${uid}-record.json`),
-      outputPath: join(dataRoot, `web-comments-${uid}.jsonl`),
-    };
-  }
+): { statePath: string; outputPath: string; coveragePath: string } {
   const suffix = `target-v${SOURCE_CATALOG_VERSION}`;
   return {
     statePath: join(dataRoot, `web-state-${uid}-${source}-${suffix}.json`),
-    outputPath: join(dataRoot, `web-comments-${uid}-${source}-${suffix}.jsonl`),
+    outputPath: join(dataRoot, `web-comments-${uid}-${suffix}.jsonl`),
+    coveragePath: join(dataRoot, `web-song-coverage-${uid}-${suffix}.json`),
   };
 }
 function publicPoolEntries(entries: ProxyPoolEntry[]): ProxyPoolEntry[] {
