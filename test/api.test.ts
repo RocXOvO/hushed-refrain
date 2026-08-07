@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import upstream = require("@neteasecloudmusicapienhanced/api");
 import { EnhancedNcmClient } from "../src/api";
-import { AuthenticationRequired } from "../src/errors";
+import { ApiResponseError, AuthenticationRequired } from "../src/errors";
+import { RequestGovernor } from "../src/governor";
 
 test("passes one static proxy and cookie to the upstream API", async () => {
   const mutable = upstream as unknown as {
@@ -126,6 +127,156 @@ test("uses comment_new time cursors without a login cookie", async () => {
     assert.equal(page.comments[0].userId, "42");
     assert.equal(page.nextCursor, "1699999999999");
     assert.equal(page.total, 123);
+  } finally {
+    mutable.comment_new = original;
+  }
+});
+
+test("rejects a truncated HTTP 200 comment response instead of treating it as an empty final page", async () => {
+  const mutable = upstream as unknown as {
+    comment_new: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_new;
+  mutable.comment_new = async () => ({ status: 200, body: Buffer.from('{"code":200') });
+
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getSongCommentsByCursor("186016", 1000, 1, "1700000000000"),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502 && /不完整/.test(error.message),
+    );
+  } finally {
+    mutable.comment_new = original;
+  }
+});
+
+test("rejects a structurally incomplete comment page without advancing its cursor", async () => {
+  const mutable = upstream as unknown as {
+    comment_new: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_new;
+  mutable.comment_new = async () => ({ status: 200, body: { code: 200, data: { hasMore: true } } });
+
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getSongCommentsByCursor("186016", 1000, 1, "1700000000000"),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+    );
+  } finally {
+    mutable.comment_new = original;
+  }
+});
+
+test("rejects a comment page containing an unidentifiable comment instead of silently skipping it", async () => {
+  const mutable = upstream as unknown as {
+    comment_new: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_new;
+  mutable.comment_new = async () => ({
+    status: 200,
+    body: {
+      code: 200,
+      data: {
+        comments: [{ commentId: "broken", user: null, content: "cannot identify author" }],
+        hasMore: false,
+      },
+    },
+  });
+
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getSongCommentsByCursor("186016", 1000, 1, "1700000000000"),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+    );
+  } finally {
+    mutable.comment_new = original;
+  }
+});
+
+test("rejects a non-descending comment cursor so the current range remains resumable", async () => {
+  const mutable = upstream as unknown as {
+    comment_new: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_new;
+  mutable.comment_new = async () => ({
+    status: 200,
+    body: { code: 200, data: { comments: [], hasMore: true, cursor: "1700000000000" } },
+  });
+
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getSongCommentsByCursor("186016", 1000, 1, "1700000000000"),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+    );
+  } finally {
+    mutable.comment_new = original;
+  }
+});
+
+test("uses an error body code as the retryable status and succeeds on the same cursor", async () => {
+  const mutable = upstream as unknown as {
+    comment_new: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_new;
+  let calls = 0;
+  const cursors: unknown[] = [];
+  mutable.comment_new = async (params) => {
+    calls += 1;
+    cursors.push(params.cursor);
+    if (calls === 1) {
+      return { status: 200, body: { code: 502, msg: "Unexpected end of JSON input" } };
+    }
+    return { status: 200, body: { code: 200, data: { comments: [], hasMore: false } } };
+  };
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 1,
+    retryBaseMs: 0,
+    retryCapMs: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  });
+
+  try {
+    const client = new EnhancedNcmClient();
+    const page = await governor.execute("comment_new:186016", () =>
+      client.getSongCommentsByCursor("186016", 1000, 1, "1700000000000")
+    );
+    assert.equal(calls, 2);
+    assert.deepEqual(cursors, ["1700000000000", "1700000000000"]);
+    assert.equal(page.hasMore, false);
+  } finally {
+    mutable.comment_new = original;
+  }
+});
+
+test("uses a rejected response body code when HTTP status is misleading", async () => {
+  const mutable = upstream as unknown as {
+    comment_new: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_new;
+  let calls = 0;
+  mutable.comment_new = async () => {
+    calls += 1;
+    if (calls === 1) throw { status: 200, body: { code: 502, msg: "Unexpected end of JSON input" } };
+    return { status: 200, body: { code: 200, data: { comments: [], hasMore: false } } };
+  };
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 1,
+    retryBaseMs: 0,
+    retryCapMs: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  });
+
+  try {
+    const client = new EnhancedNcmClient();
+    await governor.execute("comment_new:186016", () =>
+      client.getSongCommentsByCursor("186016", 1000, 1, "1700000000000")
+    );
+    assert.equal(calls, 2);
   } finally {
     mutable.comment_new = original;
   }

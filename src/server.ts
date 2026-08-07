@@ -5,6 +5,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, join, resolve, sep } from "node:path";
 import { EnhancedNcmClient, type NcmUserProfile } from "./api";
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
+import { CommentRateTracker } from "./comment-rate";
 import { CooldownRequired } from "./errors";
 import { estimateCommentScan } from "./estimate";
 import { RequestGovernor } from "./governor";
@@ -90,6 +91,12 @@ interface ActiveSongSnapshot {
   id: string;
   name?: string;
   workers: number;
+  pagesProcessed?: number;
+  requestingPage?: number;
+  commentsProcessed?: number;
+  totalComments?: number;
+  progressPercent?: number;
+  progressBasis?: "comments" | "time";
 }
 
 interface JobSnapshot {
@@ -114,12 +121,14 @@ interface JobSnapshot {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  commentsPerSecond: number;
   elapsedMs: number;
   logPath?: string;
   lanes: number;
   laneSelection?: ProxyLaneSelection;
   workers: number;
   proxyTransportMaxConcurrent?: number;
+  proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
   coverageComplete: boolean;
@@ -143,6 +152,7 @@ interface ParallelJobSnapshot {
   laneSelection?: ProxyLaneSelection;
   workers: number;
   proxyTransportMaxConcurrent?: number;
+  proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
   shards: number;
@@ -153,6 +163,7 @@ interface ParallelJobSnapshot {
   totalComments?: number;
   matches: number;
   requestsTotal: number;
+  commentsPerSecond: number;
   elapsedMs: number;
   logPath?: string;
   note?: string;
@@ -247,9 +258,11 @@ class JobManager {
   private outputPath?: string;
   private terminalStateSyncedId?: string;
   private abortController?: AbortController;
-  private readonly activeSongByWorker = new Map<string, { id: string; name?: string }>();
+  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage: number }>();
+  private readonly activeSongProgress = new Map<string, Omit<ActiveSongSnapshot, "id" | "name" | "workers" | "requestingPage">>();
   private readonly songNameById = new Map<string, string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
+  private readonly commentRate = new CommentRateTracker();
 
   constructor(
     private readonly paths: RuntimePaths,
@@ -329,7 +342,9 @@ class JobManager {
     const activeId = randomUUID();
     this.abortController = new AbortController();
     this.activeSongByWorker.clear();
+    this.activeSongProgress.clear();
     this.songNameById.clear();
+    this.commentRate.reset();
     const logger = new TaskLogger(
       join(this.paths.data, "logs", `source-${activeId}.jsonl`),
       "source",
@@ -368,12 +383,24 @@ class JobManager {
         }
       },
       onRequestActivity: (activity) => {
+        if (activity.phase === "success") this.commentRate.record(activity.comments ?? 0);
         logger.request(activity);
         this.trackActiveSong(activeId, activity);
       },
       onSchedulerActivity: (activity) => logger.scheduler(activity),
       onSongProgress: (activity) => {
         if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
+        const progressPercent = activity.totalComments && activity.totalComments > 0
+          ? Math.min(100, activity.commentsProcessed / activity.totalComments * 100)
+          : undefined;
+        this.activeSongProgress.set(activity.songId, {
+          pagesProcessed: activity.pageInSong,
+          commentsProcessed: activity.commentsProcessed,
+          totalComments: activity.totalComments,
+          progressPercent,
+          progressBasis: "comments",
+        });
+        this.publishActiveSongs(activeId);
         this.snapshotValue = {
           ...this.snapshotValue,
           currentSong: {
@@ -397,6 +424,7 @@ class JobManager {
       lanes: this.lanes.length, workers: this.lanes.length * workersPerLane,
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
       proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
+      proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
       proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
       proxyTransportStartJitterMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS : undefined,
       logPath: logger.path,
@@ -443,9 +471,23 @@ class JobManager {
       });
     }
     void runPooledCommentFinder(this.lanes, { ...options, workersPerLane, requestBudget })
-      .then(async (report) => {
+      .then((report) => {
         if (this.snapshotValue.id !== activeId) return;
-        await logger.write("info", "task_finished", `用户来源扫描结束：${report.status}。`, {
+        this.snapshotValue = {
+          ...this.snapshotValue, status: report.status, finishedAt: new Date().toISOString(),
+          songs: report.songs, songsProcessed: report.songsProcessed, matches: report.matches,
+          requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
+          pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
+          workers: report.workers ?? this.snapshotValue.workers,
+          commentsPerSecond: 0,
+          proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
+          sourceErrors: report.sourceErrors, blockedUntil: report.resumeAfter, note: report.note,
+          currentSong: undefined, activeSongs: [],
+        };
+        this.activeSongByWorker.clear();
+        this.activeSongProgress.clear();
+        this.terminalStateSyncedId = activeId;
+        void logger.write("info", "task_finished", `用户来源扫描结束：${report.status}。`, {
           status: report.status,
           matches: report.matches,
           requestsTotal: report.requestsTotal,
@@ -454,25 +496,15 @@ class JobManager {
           sourceErrors: report.sourceErrors,
           note: report.note,
         });
-        this.snapshotValue = {
-          ...this.snapshotValue, status: report.status, finishedAt: new Date().toISOString(),
-          songs: report.songs, songsProcessed: report.songsProcessed, matches: report.matches,
-          requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
-          pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
-          workers: report.workers ?? this.snapshotValue.workers,
-          sourceErrors: report.sourceErrors, blockedUntil: report.resumeAfter, note: report.note,
-          currentSong: undefined, activeSongs: [],
-        };
-        this.activeSongByWorker.clear();
-        this.terminalStateSyncedId = activeId;
       })
-      .catch(async (error) => {
-        await logger.write("error", "task_error", `用户来源扫描异常结束：${message(error)}`, { error: message(error) });
+      .catch((error) => {
         this.fail(activeId, error);
+        void logger.write("error", "task_error", `用户来源扫描异常结束：${message(error)}`, { error: message(error) });
       })
       .finally(() => {
         if (this.snapshotValue.id === activeId) {
           this.activeSongByWorker.clear();
+          this.activeSongProgress.clear();
           this.abortController = undefined;
           this.lanes = [];
           this.transportGate = undefined;
@@ -540,6 +572,8 @@ class JobManager {
       this.snapshotValue.startedAt,
       this.snapshotValue.finishedAt,
     );
+    this.snapshotValue.commentsPerSecond = active ? this.commentRate.rate() : 0;
+    this.snapshotValue.proxyTransportEffectiveConcurrent = this.transportGate?.currentMaxConcurrent ?? this.snapshotValue.proxyTransportEffectiveConcurrent;
     return {
       ...this.snapshotValue,
       activeSongs: this.snapshotValue.activeSongs.map((song) => ({ ...song })),
@@ -583,18 +617,31 @@ class JobManager {
       this.activeSongByWorker.set(activity.workerId, {
         id: activity.songId,
         name: activity.songName,
+        requestingPage: activity.page,
       });
     } else {
       this.activeSongByWorker.delete(activity.workerId);
     }
+    this.publishActiveSongs(activeId);
+  }
+
+  private publishActiveSongs(activeId: string): void {
+    if (this.snapshotValue.id !== activeId) return;
     const songs = new Map<string, ActiveSongSnapshot>();
     for (const active of this.activeSongByWorker.values()) {
       const existing = songs.get(active.id);
       if (existing) {
         existing.workers += 1;
         existing.name ??= active.name;
+        existing.requestingPage = Math.min(existing.requestingPage ?? active.requestingPage, active.requestingPage);
       } else {
-        songs.set(active.id, { ...active, workers: 1 });
+        songs.set(active.id, {
+          id: active.id,
+          name: active.name,
+          workers: 1,
+          ...this.activeSongProgress.get(active.id),
+          requestingPage: active.requestingPage,
+        });
       }
     }
     this.snapshotValue = { ...this.snapshotValue, activeSongs: [...songs.values()] };
@@ -603,7 +650,8 @@ class JobManager {
   private fail(activeId: string | undefined, error: unknown): void {
     if (this.snapshotValue.id !== activeId) return;
     this.activeSongByWorker.clear();
-    this.snapshotValue = { ...this.snapshotValue, activeSongs: [], status: "error", finishedAt: new Date().toISOString(), error: message(error) };
+    this.activeSongProgress.clear();
+    this.snapshotValue = { ...this.snapshotValue, activeSongs: [], status: "error", finishedAt: new Date().toISOString(), commentsPerSecond: 0, error: message(error) };
   }
 }
 
@@ -617,6 +665,7 @@ class ParallelJobManager {
   private abortController?: AbortController;
   private readonly activeWorkers = new Set<string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
+  private readonly commentRate = new CommentRateTracker();
 
   constructor(
     private readonly paths: RuntimePaths,
@@ -676,6 +725,7 @@ class ParallelJobManager {
     const activeId = randomUUID();
     this.abortController = new AbortController();
     this.activeWorkers.clear();
+    this.commentRate.reset();
     const logger = new TaskLogger(
       join(this.paths.data, "logs", `parallel-${activeId}.jsonl`),
       "parallel",
@@ -687,6 +737,7 @@ class ParallelJobManager {
       laneSelection: selectedPool.selection,
       workers: this.lanes.length * workersPerLane, shards: shardCount,
       proxyTransportMaxConcurrent: hostConcurrency,
+      proxyTransportEffectiveConcurrent: this.transportGate.currentMaxConcurrent,
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
       proxyTransportStartJitterMs: DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
       logPath: logger.path,
@@ -743,13 +794,22 @@ class ParallelJobManager {
         this.snapshotValue = { ...this.snapshotValue, ...activity };
       },
       onRequestActivity: (activity) => {
+        if (activity.phase === "success") this.commentRate.record(activity.comments ?? 0);
         logger.request(activity);
         this.trackActiveSong(activeId, activity);
       },
       onSchedulerActivity: (activity) => logger.scheduler(activity),
-    }).then(async (report) => {
+    }).then((report) => {
       if (this.snapshotValue.id !== activeId) return;
-      await logger.write("info", "task_finished", `单曲并行扫描结束：${report.status}。`, {
+      this.snapshotValue = {
+        ...this.snapshotValue, ...report, status: report.status,
+        activeSongs: [], finishedAt: new Date().toISOString(), commentsPerSecond: 0,
+        proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
+        note: report.note,
+      };
+      this.activeWorkers.clear();
+      this.terminalStateSyncedId = activeId;
+      void logger.write("info", "task_finished", `单曲并行扫描结束：${report.status}。`, {
         status: report.status,
         matches: report.matches,
         requestsTotal: report.requestsTotal,
@@ -758,17 +818,11 @@ class ParallelJobManager {
         shardsComplete: report.shardsComplete,
         note: report.note,
       });
-      this.snapshotValue = {
-        ...this.snapshotValue, ...report, status: report.status,
-        activeSongs: [], finishedAt: new Date().toISOString(), note: report.note,
-      };
-      this.activeWorkers.clear();
-      this.terminalStateSyncedId = activeId;
-    }).catch(async (error) => {
-      await logger.write("error", "task_error", `单曲并行扫描异常结束：${message(error)}`, { error: message(error) });
+    }).catch((error) => {
       if (this.snapshotValue.id !== activeId) return;
       this.activeWorkers.clear();
-      this.snapshotValue = { ...this.snapshotValue, activeSongs: [], status: "error", finishedAt: new Date().toISOString(), error: message(error) };
+      this.snapshotValue = { ...this.snapshotValue, activeSongs: [], status: "error", finishedAt: new Date().toISOString(), commentsPerSecond: 0, error: message(error) };
+      void logger.write("error", "task_error", `单曲并行扫描异常结束：${message(error)}`, { error: message(error) });
     }).finally(() => {
       if (this.snapshotValue.id === activeId) {
         this.activeWorkers.clear();
@@ -824,9 +878,18 @@ class ParallelJobManager {
       this.snapshotValue.startedAt,
       this.snapshotValue.finishedAt,
     );
+    this.snapshotValue.commentsPerSecond = active ? this.commentRate.rate() : 0;
+    this.snapshotValue.proxyTransportEffectiveConcurrent = this.transportGate?.currentMaxConcurrent ?? this.snapshotValue.proxyTransportEffectiveConcurrent;
     return {
       ...this.snapshotValue,
-      activeSongs: this.snapshotValue.activeSongs.map((song) => ({ ...song })),
+      activeSongs: this.snapshotValue.activeSongs.map((song) => ({
+        ...song,
+        pagesProcessed: this.snapshotValue.pagesProcessed,
+        commentsProcessed: this.snapshotValue.commentsInspected,
+        totalComments: this.snapshotValue.totalComments,
+        progressPercent: this.snapshotValue.coveragePercent,
+        progressBasis: "time",
+      })),
     };
   }
 
@@ -1293,8 +1356,8 @@ async function readJsonl(path: string | undefined, max: number): Promise<FoundCo
 
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
-function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, elapsedMs: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
+function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
   return coordinator.activeMode() === "parallel"

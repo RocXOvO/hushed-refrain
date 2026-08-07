@@ -38,7 +38,12 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /data-nav-view="activity"/);
   assert.match(pageText, /id="activityPanel"/);
   assert.match(pageText, /id="activeSongCount"/);
+  assert.match(pageText, /id="activeWorkerCount"/);
   assert.match(pageText, /id="activeSongsList"/);
+  assert.match(pageText, /评论读取进度/);
+  assert.match(pageText, /主机并发只是上限/);
+  assert.match(pageText, /id="speedMetric"/);
+  assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
   assert.match(pageText, /主机保护/);
   assert.match(pageText, /允许本机直连/);
@@ -74,9 +79,17 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /baselineIds/);
   assert.match(appText, /tabSwitchVersion/);
   assert.match(appText, /renderActiveSongs/);
+  assert.match(appText, /renderSongReadProgress/);
+  assert.match(appText, /时间覆盖/);
+  assert.match(appText, /topologyCapacityNote/);
+  assert.match(appText, /Worker 活跃/);
+  assert.match(appText, /formatRate\(job\.commentsPerSecond\)/);
+  assert.match(appText, /proxyTransportEffectiveConcurrent/);
+  assert.match(appText, /poolRefreshing/);
+  assert.match(appText, /状态灯变绿/);
   assert.match(appText, /maxProxyLanes/);
   assert.match(appText, /value\.hostConcurrency = Number\(el\.hostConcurrency\.value\)/);
-  assert.match(appText, /Math\.ceil\(hostConcurrency \/ Math\.max\(1, workersPerLane\)\)/);
+  assert.match(appText, /requested > 0 \? requested : poolLaneCount/);
   assert.doesNotMatch(appText, /当前生效配置（合并）/);
   assert.doesNotMatch(appText, /resultTimestamp/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
@@ -91,13 +104,19 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /scrollbar-color:/);
   assert.match(styleText, /::-webkit-scrollbar-thumb/);
   assert.match(styleText, /\.navigation-rail/);
+  assert.match(styleText, /\.song-read-track/);
   assert.match(styleText, /\.navigation-rail\s*\{[^}]*position:\s*sticky/s);
   assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);
   assert.match(styleText, /body\.inspector-collapsed/);
   assert.match(styleText, /transform 210ms/);
   assert.match(styleText, /font-size:\s*16px/);
+  assert.match(styleText, /\.pool-state-indicator\.is-ready \.pool-state-led/);
   assert.doesNotMatch(styleText, /backdrop-filter:/);
+
+  const idleJob = await fetch(`${base}/api/job`);
+  assert.equal(idleJob.status, 200);
+  assert.equal((await idleJob.json() as { commentsPerSecond: number }).commentsPerSecond, 0);
 
   const results = await fetch(`${base}/api/results?limit=50`);
   assert.equal(results.status, 200);

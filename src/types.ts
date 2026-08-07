@@ -268,6 +268,7 @@ export interface SongScanActivity {
   songName?: string;
   workerId?: string;
   pageInSong: number;
+  requestingPage?: number;
   commentsProcessed: number;
   totalComments?: number;
 }

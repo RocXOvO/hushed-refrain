@@ -412,7 +412,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   const config = await options(directory);
   config.source = "record";
   config.commentPageSize = 100;
-  const activities: Array<{ songId: string; songName?: string; workerId?: string; pageInSong: number; commentsProcessed: number; totalComments?: number }> = [];
+  const activities: Array<{ songId: string; songName?: string; workerId?: string; pageInSong: number; requestingPage?: number; commentsProcessed: number; totalComments?: number }> = [];
   const requestActivities: Array<{ phase: string; songId?: string; songName?: string; workerId?: string }> = [];
   config.onSongProgress = (activity) => activities.push(activity);
   config.onRequestActivity = (activity) => requestActivities.push(activity);
@@ -459,7 +459,8 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(tracker.calls.some((call) => call.startsWith("a:")));
   assert.ok(tracker.calls.some((call) => call.startsWith("b:")));
   assert.deepEqual(new Set(activities.map((activity) => activity.songId)), new Set(songs.map((song) => song.id)));
-  assert.ok(activities.every((activity) => activity.pageInSong === 1));
+  assert.ok(activities.some((activity) => activity.pageInSong === 0 && activity.requestingPage === 1));
+  assert.ok(activities.some((activity) => activity.pageInSong === 1 && activity.requestingPage === undefined));
   assert.ok(activities.every((activity) => activity.workerId?.includes(":")));
   assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
   assert.ok(requestActivities.some((activity) => activity.phase === "start" && activity.songId === "3" && activity.songName === "song-3" && activity.workerId?.includes(":")));
@@ -721,6 +722,158 @@ test("pooled source scan uses multiple workers on one proxy lane", async () => {
   assert.equal(tracker.maxActive, 2);
 });
 
+test("does not cap an eighteen-worker source topology at twelve active songs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-eighteen-workers-"));
+  const config = await options(directory);
+  config.source = "record";
+  const songs: SongCandidate[] = Array.from({ length: 24 }, (_, index) => ({
+    id: String(index + 1),
+    name: `song-${index + 1}`,
+    sources: ["record"],
+  }));
+  const tracker = { active: 0, maxActive: 0, maxDistinctSongs: 0 };
+  const activeSongsByWorker = new Map<string, string>();
+  config.onRequestActivity = (activity) => {
+    if (!activity.workerId) return;
+    if (activity.phase === "start") activeSongsByWorker.set(activity.workerId, activity.songId);
+    else activeSongsByWorker.delete(activity.workerId);
+    tracker.maxDistinctSongs = Math.max(tracker.maxDistinctSongs, new Set(activeSongsByWorker.values()).size);
+  };
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      tracker.active += 1;
+      tracker.maxActive = Math.max(tracker.maxActive, tracker.active);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      tracker.active -= 1;
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lanes = Array.from({ length: 6 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: new RequestGovernor({
+      minDelayMs: 0,
+      jitterMs: 0,
+      concurrency: 3,
+      maxRetries: 0,
+      forbiddenCooldownMs: 60_000,
+      requestBudget: 100,
+    }),
+  }));
+
+  const report = await runPooledCommentFinder(lanes, {
+    ...config,
+    workersPerLane: 3,
+    requestBudget: 100,
+  });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.lanes, 6);
+  assert.equal(report.workers, 18);
+  assert.equal(tracker.maxActive, 18);
+  assert.equal(tracker.maxDistinctSongs, 18);
+});
+
+test("pre-shards twelve songs across all eighteen workers and every selected exit", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-fill-host-capacity-"));
+  const config = await options(directory);
+  config.source = "record";
+  const songs: SongCandidate[] = Array.from({ length: 12 }, (_, index) => ({
+    id: String(index + 1),
+    name: `song-${index + 1}`,
+    sources: ["record"],
+  }));
+  const activeSongsByWorker = new Map<string, string>();
+  const usedLanes = new Set<string>();
+  let maxActiveWorkers = 0;
+  let maxWorkersOnOneSong = 0;
+  config.onRequestActivity = (activity) => {
+    if (!activity.workerId) return;
+    if (activity.phase === "start") {
+      activeSongsByWorker.set(activity.workerId, activity.songId);
+      usedLanes.add(activity.lane);
+    } else {
+      activeSongsByWorker.delete(activity.workerId);
+    }
+    maxActiveWorkers = Math.max(maxActiveWorkers, activeSongsByWorker.size);
+    const workersBySong = new Map<string, number>();
+    for (const songId of activeSongsByWorker.values()) {
+      workersBySong.set(songId, (workersBySong.get(songId) ?? 0) + 1);
+    }
+    maxWorkersOnOneSong = Math.max(maxWorkersOnOneSong, ...workersBySong.values(), 0);
+  };
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lanes = Array.from({ length: 6 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: new RequestGovernor({
+      minDelayMs: 0,
+      jitterMs: 0,
+      concurrency: 3,
+      maxRetries: 0,
+      forbiddenCooldownMs: 60_000,
+      requestBudget: 100,
+    }),
+  }));
+
+  const report = await runPooledCommentFinder(lanes, {
+    ...config,
+    workersPerLane: 3,
+    requestBudget: 100,
+  });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.workers, 18);
+  assert.equal(maxActiveWorkers, 18);
+  assert.ok(maxWorkersOnOneSong >= 2);
+  assert.deepEqual(usedLanes, new Set(lanes.map((lane) => lane.name)));
+});
+
+test("does not publish a successful pooled page before its cursor is validated", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-pooled-invalid-cursor-"));
+  const config = await options(directory);
+  config.source = "record";
+  const requestPhases: string[] = [];
+  config.onRequestActivity = (activity) => requestPhases.push(activity.phase);
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async (_songId, _pageSize, _pageNo, cursor) => ({
+      comments: [{ commentId: "invalid-cursor", userId: "9", content: "not accepted" }],
+      hasMore: true,
+      nextCursor: cursor,
+    }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  await assert.rejects(
+    runPooledCommentFinder([{
+      name: "lane-1",
+      client,
+      governor: governor(100),
+    }], { ...config, workersPerLane: 1, requestBudget: 100 }),
+    /cursor did not advance/,
+  );
+  assert.deepEqual(requestPhases, ["start", "failure"]);
+});
+
 test("a late concurrent success revives a source lane after clustered failures", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-late-lane-success-"));
   const config = await options(directory);
@@ -757,11 +910,10 @@ test("a late concurrent success revives a source lane after clustered failures",
   assert.doesNotMatch(report.note ?? "", /连续网络失败/);
 });
 
-test("pooled source scan splits one song across all waiting proxy lanes", async () => {
+test("pooled source scan pre-shards one song across all waiting proxy lanes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-one-song-pool-"));
   const config = await options(directory);
   config.source = "record";
-  const splitCursor = Date.UTC(2024, 0, 1);
   const tracker = { active: 0, maxActive: 0, calls: [] as Array<{ pageNo: number; cursor: string }> };
   const makeClient = (): NcmClient => ({
     getLoginProfile: async () => undefined,
@@ -774,13 +926,12 @@ test("pooled source scan splits one song across all waiting proxy lanes", async 
       tracker.calls.push({ pageNo, cursor });
       await new Promise((resolve) => setTimeout(resolve, 20));
       tracker.active -= 1;
-      if (pageNo === 1) return { comments: [], hasMore: true, nextCursor: String(splitCursor), total: 3 };
       return {
         comments: [{
           commentId: `match-${cursor}`,
           userId: "42",
           content: "found",
-          time: cursor === String(splitCursor) ? undefined : Number(cursor) - 1,
+          time: Number(cursor) - 1,
         }],
         hasMore: false,
         total: 3,
@@ -797,13 +948,56 @@ test("pooled source scan splits one song across all waiting proxy lanes", async 
 
   assert.equal(report.status, "complete");
   assert.equal(report.songsProcessed, 1);
-  assert.equal(report.pagesProcessed, 4);
+  assert.equal(report.pagesProcessed, 3);
   assert.equal(report.matches, 3);
   assert.equal(tracker.maxActive, 3);
-  assert.equal(tracker.calls.filter((call) => call.pageNo === 2).length, 3);
+  assert.equal(tracker.calls.length, 3);
+  assert.equal(tracker.calls.filter((call) => call.pageNo === 1).length, 3);
+  assert.equal(new Set(tracker.calls.map((call) => call.cursor)).size, 3);
   const state = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(state.songProgress[0].commentShards.length, 3);
   assert.ok(state.songProgress[0].commentShards.every((shard: { done: boolean }) => shard.done));
+});
+
+test("a resumed source scan expands existing shards to the new transport capacity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-resume-expand-shards-"));
+  const config = await options(directory);
+  config.source = "record";
+  let active = 0;
+  let maxActive = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "only-song", name: "only", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lanes = (count: number) => Array.from({ length: count }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: governor(100),
+  }));
+
+  const paused = await runPooledCommentFinder(lanes(3), { ...config, workersPerLane: 1, requestBudget: 2 });
+  assert.equal(paused.status, "paused");
+  const pausedState = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(pausedState.songProgress[0].commentShards.length, 3);
+  assert.equal(pausedState.songProgress[0].commentShards.filter((shard: { done: boolean }) => !shard.done).length, 2);
+
+  maxActive = 0;
+  const completed = await runPooledCommentFinder(lanes(5), { ...config, workersPerLane: 1, requestBudget: 100 });
+  assert.equal(completed.status, "complete");
+  assert.equal(maxActive, 5);
+  const completedState = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(completedState.songProgress[0].commentShards.length, 6);
+  assert.ok(completedState.songProgress[0].commentShards.every((shard: { done: boolean }) => shard.done));
 });
 
 test("pooled source shard scheduling keeps the per-song page cap exact", async () => {
@@ -817,12 +1011,14 @@ test("pooled source shard scheduling keeps the per-song page cap exact", async (
     getUserRecord: async () => [{ id: "only-song", sources: ["record"] }],
     getLikedSongs: async () => [],
     getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
-    getSongCommentsByCursor: async (_songId, _pageSize, pageNo, cursor) => {
+    getSongCommentsByCursor: async (_songId, _pageSize, _pageNo, cursor) => {
       calls += 1;
       await new Promise((resolve) => setTimeout(resolve, 10));
-      return pageNo === 1
-        ? { comments: [], hasMore: true, nextCursor: String(Date.UTC(2024, 0, 1)) }
-        : { comments: [{ commentId: "other", userId: "9", content: "other", time: Number(cursor) - 1 }], hasMore: true, nextCursor: String(Number(cursor) - 2) };
+      return {
+        comments: [{ commentId: "other", userId: "9", content: "other", time: Number(cursor) - 1 }],
+        hasMore: true,
+        nextCursor: String(Number(cursor) - 2),
+      };
     },
     getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
   };
@@ -841,11 +1037,36 @@ test("pooled source shard scheduling keeps the per-song page cap exact", async (
   assert.deepEqual(state.truncatedSongIds, ["only-song"]);
 });
 
+test("a song that naturally ends on its page cap is not marked truncated", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-natural-cap-end-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.maxCommentPagesPerSong = 1;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "only-song", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, requestBudget: 100 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.pagesProcessed, 1);
+  assert.equal(report.coverageComplete, true);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.deepEqual(state.truncatedSongIds, []);
+  assert.equal(state.songProgress[0].done, true);
+});
+
 test("a serial source scan resumes unfinished one-song shards without restarting completed ranges", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-one-song-resume-"));
   const config = await options(directory);
   config.source = "record";
-  const splitCursor = Date.UTC(2024, 0, 1);
   const calls: string[] = [];
   const client: NcmClient = {
     getLoginProfile: async () => undefined,
@@ -855,7 +1076,6 @@ test("a serial source scan resumes unfinished one-song shards without restarting
     getSongCommentsByCursor: async (_songId, _pageSize, pageNo, cursor) => {
       calls.push(`${pageNo}:${cursor}`);
       await new Promise((resolve) => setTimeout(resolve, 10));
-      if (pageNo === 1) return { comments: [], hasMore: true, nextCursor: String(splitCursor) };
       return {
         comments: [{ commentId: `match-${cursor}`, userId: "42", content: "found", time: Number(cursor) - 1 }],
         hasMore: false,
@@ -868,15 +1088,19 @@ test("a serial source scan resumes unfinished one-song shards without restarting
   const paused = await runPooledCommentFinder(lanes(), { ...config, workersPerLane: 1, requestBudget: 3 });
   assert.equal(paused.status, "paused");
   const afterPause = JSON.parse(await readFile(config.statePath, "utf8"));
-  const completedAtPause = afterPause.songProgress[0].commentShards.filter((shard: { done: boolean }) => shard.done).length;
-  assert.equal(completedAtPause, 1);
+  const completedShards = afterPause.songProgress[0].commentShards.filter((shard: { done: boolean }) => shard.done);
+  assert.equal(completedShards.length, 2);
+  const completedCursors = new Set(completedShards.map((shard: { endTime: number }) => String(shard.endTime)));
+  const callsAtPause = calls.length;
 
   const completed = await runCommentFinder(client, governor(100), config);
   assert.equal(completed.status, "complete");
-  assert.equal(completed.pagesProcessed, 4);
+  assert.equal(completed.pagesProcessed, 3);
   assert.equal(completed.matches, 3);
-  assert.equal(calls.filter((call) => call.startsWith("1:")).length, 1);
-  assert.equal(new Set(calls.filter((call) => call.startsWith("2:"))).size, 3);
+  assert.equal(calls.length, 3);
+  assert.ok(calls.slice(callsAtPause).every((call) => !completedCursors.has(call.split(":")[1])));
+  const finalState = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.ok(finalState.songProgress[0].commentShards.every((shard: { done: boolean }) => shard.done));
 });
 
 test("a failed in-flight shard releases its page permit without prematurely truncating the song", async () => {
@@ -889,8 +1113,7 @@ test("a failed in-flight shard releases its page permit without prematurely trun
     getUserRecord: async () => [{ id: "only-song", sources: ["record"] }],
     getLikedSongs: async () => [],
     getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
-    getSongCommentsByCursor: async (_songId, _pageSize, pageNo, cursor) => {
-      if (pageNo === 1) return { comments: [], hasMore: true, nextCursor: String(Date.UTC(2024, 0, 1)) };
+    getSongCommentsByCursor: async (_songId, _pageSize, _pageNo, cursor) => {
       shardAttempts += 1;
       if (shardAttempts === 1) throw new Error("temporary proxy failure");
       return {
@@ -908,7 +1131,7 @@ test("a failed in-flight shard releases its page permit without prematurely trun
   config.maxCommentPagesPerSong = 2;
   const completed = await runPooledCommentFinder(lanes(), { ...config, workersPerLane: 1, requestBudget: 100 });
 
-  assert.equal(shardAttempts, 2);
+  assert.equal(shardAttempts, 3);
   assert.equal(completed.pagesProcessed, 2);
   assert.equal(completed.coverageComplete, false);
   const state = JSON.parse(await readFile(config.statePath, "utf8"));

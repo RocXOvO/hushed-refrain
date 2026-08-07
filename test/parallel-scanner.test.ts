@@ -138,6 +138,31 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.ok(checkpoints.some((activity) => activity.shardsComplete === 2 && activity.pagesProcessed === 2 && activity.requestsTotal === 2));
 });
 
+test("assigns comments without timestamps to the shard that returned them", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-missing-time-"));
+  const client = new ParallelFakeClient();
+  client.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "missing-time", userId: "42", content: "still inspect me" }],
+    hasMore: false,
+    total: 1,
+  });
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+
+  const report = await runParallelSongScan([{
+    name: "lane-1",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.commentsInspected, 1);
+  assert.equal(report.matches, 1);
+  const result = JSON.parse((await readFile(config.outputPath, "utf8")).trim());
+  assert.equal(result.commentId, "missing-time");
+});
+
 test("publishes stable worker identity and song metadata for live activity", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-activity-"));
   const client = new ParallelFakeClient();
@@ -247,6 +272,8 @@ for (const [label, nextCursor] of [["unchanged", "100"], ["missing", undefined]]
     const config = await options(directory);
     config.shardCount = 1;
     config.workersPerLane = 1;
+    const requestPhases: string[] = [];
+    config.onRequestActivity = (activity) => requestPhases.push(activity.phase);
 
     await assert.rejects(
       runParallelSongScan([{
@@ -260,6 +287,7 @@ for (const [label, nextCursor] of [["unchanged", "100"], ["missing", undefined]]
     assert.equal(state?.finished, false);
     assert.equal(state?.shards[0].done, false);
     assert.equal(state?.shards[0].cursor, "100");
+    assert.deepEqual(requestPhases, ["start", "failure"]);
   });
 }
 

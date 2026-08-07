@@ -16,8 +16,7 @@ export function selectProxyLanes<T>(
   assertPositiveInteger(hostConcurrency, "host concurrency");
 
   const available = entries.length;
-  const automaticTarget = Math.max(1, Math.ceil(hostConcurrency / workersPerLane));
-  const target = requested === 0 ? automaticTarget : requested;
+  const target = requested === 0 ? available : requested;
   const selected = Math.min(available, target);
   return {
     entries: entries.slice(0, selected),

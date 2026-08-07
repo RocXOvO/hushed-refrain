@@ -6,11 +6,11 @@ const el = {
   parallelForm: $("#parallelForm"), sourceForm: $("#sourceForm"), parallelUid: $("#parallelUid"), uid: $("#uid"),
   songId: $("#songId"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
-  poolStatus: $("#poolStatus"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
+  poolStatus: $("#poolStatus"), poolState: $("#poolStateIndicator"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
-  matches: $("#matchesMetric"), requests: $("#requestsMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
+  matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
@@ -22,7 +22,7 @@ const el = {
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"),
-  activeSongCount: $("#activeSongCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
+  activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
   appSplash: $("#appSplash"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
@@ -31,6 +31,8 @@ let poolSource = "clash-verge";
 let poolSourceInitialized = false;
 let poolRunning = false;
 let poolStatus = "not-running";
+let poolRefreshing = false;
+let poolBuildError = "";
 let poolChangeInFlight = false;
 let poolMutationVersion = 0;
 let poolSourceSwitchVersion = 0;
@@ -92,8 +94,8 @@ function payload(form) {
 
 async function startParallel() {
   if (!el.parallelForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
-  if (poolChangeInFlight || poolStatus === "starting") {
-    toast("代理池正在自动优选，请等待出口验证完成后再启动");
+  if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
+    toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
     return;
   }
   setBusy(true);
@@ -119,8 +121,8 @@ async function startParallel() {
 
 async function startSource(dryRun) {
   if (!el.sourceForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
-  if (poolChangeInFlight || poolStatus === "starting") {
-    toast("代理池正在自动优选，请等待出口验证完成后再启动");
+  if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
+    toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
     return;
   }
   setBusy(true);
@@ -187,7 +189,10 @@ async function togglePool() {
   syncTaskStartAvailability();
   const stopping = poolRunning;
   if (!stopping) {
+    poolBuildError = "";
+    poolRefreshing = false;
     poolStatus = "starting";
+    renderPoolState({ status: "starting", entries: [] });
     renderPoolEntries([], "starting");
   }
   try {
@@ -197,15 +202,22 @@ async function togglePool() {
       : poolSource === "external"
       ? { proxies: el.externalProxies.value, size: 0 }
       : { size: Number(el.poolSize.value), candidates: Number(el.poolCandidates.value), sourceConfigPaths: selectedClashConfigPaths() };
-    renderPool(await api(path, { method: "POST", body: JSON.stringify(value) }));
+    const nextPool = await api(path, { method: "POST", body: JSON.stringify(value) });
+    poolBuildError = "";
+    renderPool(nextPool);
     toast(stopping ? "代理池已停止" : "已选出可用的最优出口");
   } catch (error) {
-    poolStatus = poolRunning ? "running" : "not-running";
+    poolBuildError = stopping ? "" : error.message;
+    if (!stopping) {
+      poolRefreshing = false;
+      poolStatus = "not-running";
+      renderPoolState({ status: poolStatus, entries: [], refreshError: poolBuildError });
+    }
     toast(error.message);
     void refresh();
   } finally {
     poolChangeInFlight = false;
-    el.poolToggle.disabled = false;
+    el.poolToggle.disabled = poolRefreshing;
     syncTaskStartAvailability();
   }
 }
@@ -263,20 +275,21 @@ function renderParallel(job) {
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "分片进度"; el.progress.textContent = `${fmt(job.shardsComplete)} / ${fmt(job.shards)}`;
-  el.workLabel.textContent = "已读评论"; el.work.textContent = fmt(job.commentsInspected); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
+  el.workLabel.textContent = "已读评论"; el.work.textContent = fmt(job.commentsInspected); el.speed.textContent = formatRate(job.commentsPerSecond); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
   const globalPercent = Number.isFinite(job.coveragePercent)
     ? Math.max(0, Math.min(100, job.coveragePercent))
     : job.shards ? Math.min(100, Math.round(job.shardsComplete / job.shards * 100)) : 0;
   renderProgress({
     globalPercent,
     globalContext: job.songId
-      ? `${fmt(job.shardsComplete)} / ${fmt(job.shards)} 个分片 · ${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个线程${job.proxyTransportMaxConcurrent ? ` · 主机总并发 ≤ ${fmt(job.proxyTransportMaxConcurrent)}` : ""}`
+      ? `${fmt(job.shardsComplete)} / ${fmt(job.shards)} 个分片 · ${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个线程${transportConcurrencyText(job)}`
       : "尚未开始",
-    note: job.note || job.error,
+    note: [job.note || job.error, topologyCapacityNote(job)].filter(Boolean).join(" · "),
   });
   renderActiveSongs(
     active ? job.activeSongs || [] : [],
-    job.songId ? `${fmt(job.lanes || 1)} 出口 · ${fmt(job.workers || 1)} Worker` : "等待任务调度",
+    job.songId ? `${fmt(job.lanes || 1)} 出口 · ${fmt(job.workers || 1)} Worker${transportConcurrencyText(job)}` : "等待任务调度",
+    job.workers,
   );
   el.stop.disabled = !active;
   syncTaskStartAvailability();
@@ -288,19 +301,20 @@ function renderSource(job) {
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
-  el.workLabel.textContent = "已扫页面"; el.work.textContent = fmt(job.pagesProcessed); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
+  el.workLabel.textContent = "已扫页面"; el.work.textContent = fmt(job.pagesProcessed); el.speed.textContent = formatRate(job.commentsPerSecond); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
   const globalPercent = job.songs ? Math.min(100, Math.round(job.songsProcessed / job.songs * 100)) : 0;
-  const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程${job.proxyTransportMaxConcurrent ? ` · 主机总并发 ≤ ${fmt(job.proxyTransportMaxConcurrent)}` : ""}`;
+  const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程${transportConcurrencyText(job)}`;
   renderProgress({
     globalPercent,
     globalContext: job.uid
       ? `${fmt(job.songsProcessed)} / ${fmt(job.songs)} 首歌曲 · ${topology}`
       : "尚未开始",
-    note: [job.note, job.error, ...(job.sourceErrors || [])].filter(Boolean).join(" · "),
+    note: [job.note, job.error, ...(job.sourceErrors || []), topologyCapacityNote(job)].filter(Boolean).join(" · "),
   });
   renderActiveSongs(
     active ? job.activeSongs || [] : [],
     job.uid ? `${topology.replaceAll(" 个", " ")}` : "等待任务调度",
+    job.workers,
   );
   el.stop.disabled = !active;
   syncTaskStartAvailability();
@@ -322,22 +336,31 @@ function renderProgress({ globalPercent, globalContext, note }) {
   el.note.textContent = note || "";
 }
 
-function renderActiveSongs(songs, summary) {
+function renderActiveSongs(songs, summary, configuredWorkers = 0) {
   const normalized = songs.map((song) => ({
     id: String(song.id || ""),
     name: String(song.name || ""),
     workers: Math.max(1, Number(song.workers || 1)),
+    pagesProcessed: finiteNumber(song.pagesProcessed),
+    requestingPage: finiteNumber(song.requestingPage),
+    commentsProcessed: finiteNumber(song.commentsProcessed),
+    totalComments: finiteNumber(song.totalComments),
+    progressPercent: finiteNumber(song.progressPercent),
+    progressBasis: song.progressBasis === "time" ? "time" : "comments",
   }));
-  const signature = JSON.stringify([normalized, summary]);
+  const activeWorkers = normalized.reduce((total, song) => total + song.workers, 0);
+  const workerCapacity = Math.max(0, Number(configuredWorkers || 0));
+  const signature = JSON.stringify([normalized, summary, workerCapacity]);
   if (signature === activeSongsSignature) return;
   activeSongsSignature = signature;
   el.activeSongCount.textContent = `${fmt(normalized.length)} 首`;
+  el.activeWorkerCount.textContent = `${fmt(activeWorkers)} / ${fmt(workerCapacity)} Worker 活跃`;
   el.activeSongSummary.textContent = summary;
   if (normalized.length === 0) {
     const row = document.createElement("tr");
     row.className = "empty-row";
     const cell = document.createElement("td");
-    cell.colSpan = 4;
+    cell.colSpan = 5;
     cell.textContent = "暂无正在扫描的歌曲";
     row.append(cell);
     el.activeSongsList.replaceChildren(row);
@@ -354,12 +377,42 @@ function renderActiveSongs(songs, summary) {
     name.textContent = song.name || "正在读取歌曲名称";
     const id = document.createElement("td");
     id.textContent = song.id;
+    const progress = renderSongReadProgress(song);
     const workers = document.createElement("td");
     workers.className = "activity-worker-count";
     workers.textContent = `${fmt(song.workers)} Worker`;
-    row.append(status, name, id, workers);
+    row.append(status, name, id, progress, workers);
     return row;
   }));
+}
+
+function renderSongReadProgress(song) {
+  const cell = document.createElement("td");
+  cell.className = "song-read-progress";
+  const comments = Math.max(0, song.commentsProcessed ?? 0);
+  const total = song.totalComments !== undefined && song.totalComments > 0
+    ? Math.max(comments, song.totalComments)
+    : undefined;
+  const measuredPercent = total ? comments / total * 100 : undefined;
+  const percent = Math.max(0, Math.min(100, song.progressPercent ?? measuredPercent ?? 0));
+  const label = document.createElement("span");
+  label.textContent = song.progressBasis === "time" && song.progressPercent !== undefined
+    ? `已读 ${fmt(comments)} 条 · 时间覆盖 ${Math.round(percent)}%`
+    : total
+    ? `已读 ${fmt(comments)} / ${fmt(total)} 条 · ${Math.round(percent)}%`
+    : song.requestingPage !== undefined
+    ? `已读 ${fmt(comments)} 条 · 正在请求第 ${fmt(song.requestingPage)} 页`
+    : song.pagesProcessed !== undefined
+    ? `已读 ${fmt(comments)} 条 · 已完成 ${fmt(song.pagesProcessed)} 页`
+    : "等待首个评论页";
+  const track = document.createElement("span");
+  track.className = `song-read-track${song.progressPercent === undefined && measuredPercent === undefined ? " is-unknown" : ""}`;
+  const fill = document.createElement("i");
+  fill.style.width = `${percent}%`;
+  track.append(fill);
+  cell.setAttribute("aria-label", label.textContent);
+  cell.append(label, track);
+  return cell;
 }
 
 function setProgressBar(bar, percent, indeterminate) {
@@ -454,13 +507,14 @@ function renderPool(pool) {
   const previousNetworkMs = poolNetworkMs;
   poolStatus = pool.status;
   poolRunning = pool.status === "running";
+  poolRefreshing = Boolean(pool.refreshing);
+  if (poolRunning) poolBuildError = "";
   poolLaneCount = poolRunning ? Math.max(1, pool.entries.length) : 1;
   const latencies = poolRunning ? pool.entries.map((entry) => Number(entry.ncmLatencyMs)).filter(Number.isFinite) : [];
   poolNetworkMs = latencies.length > 0 ? Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length) : 400;
   if (poolLaneCount !== previousLaneCount || poolNetworkMs !== previousNetworkMs) scheduleEstimateRefresh();
-  el.poolStatus.textContent = pool.status === "running"
-    ? `${pool.entries.length} 个出口在线 · ${pool.refreshing ? "正在复测" : pool.refreshError ? "复测待重试" : "延迟已更新"}`
-    : { starting: "正在测速与验证", "not-running": "未运行" }[pool.status] || pool.status;
+  renderPoolState(pool);
+  el.poolToggle.disabled = poolChangeInFlight || poolRefreshing;
   el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : poolSource === "external" ? "验证并使用" : "自动优选";
   const discovery = pool.discovery;
   const configCount = renderClashConfigs(discovery, pool.sourceConfigPaths || (pool.sourceConfigPath ? [pool.sourceConfigPath] : []), pool.status);
@@ -474,6 +528,29 @@ function renderPool(pool) {
   renderPoolEntries(poolRunning ? pool.entries : [], pool.status);
   syncToolbarContext();
   syncTaskStartAvailability();
+}
+
+function renderPoolState(pool) {
+  let state = "is-offline";
+  let text = "未构建";
+  if (pool.status === "starting") {
+    state = "is-building";
+    text = "构建中 · 正在测速与验证";
+  } else if (pool.status === "running" && pool.refreshing) {
+    state = "is-checking";
+    text = `${pool.entries.length} 个出口 · 正在复测`;
+  } else if (pool.status === "running" && pool.refreshError) {
+    state = "is-degraded";
+    text = `${pool.entries.length} 个出口 · 复测待重试`;
+  } else if (pool.status === "running") {
+    state = "is-ready";
+    text = `${pool.entries.length} 个出口 · 已就绪`;
+  } else if (poolBuildError) {
+    state = "is-error";
+    text = "构建失败 · 请重新优选";
+  }
+  el.poolState.className = `pool-state-indicator ${state}`;
+  el.poolStatus.textContent = text;
 }
 
 function renderPoolEntries(entries, status) {
@@ -1260,7 +1337,7 @@ async function setupDesktopWindowControls() {
 }
 
 function syncTaskStartAvailability() {
-  const disabled = startSubmissionBusy || Boolean(activeTaskMode) || poolChangeInFlight || poolStatus === "starting";
+  const disabled = startSubmissionBusy || Boolean(activeTaskMode) || poolChangeInFlight || poolStatus === "starting" || poolRefreshing;
   el.parallelStart.disabled = disabled;
   el.sourceStart.disabled = disabled;
   el.dryRun.disabled = disabled;
@@ -1271,9 +1348,7 @@ function syncTaskStartAvailability() {
 function selectedTaskLaneCount(workersPerLane) {
   if (!poolRunning) return 1;
   const requested = Math.max(0, Number(el.exitLimit.value || 0));
-  const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
-  const automatic = Math.max(1, Math.ceil(hostConcurrency / Math.max(1, workersPerLane)));
-  return Math.min(poolLaneCount, requested > 0 ? requested : automatic);
+  return Math.min(poolLaneCount, requested > 0 ? requested : poolLaneCount);
 }
 function syncToolbarContext() {
   const form = mode === "parallel" ? el.parallelForm : el.sourceForm;
@@ -1363,6 +1438,26 @@ function setBusy(value) {
 }
 function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
+function finiteNumber(value) { const number = Number(value); return Number.isFinite(number) ? number : undefined; }
+function formatRate(value) {
+  const rate = Number(value);
+  if (!Number.isFinite(rate) || rate <= 0) return "0 条/秒";
+  return `${rate.toLocaleString("zh-CN", { minimumFractionDigits: rate < 10 ? 1 : 0, maximumFractionDigits: 1 })} 条/秒`;
+}
+function transportConcurrencyText(job) {
+  const configured = Number(job.proxyTransportMaxConcurrent);
+  if (!Number.isFinite(configured) || configured <= 0) return "";
+  const effective = Number(job.proxyTransportEffectiveConcurrent);
+  return Number.isFinite(effective) && effective > 0 && effective < configured
+    ? ` · 主机并发上限 ${fmt(configured)} · 自动降载至 ${fmt(effective)}`
+    : ` · 主机并发上限 ${fmt(configured)}`;
+}
+function topologyCapacityNote(job) {
+  const workers = Number(job.workers);
+  const hostCeiling = Number(job.proxyTransportMaxConcurrent);
+  if (!Number.isFinite(workers) || !Number.isFinite(hostCeiling) || workers <= 0 || workers >= hostCeiling) return "";
+  return `当前拓扑只创建 ${fmt(workers)} 个 Worker，低于主机并发上限 ${fmt(hostCeiling)}；需要增加任务出口或每 IP 并发才能用满`;
+}
 function date(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value)); }
 function dateOnly(value) { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(value)); }
 function duration(seconds) { const days = Math.floor(seconds / 86400); const hours = Math.floor(seconds % 86400 / 3600); const minutes = Math.floor(seconds % 3600 / 60); const rest = seconds % 60; return [days ? `${days}天` : "", hours ? `${hours}小时` : "", minutes ? `${minutes}分` : "", rest && !days ? `${rest}秒` : ""].filter(Boolean).join(" ") || "0秒"; }

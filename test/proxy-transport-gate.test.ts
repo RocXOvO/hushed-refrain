@@ -144,3 +144,87 @@ test("governor retries reacquire the shared transport gate", async () => {
   assert.equal(attempts, 2);
   assert.equal(gate.entries, 2);
 });
+
+test("automatically reduces aggregate concurrency and start rate after clustered transport failures", async () => {
+  let now = 1_000;
+  const gate = new ProxyTransportGate({
+    maxConcurrent: 18,
+    minStartDelayMs: 80,
+    startJitterMs: 0,
+    adaptiveFailureThreshold: 3,
+    minimumAdaptiveConcurrent: 4,
+  }, {
+    now: () => now,
+    random: () => 0,
+    sleep: async (milliseconds) => { now += milliseconds; },
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(gate.run(async () => { throw { status: 502 }; }));
+  }
+
+  assert.equal(gate.currentMaxConcurrent, 9);
+  assert.equal(gate.currentMinStartDelayMs, 160);
+});
+
+test("slowly restores adaptive concurrency after a stable success streak", async () => {
+  let now = 1_000;
+  const gate = new ProxyTransportGate({
+    maxConcurrent: 8,
+    minStartDelayMs: 0,
+    adaptiveFailureThreshold: 2,
+    adaptiveRecoverySuccesses: 2,
+    adaptiveRecoveryIntervalMs: 5_000,
+    minimumAdaptiveConcurrent: 2,
+  }, {
+    now: () => now,
+    random: () => 0,
+    sleep: async () => undefined,
+  });
+  await assert.rejects(gate.run(async () => { throw { status: 502 }; }));
+  await assert.rejects(gate.run(async () => { throw { status: 502 }; }));
+  assert.equal(gate.currentMaxConcurrent, 4);
+
+  now += 5_000;
+  await gate.run(async () => undefined);
+  await gate.run(async () => undefined);
+  assert.equal(gate.currentMaxConcurrent, 5);
+});
+
+test("an eighteen-request burst completes after automatic load shedding", async () => {
+  const gate = new ProxyTransportGate({
+    maxConcurrent: 18,
+    minStartDelayMs: 0,
+    startJitterMs: 0,
+    adaptiveFailureThreshold: 3,
+    minimumAdaptiveConcurrent: 4,
+  });
+  let active = 0;
+  let peak = 0;
+  let truncated = 0;
+  const values = await Promise.all(Array.from({ length: 18 }, async (_, id) => {
+    while (true) {
+      try {
+        return await gate.run(async () => {
+          active += 1;
+          peak = Math.max(peak, active);
+          await new Promise((resolve) => setImmediate(resolve));
+          if (active > 6) {
+            active -= 1;
+            truncated += 1;
+            throw { status: 502, body: { code: 502 } };
+          }
+          active -= 1;
+          return id;
+        });
+      } catch (error) {
+        assert.equal((error as { status?: number }).status, 502);
+      }
+    }
+  }));
+
+  assert.equal(peak, 18);
+  assert.ok(truncated >= 3);
+  assert.deepEqual(values, Array.from({ length: 18 }, (_, id) => id));
+  assert.ok(gate.currentMaxConcurrent < 18);
+});

@@ -189,6 +189,31 @@ export async function runParallelSongScan(
       }
       throw new LaneRequestFailure(lane.name, error);
     }
+    const times = page.comments
+      .map((comment) => comment.time)
+      .filter((time): time is number => time !== undefined);
+    const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
+    const crossedShardStart = oldestTime !== undefined && oldestTime < shard.startTime;
+    let nextCursor: string | undefined;
+    try {
+      nextCursor = crossedShardStart
+        ? undefined
+        : nextDescendingCursor(
+          page.hasMore,
+          page.nextCursor,
+          requestedCursor,
+          `parallel shard ${shard.id} for song ${options.songId}`,
+        );
+    } catch (error) {
+      publishRequestActivity(options, {
+        ...requestActivity,
+        phase: "failure",
+        elapsedMs: Date.now() - requestStartedAt,
+        status: 502,
+        error: errorMessage(error),
+      });
+      throw error;
+    }
     publishRequestActivity(options, {
       ...requestActivity,
       phase: "success",
@@ -198,28 +223,13 @@ export async function runParallelSongScan(
       hasMore: page.hasMore,
     });
 
-    const times = page.comments
-      .map((comment) => comment.time)
-      .filter((time): time is number => time !== undefined);
-    const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
-    const crossedShardStart = oldestTime !== undefined && oldestTime < shard.startTime;
-    const nextCursor = crossedShardStart
-      ? undefined
-      : nextDescendingCursor(
-        page.hasMore,
-        page.nextCursor,
-        requestedCursor,
-        `parallel shard ${shard.id} for song ${options.songId}`,
-      );
-
     shard.pagesProcessed += 1;
     shard.pageNo += 1;
     state.pagesProcessed += 1;
 
     const rangedComments = page.comments.filter((comment) =>
-      comment.time !== undefined &&
-      comment.time >= shard.startTime &&
-      comment.time < shard.endTime
+      comment.time === undefined ||
+      (comment.time >= shard.startTime && comment.time < shard.endTime)
     );
     state.commentsInspected += rangedComments.length;
     state.totalComments = mergeCommentTotal(state.totalComments, page.total, state.commentsInspected);
@@ -358,9 +368,9 @@ export async function runParallelSongScan(
     }
   };
 
-  const workers = lanes.flatMap((lane) =>
-    Array.from({ length: options.workersPerLane }, (_, workerIndex) => runWorker(lane, workerIndex))
-  );
+  const workers = Array.from({ length: options.workersPerLane }, (_, workerIndex) =>
+    lanes.map((lane) => runWorker(lane, workerIndex))
+  ).flat();
   try {
     await Promise.all(workers);
   } finally {

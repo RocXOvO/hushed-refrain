@@ -202,8 +202,11 @@ export async function runPooledCommentFinder(
     }
     if (state.finished) return pooledReport(state, lanes, options, initialRequests, "complete");
 
+    const configuredWorkers = lanes.length * options.workersPerLane;
+    const transportCapacity = lanes.find((lane) => lane.transportGate)?.transportGate?.currentMaxConcurrent;
+    const initialWorkTarget = Math.min(configuredWorkers, transportCapacity ?? configuredWorkers);
     const queue = new AsyncWorkQueue<SourceScanWork>(
-      prepareSourceWork(state),
+      prepareSourceWork(state, initialWorkTarget, options.maxCommentPagesPerSong),
     );
     const blockedLanes = new Map<string, number>();
     const unavailableLanes = new Set<string>();
@@ -337,10 +340,11 @@ export async function runPooledCommentFinder(
           publishSongProgress(
             options,
             song,
-            progress.pageInSong + 1,
+            progress.pageInSong,
             progress.commentOffset,
             progress.totalComments,
             workerId,
+            requestedPageNo,
           );
           return lane.client.getSongCommentsByCursor(
             song.id,
@@ -365,6 +369,26 @@ export async function runPooledCommentFinder(
         if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
         throw new SourceLaneFailure(lane.name, error);
       }
+      const times = shard
+        ? page.comments.map((comment) => comment.time).filter((time): time is number => time !== undefined)
+        : [];
+      const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
+      const crossedShardStart = Boolean(shard && oldestTime !== undefined && oldestTime < shard.startTime);
+      let nextCursor: string | undefined;
+      try {
+        nextCursor = crossedShardStart
+          ? undefined
+          : nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}${shard ? ` shard ${shard.id}` : ""}`);
+      } catch (error) {
+        publishRequestActivity(options, {
+          ...requestActivity,
+          phase: "failure",
+          elapsedMs: Date.now() - requestStartedAt,
+          status: 502,
+          error: errorMessage(error),
+        });
+        throw error;
+      }
       publishRequestActivity(options, {
         ...requestActivity,
         phase: "success",
@@ -373,15 +397,6 @@ export async function runPooledCommentFinder(
         totalComments: page.total,
         hasMore: page.hasMore,
       });
-
-      const times = shard
-        ? page.comments.map((comment) => comment.time).filter((time): time is number => time !== undefined)
-        : [];
-      const oldestTime = times.length > 0 ? Math.min(...times) : undefined;
-      const crossedShardStart = Boolean(shard && oldestTime !== undefined && oldestTime < shard.startTime);
-      const nextCursor = crossedShardStart
-        ? undefined
-        : nextDescendingCursor(page.hasMore, page.nextCursor, requestedCursor, `song ${song.id}${shard ? ` shard ${shard.id}` : ""}`);
       const scannedComments = shard
         ? page.comments.filter((comment) => comment.time === undefined || (comment.time >= shard.startTime && comment.time < shard.endTime))
         : page.comments;
@@ -406,18 +421,22 @@ export async function runPooledCommentFinder(
           playCount: song.playCount,
           route: "song-comments",
           capturedAt: new Date().toISOString(),
-        }));
+      }));
       const added = await appendMatches(writer, state, seenCommentIds, matches);
       let nextWork: SourceScanWork[] = [];
-      if (options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong) {
-        markSongTruncated(state, songIndex);
-      } else if (shard) {
+      const pageCapReached = options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong;
+      if (shard) {
         const numericNextCursor = nextCursor === undefined ? undefined : Number(nextCursor);
         const cursorPassedStart = numericNextCursor !== undefined && numericNextCursor <= shard.startTime;
         if (nextCursor === undefined || cursorPassedStart) {
           shard.done = true;
         } else {
           shard.cursor = nextCursor;
+        }
+        progress.done = progress.commentShards!.every((candidate) => candidate.done);
+        if (!progress.done && pageCapReached) {
+          markSongTruncated(state, songIndex);
+        } else if (!shard.done) {
           nextWork = splitSourceShardIfUseful(
             progress,
             shard,
@@ -426,11 +445,12 @@ export async function runPooledCommentFinder(
             queue.waitingCount(),
             options,
           );
+          if (nextWork.length === 0) nextWork = [work];
         }
-        progress.done = progress.commentShards!.every((candidate) => candidate.done);
-        if (!progress.done && nextWork.length === 0 && !shard.done) nextWork = [work];
       } else if (nextCursor === undefined) {
         progress.done = true;
+      } else if (pageCapReached) {
+        markSongTruncated(state, songIndex);
       } else {
         progress.commentCursor = nextCursor;
         const shardWorks = queue.waitingCount() > 0
@@ -522,9 +542,9 @@ export async function runPooledCommentFinder(
     };
 
     try {
-      await Promise.all(lanes.flatMap((lane) =>
-        Array.from({ length: options.workersPerLane }, (_, workerIndex) => runWorker(lane, workerIndex))
-      ));
+      await Promise.all(Array.from({ length: options.workersPerLane }, (_, workerIndex) =>
+        lanes.map((lane) => runWorker(lane, workerIndex))
+      ).flat());
     } finally {
       options.signal?.removeEventListener("abort", abortListener);
     }
@@ -706,9 +726,11 @@ async function runSongScan(
       publishSongProgress(
         options,
         song,
-        songProgress.pageInSong + 1,
+        songProgress.pageInSong,
         songProgress.commentOffset,
         songProgress.totalComments,
+        undefined,
+        requestedPageNo,
       );
       return client.getSongCommentsByCursor(
         song.id,
@@ -1061,18 +1083,76 @@ function ensureSongProgress(state: ScanState): void {
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
 }
 
-function prepareSourceWork(state: ScanState): SourceScanWork[] {
+function prepareSourceWork(state: ScanState, desiredWorkItems: number, maxPages: number): SourceScanWork[] {
   ensureSongProgress(state);
+  const shardTargets = new Map<number, number>();
+  const unfinishedSongIndexes: number[] = [];
+  let existingWorkItems = 0;
+  state.songProgress!.forEach((progress, songIndex) => {
+    if (progress.done) return;
+    const currentWorkItems = progress.commentShards?.length
+      ? progress.commentShards.filter((shard) => !shard.done).length
+      : 1;
+    existingWorkItems += currentWorkItems;
+    shardTargets.set(songIndex, currentWorkItems);
+    unfinishedSongIndexes.push(songIndex);
+  });
+  let extraWorkItems = Math.max(0, desiredWorkItems - existingWorkItems);
+  while (extraWorkItems > 0 && unfinishedSongIndexes.length > 0) {
+    let allocated = false;
+    for (const songIndex of unfinishedSongIndexes) {
+      if (extraWorkItems <= 0) break;
+      const progress = state.songProgress![songIndex];
+      const availablePages = maxPages > 0 ? maxPages - progress.pageInSong : 64;
+      const currentTarget = shardTargets.get(songIndex) ?? 1;
+      if (currentTarget >= Math.min(64, availablePages)) continue;
+      shardTargets.set(songIndex, currentTarget + 1);
+      extraWorkItems -= 1;
+      allocated = true;
+    }
+    if (!allocated) break;
+  }
   return state.songProgress!.flatMap((progress, songIndex) => {
     if (progress.done) return [];
     if (progress.commentShards?.length) {
+      expandExistingSourceShards(progress, shardTargets.get(songIndex) ?? 1);
       return progress.commentShards
         .filter((shard) => !shard.done)
         .sort((left, right) => right.endTime - left.endTime)
         .map((shard) => ({ songIndex, shardId: shard.id }));
     }
+    const target = shardTargets.get(songIndex) ?? 1;
+    if (target > 1) {
+      const shardWorks = shardRemainingSong(progress, songIndex, target, maxPages);
+      if (shardWorks.length > 0) return shardWorks;
+    }
     return [{ songIndex }];
   });
+}
+
+function expandExistingSourceShards(
+  progress: NonNullable<ScanState["songProgress"]>[number],
+  desiredShards: number,
+): void {
+  const shards = progress.commentShards;
+  if (!shards) return;
+  while (shards.filter((shard) => !shard.done).length < desiredShards) {
+    const candidates = shards
+      .filter((shard) => !shard.done)
+      .sort((left, right) => (Number(right.cursor) - right.startTime) - (Number(left.cursor) - left.startTime));
+    let expanded = false;
+    for (const candidate of candidates) {
+      const nextShardId = shards.reduce((maximum, shard) => Math.max(maximum, shard.id), -1) + 1;
+      const pageNo = candidate.pageNo;
+      const split = splitRemainingTimeShard(candidate, nextShardId);
+      if (!split) continue;
+      Object.assign(candidate, split.current, { pageNo });
+      shards.push({ ...split.sibling, pageNo });
+      expanded = true;
+      break;
+    }
+    if (!expanded) return;
+  }
 }
 
 function shardRemainingSong(
@@ -1091,7 +1171,8 @@ function shardRemainingSong(
   const availablePages = maxPages > 0 ? maxPages - progress.pageInSong : 64;
   if (availablePages <= 1) return [];
   const shardCount = Math.max(2, Math.min(64, desiredShards, availablePages));
-  progress.commentShards = createTimeShards(SOURCE_SCAN_START_TIME, endTime, shardCount);
+  progress.commentShards = createTimeShards(SOURCE_SCAN_START_TIME, endTime, shardCount)
+    .map((shard) => ({ ...shard, pageNo: progress.commentPageNo ?? 1 }));
   return progress.commentShards.map((shard) => ({ songIndex, shardId: shard.id }));
 }
 
@@ -1112,8 +1193,9 @@ function splitSourceShardIfUseful(
   const split = splitRemainingTimeShard(shard, nextShardId);
   if (!split) return [currentWork];
   const { sibling, splitAt, remainingStart, remainingEnd } = split;
-  Object.assign(shard, split.current);
-  progress.commentShards!.push(sibling);
+  const pageNo = shard.pageNo;
+  Object.assign(shard, split.current, { pageNo });
+  progress.commentShards!.push({ ...sibling, pageNo });
   publishSchedulerActivity(options, {
     type: "adaptive-split",
     songId,
@@ -1170,6 +1252,7 @@ function publishSongProgress(
   commentsProcessed: number,
   totalComments: number | undefined,
   workerId?: string,
+  requestingPage?: number,
 ): void {
   try {
     options.onSongProgress?.({
@@ -1177,6 +1260,7 @@ function publishSongProgress(
       songName: song.name,
       workerId,
       pageInSong,
+      requestingPage,
       commentsProcessed,
       totalComments,
     });

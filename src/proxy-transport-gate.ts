@@ -1,4 +1,4 @@
-import { RunCancelled } from "./errors";
+import { errorStatus, RunCancelled } from "./errors";
 import type { RequestGovernor } from "./governor";
 
 export const DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT = 8;
@@ -9,6 +9,11 @@ export interface ProxyTransportGateOptions {
   maxConcurrent?: number;
   minStartDelayMs?: number;
   startJitterMs?: number;
+  adaptiveFailureThreshold?: number;
+  adaptiveFailureWindowMs?: number;
+  adaptiveRecoverySuccesses?: number;
+  adaptiveRecoveryIntervalMs?: number;
+  minimumAdaptiveConcurrent?: number;
 }
 
 export interface ProxyTransportGateRuntime {
@@ -45,6 +50,15 @@ export class ProxyTransportGate {
   private readonly maxConcurrent: number;
   private readonly minStartDelayMs: number;
   private readonly startJitterMs: number;
+  private readonly adaptiveFailureThreshold: number;
+  private readonly adaptiveFailureWindowMs: number;
+  private readonly adaptiveRecoverySuccesses: number;
+  private readonly adaptiveRecoveryIntervalMs: number;
+  private readonly minimumAdaptiveConcurrent: number;
+  private effectiveMaxConcurrent: number;
+  private transientFailureTimes: number[] = [];
+  private successesSinceAdjustment = 0;
+  private lastAdjustmentAt = 0;
 
   constructor(
     options: ProxyTransportGateOptions = {},
@@ -53,6 +67,12 @@ export class ProxyTransportGate {
     this.maxConcurrent = options.maxConcurrent ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT;
     this.minStartDelayMs = options.minStartDelayMs ?? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS;
     this.startJitterMs = options.startJitterMs ?? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS;
+    this.adaptiveFailureThreshold = options.adaptiveFailureThreshold ?? 3;
+    this.adaptiveFailureWindowMs = options.adaptiveFailureWindowMs ?? 10_000;
+    this.adaptiveRecoverySuccesses = options.adaptiveRecoverySuccesses ?? 20;
+    this.adaptiveRecoveryIntervalMs = options.adaptiveRecoveryIntervalMs ?? 5_000;
+    this.minimumAdaptiveConcurrent = options.minimumAdaptiveConcurrent ?? Math.min(4, this.maxConcurrent);
+    this.effectiveMaxConcurrent = this.maxConcurrent;
     if (!Number.isInteger(this.maxConcurrent) || this.maxConcurrent <= 0) {
       throw new Error("maxConcurrent must be a positive integer.");
     }
@@ -62,6 +82,33 @@ export class ProxyTransportGate {
     if (!Number.isInteger(this.startJitterMs) || this.startJitterMs < 0) {
       throw new Error("startJitterMs must be a non-negative integer.");
     }
+    if (!Number.isInteger(this.adaptiveFailureThreshold) || this.adaptiveFailureThreshold <= 0) {
+      throw new Error("adaptiveFailureThreshold must be a positive integer.");
+    }
+    if (!Number.isInteger(this.adaptiveFailureWindowMs) || this.adaptiveFailureWindowMs <= 0) {
+      throw new Error("adaptiveFailureWindowMs must be a positive integer.");
+    }
+    if (!Number.isInteger(this.adaptiveRecoverySuccesses) || this.adaptiveRecoverySuccesses <= 0) {
+      throw new Error("adaptiveRecoverySuccesses must be a positive integer.");
+    }
+    if (!Number.isInteger(this.adaptiveRecoveryIntervalMs) || this.adaptiveRecoveryIntervalMs < 0) {
+      throw new Error("adaptiveRecoveryIntervalMs must be a non-negative integer.");
+    }
+    if (
+      !Number.isInteger(this.minimumAdaptiveConcurrent) ||
+      this.minimumAdaptiveConcurrent <= 0 ||
+      this.minimumAdaptiveConcurrent > this.maxConcurrent
+    ) {
+      throw new Error("minimumAdaptiveConcurrent must be within the configured concurrency range.");
+    }
+  }
+
+  get currentMaxConcurrent(): number {
+    return this.effectiveMaxConcurrent;
+  }
+
+  get currentMinStartDelayMs(): number {
+    return Math.ceil(this.minStartDelayMs * this.maxConcurrent / this.effectiveMaxConcurrent);
   }
 
   cancel(): void {
@@ -77,7 +124,12 @@ export class ProxyTransportGate {
     try {
       await this.reserveStart();
       this.throwIfCancelled();
-      return await request();
+      const value = await request();
+      this.recordSuccess();
+      return value;
+    } catch (error) {
+      this.recordFailure(error);
+      throw error;
     } finally {
       this.release();
     }
@@ -85,7 +137,7 @@ export class ProxyTransportGate {
 
   private async acquire(): Promise<void> {
     this.throwIfCancelled();
-    if (this.active < this.maxConcurrent && this.waiters.length === 0) {
+    if (this.active < this.effectiveMaxConcurrent && this.waiters.length === 0) {
       this.active += 1;
       return;
     }
@@ -95,10 +147,7 @@ export class ProxyTransportGate {
   private release(): void {
     this.active = Math.max(0, this.active - 1);
     if (this.cancelled) return;
-    const next = this.waiters.shift();
-    if (!next) return;
-    this.active += 1;
-    next.resolve();
+    this.drainCapacity();
   }
 
   private async reserveStart(): Promise<void> {
@@ -117,7 +166,7 @@ export class ProxyTransportGate {
           this.startJitterMs,
           Math.floor(random * (this.startJitterMs + 1)),
         );
-        const waitMs = this.lastStartedAt + this.minStartDelayMs + jitterMs - this.runtime.now();
+        const waitMs = this.lastStartedAt + this.currentMinStartDelayMs + jitterMs - this.runtime.now();
         if (waitMs > 0) await this.cancellableSleep(waitMs);
       }
       this.throwIfCancelled();
@@ -129,6 +178,52 @@ export class ProxyTransportGate {
 
   private throwIfCancelled(): void {
     if (this.cancelled) throw new RunCancelled();
+  }
+
+  private recordFailure(error: unknown): void {
+    if (!isTransientTransportFailure(error)) return;
+    const now = this.runtime.now();
+    const cutoff = now - this.adaptiveFailureWindowMs;
+    this.transientFailureTimes = this.transientFailureTimes.filter((at) => at > cutoff);
+    this.transientFailureTimes.push(now);
+    this.successesSinceAdjustment = 0;
+    if (
+      this.transientFailureTimes.length < this.adaptiveFailureThreshold ||
+      this.effectiveMaxConcurrent <= this.minimumAdaptiveConcurrent
+    ) return;
+    this.effectiveMaxConcurrent = Math.max(
+      this.minimumAdaptiveConcurrent,
+      Math.floor(this.effectiveMaxConcurrent / 2),
+    );
+    this.transientFailureTimes = [];
+    this.lastAdjustmentAt = now;
+  }
+
+  private recordSuccess(): void {
+    if (this.effectiveMaxConcurrent >= this.maxConcurrent) {
+      this.successesSinceAdjustment = 0;
+      return;
+    }
+    this.successesSinceAdjustment += 1;
+    const now = this.runtime.now();
+    if (
+      this.successesSinceAdjustment < this.adaptiveRecoverySuccesses ||
+      now - this.lastAdjustmentAt < this.adaptiveRecoveryIntervalMs
+    ) return;
+    this.effectiveMaxConcurrent = Math.min(this.maxConcurrent, this.effectiveMaxConcurrent + 1);
+    this.successesSinceAdjustment = 0;
+    this.lastAdjustmentAt = now;
+    this.transientFailureTimes = [];
+    this.drainCapacity();
+  }
+
+  private drainCapacity(): void {
+    while (!this.cancelled && this.active < this.effectiveMaxConcurrent) {
+      const next = this.waiters.shift();
+      if (!next) return;
+      this.active += 1;
+      next.resolve();
+    }
   }
 
   private async cancellableSleep(milliseconds: number): Promise<void> {
@@ -143,6 +238,12 @@ export class ProxyTransportGate {
       this.sleepWaiters.delete(wake);
     }
   }
+}
+
+function isTransientTransportFailure(error: unknown): boolean {
+  if (error instanceof RunCancelled) return false;
+  const status = errorStatus(error);
+  return status === undefined || status === 408 || status === 425 || (status >= 500 && status <= 599);
 }
 
 export interface ProxyTransportLane {

@@ -152,8 +152,17 @@ export class EnhancedNcmClient implements NcmClient {
       } as Parameters<typeof api.comment_new>[0] & { cursor: string }),
     );
     const data = object(body.data);
-    const comments = array(data.comments).map(normalizeComment).filter(isDefined);
+    if (Number(body.code) !== 200 || !isPlainJsonObject(body.data) || !Array.isArray(data.comments) || typeof data.hasMore !== "boolean") {
+      throw malformedResponse("comment_new");
+    }
+    const rawComments = array(data.comments);
+    const comments = rawComments.map(normalizeComment).filter(isDefined);
+    if (comments.length !== rawComments.length) throw malformedResponse("comment_new");
     const nextCursor = stringId(data.cursor) ?? comments.at(-1)?.time?.toString();
+    if (
+      data.hasMore &&
+      (!nextCursor || !Number.isFinite(Number(nextCursor)) || Number(nextCursor) >= Number(cursor))
+    ) throw malformedResponse("comment_new");
     return {
       comments,
       hasMore: Boolean(data.hasMore),
@@ -229,10 +238,15 @@ async function invoke(name: string, call: () => Promise<ApiResponse>): Promise<J
   try {
     const response = await call();
     const status = Number(response.status ?? 500);
-    const body = object(response.body);
-    if (status !== 200 || (typeof body.code === "number" && body.code !== 200)) {
-      if (status === 301 || body.code === 301) throw new AuthenticationRequired();
-      throw new ApiResponseError(`${name} returned ${status}`, status, body);
+    if (!isPlainJsonObject(response.body) || Object.keys(response.body).length === 0) {
+      throw malformedResponse(name);
+    }
+    const body = response.body;
+    const bodyCode = Number(body.code);
+    if (status !== 200 || (Number.isFinite(bodyCode) && bodyCode !== 200)) {
+      if (status === 301 || bodyCode === 301) throw new AuthenticationRequired();
+      const effectiveStatus = Number.isFinite(bodyCode) && bodyCode !== 200 ? bodyCode : status;
+      throw new ApiResponseError(`${name} returned ${effectiveStatus}`, effectiveStatus, body);
     }
     return body;
   } catch (error) {
@@ -241,15 +255,44 @@ async function invoke(name: string, call: () => Promise<ApiResponse>): Promise<J
       const candidate = error as ApiResponse;
       const status = Number(candidate.status);
       const body = object(candidate.body);
-      if (status === 301 || body.code === 301) throw new AuthenticationRequired();
+      const bodyCode = Number(body.code);
+      if (status === 301 || bodyCode === 301) throw new AuthenticationRequired();
+      const effectiveStatus = Number.isFinite(bodyCode) && bodyCode !== 200 ? bodyCode : status;
       throw new ApiResponseError(
-        `${name} request failed`,
-        Number.isFinite(status) ? status : undefined,
-        candidate.body,
+        upstreamFailureMessage(name, error),
+        Number.isFinite(effectiveStatus) ? effectiveStatus : undefined,
+        isPlainJsonObject(candidate.body) ? candidate.body : undefined,
       );
     }
     throw error;
   }
+}
+
+function malformedResponse(name: string): ApiResponseError {
+  return new ApiResponseError(
+    `${name} 返回内容不完整或不是有效 JSON；将按瞬态网络故障重试并在持续失败时停用该出口。`,
+    502,
+    { code: 502, reason: "malformed-response" },
+  );
+}
+
+function upstreamFailureMessage(name: string, error: object): string {
+  const candidate = error as ApiResponse & { message?: unknown; code?: unknown };
+  const body = object(candidate.body);
+  const detail = text(body.msg ?? body.message ?? candidate.message);
+  if (detail && /unexpected end|json|parse|premature|socket hang up|econnreset/i.test(detail)) {
+    return `${name} 请求失败：代理链路提前结束，上游 JSON 响应不完整。`;
+  }
+  if (detail && /timeout|timed out|etimedout/i.test(detail)) {
+    return `${name} 请求失败：代理链路超时。`;
+  }
+  return `${name} request failed`;
+}
+
+function isPlainJsonObject(value: unknown): value is JsonObject {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 function normalizeComment(raw: unknown): CommentRecord | undefined {
