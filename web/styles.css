@@ -521,6 +521,7 @@ h2 {
 .pool-selecting-ring { width: 17px; height: 17px; display: inline-block; border: 2px solid rgb(8 127 140 / 16%); border-top-color: var(--teal); border-radius: 50%; animation: pool-selecting-spin 850ms linear infinite; }
 .pool-source-switch { margin-top: 13px; }
 .proxy-source-pane { padding-top: 10px; }
+.pool-build-grid { margin-bottom: 9px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .pool-discovery { margin: 0; color: var(--muted); font-size: 0.73rem; line-height: 1.55; overflow-wrap: anywhere; }
 
 .user-preview {

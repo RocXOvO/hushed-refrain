@@ -7,7 +7,7 @@ const el = {
   songId: $("#songId"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
   poolStatus: $("#poolStatus"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
-  poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
+  poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), current: $("#currentSong"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"),
@@ -96,6 +96,13 @@ async function lookupUser() {
 function probe(target, label, value) { target.className = value.status; target.textContent = value.status === "available" ? `${label} ${fmt(value.songs)}` : `${label} ${value.status === "cooldown" ? "冷却" : "受限"}`; }
 
 async function togglePool() {
+  if (!poolRunning && poolSource === "clash-verge") {
+    if (!el.poolSize.reportValidity() || !el.poolCandidates.reportValidity()) return;
+    if (Number(el.poolCandidates.value) < Number(el.poolSize.value)) {
+      toast("候选节点数不能少于独立出口数");
+      return;
+    }
+  }
   el.poolToggle.disabled = true;
   const stopping = poolRunning;
   if (!stopping) renderPoolEntries([], "starting");
@@ -105,7 +112,7 @@ async function togglePool() {
       ? {}
       : poolSource === "external"
       ? { proxies: el.externalProxies.value, size: 0 }
-      : { size: 4, candidates: 24, sourceConfigPath: el.clashConfig.value || undefined };
+      : { size: Number(el.poolSize.value), candidates: Number(el.poolCandidates.value), sourceConfigPath: el.clashConfig.value || undefined };
     renderPool(await api(path, { method: "POST", body: JSON.stringify(value) }));
     toast(stopping ? "代理池已停止" : "已选出可用的最优出口");
   } catch (error) { toast(error.message); } finally { el.poolToggle.disabled = false; }
@@ -167,6 +174,8 @@ function renderPool(pool) {
   el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : poolSource === "external" ? "验证并使用" : "自动优选";
   const discovery = pool.discovery;
   const configCount = renderClashConfigs(discovery, pool.sourceConfigPath, pool.status);
+  el.poolSize.disabled = pool.status !== "not-running";
+  el.poolCandidates.disabled = pool.status !== "not-running";
   el.poolDiscovery.textContent = discovery?.installed
     ? configCount > 1
       ? `已找到 ${fmt(configCount)} 套可选配置与 Mihomo 内核，构建前请选择。`

@@ -73,6 +73,8 @@ Proxy pool commands:
   npm run start -- proxy-pool import   verify and use external HTTP proxy endpoints
   npm run start -- proxy-pool status   show the active pool and verified IPs
   npm run start -- proxy-pool stop     stop the dedicated Mihomo process
+  --size N                             default: 8, maximum: 32
+  --candidates N                       default: 48, maximum: 128
 
 Examples:
   npm run start -- auth-qr

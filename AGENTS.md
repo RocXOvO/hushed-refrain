@@ -12,7 +12,7 @@ The app finds NetEase Cloud Music comments authored by a numeric user UID. It ha
 
 There is no database. Durable scan state is JSON; matches are append-only JSONL. Generated/runtime directories (`dist/`, `release/`, `.ncm/`, `data/`, `tmp/`) are ignored and must not be committed.
 
-The code version is authoritative in `package.json` and `package-lock.json` (currently `0.6.0`). GitHub's latest Release is external state: when publishing or evaluating an upgrade, verify its tag, commit, and assets in real time rather than treating this file as a release-status source.
+The code version is authoritative in `package.json` and `package-lock.json` (currently `0.7.0`). GitHub's latest Release is external state: when publishing or evaluating an upgrade, verify its tag, commit, and assets in real time rather than treating this file as a release-status source.
 
 ## Architecture and data flow
 
@@ -70,7 +70,7 @@ Verification has two gates: query the public egress IP, then call a real NetEase
 
 `v0.5.0` additionally treats an IPv4 `/24` or IPv6 `/48` as one network: only the fastest verified entry from each network may be selected. A managed or external pool that cannot fill its requested size with separate networks fails rather than using concentrated substitutes. While a pool is running, its dashboard status schedules a non-overlapping background recheck about every 60 seconds; successful full rounds persist fresh latency/IP data and a temporary failure keeps the last known-good entries for a later retry.
 
-Default managed pool: 4 selected exits from 24 candidates, listeners beginning at port 17891, controller on 19097. These are defaults, not assumptions for scan logic.
+Default managed pool: 8 selected exits from 48 candidates, listeners beginning at port 17891, controller on 19097. The dashboard exposes both counts (selected exits 1..32, candidates 1..128); these are defaults, not assumptions for scan logic.
 
 Security rules:
 

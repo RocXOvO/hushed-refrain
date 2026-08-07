@@ -18,7 +18,7 @@
 Windows 用户可直接运行：
 
 ```text
-release/NCM-Comment-Finder-Setup-0.6.0.exe
+release/NCM-Comment-Finder-Setup-0.7.0.exe
 ```
 
 安装器支持选择目录，并使用应用的多尺寸 Windows 图标创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
@@ -32,7 +32,7 @@ Windows 自动更新从 `v0.3.1` 开始提供。更早的客户端需要先手�
 macOS Apple Silicon 用户可打开：
 
 ```text
-release/NCM-Comment-Finder-0.6.0-arm64.dmg
+release/NCM-Comment-Finder-0.7.0-arm64.dmg
 ```
 
 将“云评检索台”拖入 Applications 即可安装。当前本地包使用 ad-hoc 签名；向其他用户公开分发时，应使用 Apple Developer ID 证书签名并公证。
@@ -229,8 +229,8 @@ listeners:
 也可以让工具直接从 Clash Verge 当前合并配置构建独立的 Mihomo 池：
 
 ```powershell
-# 抽取订阅节点，启动独立 Mihomo，并筛选 4 个不同公网出口网段
-npm run start -- proxy-pool start --size 4 --candidates 24
+# 抽取订阅节点，启动独立 Mihomo，并筛选 8 个不同公网出口网段
+npm run start -- proxy-pool start --size 8 --candidates 48
 
 # 查看 PID、Listener、节点和实测出口 IP
 npm run start -- proxy-pool status
@@ -242,6 +242,8 @@ npm run start -- proxy-pool stop
 代理池不仅去重完整出口 IP，还会按网络前缀隔离：IPv4 的同一 `/24`、IPv6 的同一 `/48`
 最多保留延迟最低的一个节点。如果不同网段的可用出口不足 `--size`，构建会停止并提示增加不同地区或
 服务商的节点，不会使用同网段地址补足并发出口。
+
+客户端默认从 48 个候选节点中优选 8 个独立出口，也可在代理池区域直接调整“独立出口数”和“候选节点数”。独立出口允许 `1..32`，候选节点允许 `1..128`，且候选数不能少于出口数。
 
 GUI 保持打开且代理池在线时，会约每 60 秒在后台重新验证出口 IP、网易云连通性和延迟。同一时刻只会
 运行一轮复测；整轮成功后才更新池文件，临时失败会保留上次可用结果并在下个周期重试。

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   discoverClashVerge,
+  defaultMihomoPoolOptions,
   egressNetworkKey,
   proxyPoolRunning,
   readClashVergeProfiles,
@@ -30,6 +31,12 @@ function entry(
     ncmVerified,
   };
 }
+
+test("defaults to eight exits selected from forty-eight candidates", () => {
+  const options = defaultMihomoPoolOptions("/tmp/ncm-pool-defaults");
+  assert.equal(options.size, 8);
+  assert.equal(options.candidateCount, 48);
+});
 
 test("selects the fastest verified entries from distinct egress networks", () => {
   const selected = selectFastestDistinct([

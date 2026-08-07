@@ -23,6 +23,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /如何获取用户 UID/);
   assert.match(pageText, /home\?id=123456789/);
   assert.match(pageText, /IPv4 \/24.*IPv6 \/48/);
+  assert.match(pageText, /id="poolSize"[^>]*max="32"[^>]*value="8"/);
+  assert.match(pageText, /id="poolCandidates"[^>]*max="128"[^>]*value="48"/);
   assert.match(pageText, /name="pageSize"[^>]*max="2000"[^>]*value="1000"/);
   assert.doesNotMatch(pageText, /首条命中后/);
 

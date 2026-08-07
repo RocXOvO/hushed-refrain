@@ -573,8 +573,8 @@ export function defaultMihomoPoolOptions(projectRoot: string): MihomoPoolOptions
     workDirectory: resolve(projectRoot, ".ncm", "mihomo-pool"),
     poolPath: resolve(projectRoot, ".ncm", "proxy-pool.json"),
     basePort: 17_891,
-    size: 4,
-    candidateCount: 24,
+    size: 8,
+    candidateCount: 48,
     controllerPort: 19_097,
   };
 }
