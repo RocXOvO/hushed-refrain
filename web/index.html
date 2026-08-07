@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>云评检索台</title>
   <link rel="icon" type="image/png" href="/app-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=28">
+  <link rel="stylesheet" href="/styles.css?v=29">
 </head>
 <body class="task-panel-collapsed">
   <div id="appSplash" class="app-splash" role="status" aria-label="云评检索台正在启动">
@@ -90,7 +90,7 @@
           <div class="toolbar-context" aria-label="当前任务配置">
             <span><small>目标</small><strong id="toolbarUidLabel">UID 待填写</strong></span>
             <span><small>模式</small><strong id="toolbarModeLabel">单曲并行</strong></span>
-            <span><small>拓扑</small><strong id="toolbarTopologyLabel">1 出口 · 3 线程/IP</strong></span>
+            <span class="toolbar-topology"><small>拓扑</small><strong id="toolbarTopologyLabel">1 出口 · 3 线程/IP</strong></span>
             <label class="toolbar-number-control" for="taskHostConcurrency"><small>主机总并发</small><span><input id="taskHostConcurrency" type="number" min="1" max="32" value="8" inputmode="numeric"><em>1–32</em></span></label>
             <label class="toolbar-number-control" for="taskExitLimit"><small>任务出口上限</small><span><input id="taskExitLimit" type="number" min="0" max="32" value="0" inputmode="numeric"><em>0 自动</em></span></label>
           </div>

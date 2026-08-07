@@ -444,6 +444,8 @@ input[type="radio"] { accent-color: var(--accent); }
 .toolbar-context > span { min-width: 94px; padding: 0 11px; display: grid; align-content: center; gap: 2px; border-left: 1px solid var(--line); }
 .toolbar-context small { color: var(--muted); font-size: .6rem; font-weight: 650; }
 .toolbar-context strong { max-width: 150px; overflow: hidden; color: var(--ink-soft); font-size: .7rem; text-overflow: ellipsis; white-space: nowrap; }
+.toolbar-context > .toolbar-topology { min-width: 288px; flex: 1 1 288px; }
+.toolbar-context .toolbar-topology strong { max-width: none; overflow: visible; line-height: 1.35; text-overflow: clip; white-space: normal; }
 .toolbar-number-control { min-width: 112px; padding: 0 10px; display: grid; align-content: center; gap: 2px; border-left: 1px solid var(--line); }
 .toolbar-number-control > span { display: flex; align-items: center; gap: 6px; }
 .toolbar-number-control input { width: 43px; height: 26px; padding: 0 5px; font-size: .7rem; }
