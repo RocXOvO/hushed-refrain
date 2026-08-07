@@ -5,11 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   discoverClashVerge,
+  egressNetworkKey,
   proxyPoolRunning,
   readClashVergeProfiles,
+  readProxyPool,
+  refreshProxyPool,
   selectFastestDistinct,
 } from "../src/mihomo-pool";
-import type { ProxyPoolEntry } from "../src/mihomo-pool";
+import type { ProxyPoolEntry, ProxyPoolFile } from "../src/mihomo-pool";
 
 function entry(
   name: string,
@@ -28,10 +31,11 @@ function entry(
   };
 }
 
-test("selects the fastest verified entries with distinct egress IPs", () => {
+test("selects the fastest verified entries from distinct egress networks", () => {
   const selected = selectFastestDistinct([
     entry("slow-a", "1.1.1.1", 300, 300),
-    entry("fast-a", "1.1.1.1", 50, 50),
+    entry("fast-a", "1.1.1.2", 50, 50),
+    entry("same-subnet", "1.1.1.3", 55, 55),
     entry("fast-b", "2.2.2.2", 60, 60),
     entry("unverified", "3.3.3.3", 10, 10, false),
     entry("fast-c", "4.4.4.4", 70, 70),
@@ -43,6 +47,52 @@ test("selects the fastest verified entries with distinct egress IPs", () => {
     "fast-c",
   ]);
   assert.equal(new Set(selected.map((value) => value.egressIp)).size, 3);
+  assert.equal(new Set(selected.map((value) => egressNetworkKey(value.egressIp))).size, 3);
+});
+
+test("does not fill a requested pool with addresses from the same subnet", () => {
+  const selected = selectFastestDistinct([
+    entry("subnet-a", "103.151.17.10", 20, 20),
+    entry("subnet-b", "103.151.17.20", 30, 30),
+    entry("subnet-c", "103.151.17.30", 40, 40),
+  ], 3);
+
+  assert.deepEqual(selected.map((value) => value.name), ["subnet-a"]);
+});
+
+test("groups IPv4 by /24 and IPv6 by /48", () => {
+  assert.equal(egressNetworkKey("103.151.17.10"), "103.151.17.0/24");
+  assert.equal(egressNetworkKey("103.151.17.200"), "103.151.17.0/24");
+  assert.equal(egressNetworkKey("2001:db8:abcd:1::1"), "2001:db8:abcd::/48");
+  assert.equal(egressNetworkKey("2001:db8:abcd:ffff::2"), "2001:db8:abcd::/48");
+  assert.equal(egressNetworkKey("2001:db8:abce::1"), "2001:db8:abce::/48");
+});
+
+test("refreshes and persists current proxy latency", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pool-refresh-"));
+  const poolPath = join(directory, "proxy-pool.json");
+  const entries = [
+    entry("lane-a", "103.151.17.10", 20, 30),
+    entry("lane-b", "2.2.2.2", 25, 35),
+  ];
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    lastCheckedAt: new Date(0).toISOString(),
+    source: "external",
+    active: true,
+    entries,
+  };
+  await writeFile(poolPath, JSON.stringify(pool));
+
+  const refreshed = await refreshProxyPool(poolPath, async (name, endpoint) => {
+    const previous = entries.find((value) => value.name === name)!;
+    return { ...previous, endpoint, latencyMs: 80, ncmLatencyMs: 120 };
+  });
+
+  assert.deepEqual(refreshed.entries.map((value) => value.ncmLatencyMs), [120, 120]);
+  assert.notEqual(refreshed.lastCheckedAt, pool.lastCheckedAt);
+  assert.deepEqual((await readProxyPool(poolPath))?.entries, refreshed.entries);
 });
 
 test("treats an active external pool as running without a managed PID", () => {

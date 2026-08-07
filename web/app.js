@@ -161,7 +161,9 @@ function renderPool(pool) {
   const latencies = poolRunning ? pool.entries.map((entry) => Number(entry.ncmLatencyMs)).filter(Number.isFinite) : [];
   poolNetworkMs = latencies.length > 0 ? Math.round(latencies.reduce((total, value) => total + value, 0) / latencies.length) : 400;
   if (poolLaneCount !== previousLaneCount || poolNetworkMs !== previousNetworkMs) scheduleEstimateRefresh();
-  el.poolStatus.textContent = { running: `${pool.entries.length} 个出口在线`, starting: "正在测速与验证", "not-running": "未运行" }[pool.status] || pool.status;
+  el.poolStatus.textContent = pool.status === "running"
+    ? `${pool.entries.length} 个出口在线 · ${pool.refreshing ? "正在复测" : pool.refreshError ? "复测待重试" : "延迟已更新"}`
+    : { starting: "正在测速与验证", "not-running": "未运行" }[pool.status] || pool.status;
   el.poolToggle.querySelector("span").textContent = poolRunning ? "停止" : poolSource === "external" ? "验证并使用" : "自动优选";
   const discovery = pool.discovery;
   const configCount = renderClashConfigs(discovery, pool.sourceConfigPath, pool.status);

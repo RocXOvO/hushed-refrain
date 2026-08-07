@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { startDashboard } from "../src/server";
+import type { ProxyPoolFile } from "../src/mihomo-pool";
 
 test("dashboard serves UI assets and estimate API", async (context) => {
   const server = await startDashboard({ host: "127.0.0.1", port: 0 });
@@ -21,11 +22,18 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /重启并安装|下载更新/);
   assert.match(pageText, /如何获取用户 UID/);
   assert.match(pageText, /home\?id=123456789/);
+  assert.match(pageText, /IPv4 \/24.*IPv6 \/48/);
   assert.doesNotMatch(pageText, /首条命中后/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
   assert.match(icon.headers.get("content-type") ?? "", /image\/svg\+xml/);
+
+  const styles = await fetch(`${base}/styles.css`);
+  assert.equal(styles.status, 200);
+  const styleText = await styles.text();
+  assert.match(styleText, /scrollbar-color:/);
+  assert.match(styleText, /::-webkit-scrollbar-thumb/);
 
   const estimate = await fetch(`${base}/api/estimate?comments=500000`);
   assert.equal(estimate.status, 200);
@@ -126,6 +134,69 @@ test("dashboard keeps proxy-pool state under the configured runtime root", async
   assert.equal(pool.status, "not-running");
   assert.equal(pool.poolPath, join(runtimeRoot, ".ncm", "proxy-pool.json"));
   assert.deepEqual(pool.entries, []);
+});
+
+test("dashboard periodically refreshes active proxy latency", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-pool-refresh-"));
+  const poolDirectory = join(runtimeRoot, ".ncm");
+  const poolPath = join(poolDirectory, "proxy-pool.json");
+  await mkdir(poolDirectory, { recursive: true });
+  const initial: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    lastCheckedAt: new Date(0).toISOString(),
+    source: "external",
+    active: true,
+    entries: [{
+      name: "external-1",
+      endpoint: "http://127.0.0.1:17891",
+      egressIp: "1.1.1.1",
+      latencyMs: 20,
+      ncmLatencyMs: 30,
+      ncmVerified: true,
+    }],
+  };
+  await writeFile(poolPath, JSON.stringify(initial));
+  let releaseRefresh!: () => void;
+  const refreshGate = new Promise<void>((done) => { releaseRefresh = done; });
+  let refreshCalls = 0;
+  const server = await startDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    runtimeRoot,
+    poolRefreshIntervalMs: 60_000,
+    poolRefresher: async (path) => {
+      refreshCalls += 1;
+      await refreshGate;
+      const current = JSON.parse(await readFile(path, "utf8")) as ProxyPoolFile;
+      const refreshed = {
+        ...current,
+        lastCheckedAt: new Date().toISOString(),
+        entries: current.entries.map((value) => ({ ...value, ncmLatencyMs: 145 })),
+      };
+      await writeFile(path, JSON.stringify(refreshed));
+      return refreshed;
+    },
+  });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const first = await fetch(`${base}/api/pool`);
+  const firstPool = await first.json() as { refreshing: boolean };
+  assert.equal(firstPool.refreshing, true);
+  assert.equal(refreshCalls, 1);
+
+  releaseRefresh();
+  await new Promise((done) => setTimeout(done, 10));
+  const second = await fetch(`${base}/api/pool`);
+  const secondPool = await second.json() as {
+    refreshing: boolean;
+    entries: ProxyPoolFile["entries"];
+  };
+  assert.equal(secondPool.refreshing, false);
+  assert.equal(secondPool.entries[0].ncmLatencyMs, 145);
+  assert.equal(refreshCalls, 1);
 });
 
 test("dashboard validates an external proxy pool before importing it", async (context) => {

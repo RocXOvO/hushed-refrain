@@ -39,6 +39,7 @@ export type ProxyPoolSource = "clash-verge" | "external";
 export interface ProxyPoolFile {
   version: 1;
   generatedAt: string;
+  lastCheckedAt?: string;
   source: ProxyPoolSource;
   active: boolean;
   sourceConfigPath?: string;
@@ -191,12 +192,15 @@ export async function startMihomoPool(
 
     if (distinct.length < options.size) {
       throw new Error(
-        `Verified ${distinct.length} distinct NetEase-capable egress IPs; requested ${options.size}.`,
+        `仅验证到 ${distinct.length} 个不同网段的网易云可用出口，需要 ${options.size} 个。` +
+        "为避免同网段出口集中触发风控，已取消构建；请增加来自不同地区或服务商的节点。",
       );
     }
+    const generatedAt = new Date().toISOString();
     const pool: ProxyPoolFile = {
       version: 1,
-      generatedAt: new Date().toISOString(),
+      generatedAt,
+      lastCheckedAt: generatedAt,
       source: "clash-verge",
       active: true,
       sourceConfigPath: options.sourceConfigPath,
@@ -265,9 +269,11 @@ export async function importExternalProxyPool(
   if (selected.length === 0) {
     throw new Error("None of the supplied proxies could reach both the IP service and NetEase comments.");
   }
+  const generatedAt = new Date().toISOString();
   const pool: ProxyPoolFile = {
     version: 1,
-    generatedAt: new Date().toISOString(),
+    generatedAt,
+    lastCheckedAt: generatedAt,
     source: "external",
     active: true,
     entries: selected,
@@ -283,11 +289,52 @@ export async function verifyProxyPool(pool: ProxyPoolFile): Promise<ProxyPoolEnt
   );
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
-    throw new Error("The proxy pool no longer has distinct egress IPs.");
+    throw new Error(
+      "代理池不再满足独立网段要求；请重新构建，确保 IPv4 /24 或 IPv6 /48 网段不重复。",
+    );
   }
   return distinct;
 }
 
+export async function refreshProxyPool(
+  poolPath: string,
+  verifier: (name: string, endpoint: string) => Promise<ProxyPoolEntry> = verifyProxyEndpoint,
+): Promise<ProxyPoolFile> {
+  const pool = await readProxyPool(poolPath);
+  if (!pool || !proxyPoolRunning(pool)) throw new Error("The proxy pool is not active.");
+  const checked = await mapLimit(pool.entries, pool.entries.length, (entry) =>
+    verifier(entry.name, entry.endpoint)
+  );
+  const distinct = selectFastestDistinct(checked, pool.entries.length);
+  if (distinct.length !== pool.entries.length) {
+    throw new Error(
+      "代理池复测后不再满足独立网段要求；保留上次结果，并将在下个周期重试。",
+    );
+  }
+
+  // Do not let a slow refresh resurrect a stopped pool or overwrite a rebuild.
+  const current = await readProxyPool(poolPath);
+  if (
+    !current ||
+    !proxyPoolRunning(current) ||
+    current.generatedAt !== pool.generatedAt
+  ) {
+    throw new Error("代理池已在复测期间停止或重新构建。");
+  }
+  const refreshed: ProxyPoolFile = {
+    ...current,
+    lastCheckedAt: new Date().toISOString(),
+    entries: distinct,
+  };
+  await writeProxyPool(poolPath, refreshed);
+  return refreshed;
+}
+
+/**
+ * Select the lowest-latency verified exit from each independent network.
+ * Treating every address as independent is misleading when several exits are
+ * allocated from the same provider subnet, so IPv4 uses /24 and IPv6 uses /48.
+ */
 export function selectFastestDistinct(
   entries: ProxyPoolEntry[],
   size: number,
@@ -297,13 +344,45 @@ export function selectFastestDistinct(
   );
   const selected: ProxyPoolEntry[] = [];
   const seenIps = new Set<string>();
+  const seenNetworks = new Set<string>();
   for (const entry of fastestFirst) {
-    if (!entry.ncmVerified || seenIps.has(entry.egressIp)) continue;
+    const network = egressNetworkKey(entry.egressIp);
+    if (
+      !entry.ncmVerified ||
+      seenIps.has(entry.egressIp) ||
+      seenNetworks.has(network)
+    ) continue;
     seenIps.add(entry.egressIp);
+    seenNetworks.add(network);
     selected.push(entry);
     if (selected.length >= size) break;
   }
   return selected;
+}
+
+export function egressNetworkKey(value: string): string {
+  const ip = value.trim().toLowerCase();
+  const mappedIpv4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/.exec(ip)?.[1];
+  if (mappedIpv4 && net.isIP(mappedIpv4) === 4) return ipv4NetworkKey(mappedIpv4);
+  if (net.isIP(ip) === 4) return ipv4NetworkKey(ip);
+  if (net.isIP(ip) === 6) {
+    const hextets = expandIpv6(ip);
+    return `${hextets.slice(0, 3).map((part) => Number.parseInt(part, 16).toString(16)).join(":")}::/48`;
+  }
+  return `invalid:${ip}`;
+}
+
+function ipv4NetworkKey(ip: string): string {
+  const octets = ip.split(".");
+  return `${octets[0]}.${octets[1]}.${octets[2]}.0/24`;
+}
+
+function expandIpv6(ip: string): string[] {
+  const [left = "", right = ""] = ip.split("::");
+  const leftParts = left ? left.split(":") : [];
+  const rightParts = right ? right.split(":") : [];
+  const zeroCount = Math.max(0, 8 - leftParts.length - rightParts.length);
+  return [...leftParts, ...Array<string>(zeroCount).fill("0"), ...rightParts];
 }
 
 function diverseCandidates(proxies: YamlObject[], limit: number): YamlObject[] {
@@ -363,7 +442,11 @@ function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string
       response.on("end", () => {
         try {
           const value = JSON.parse(body) as { ip?: unknown };
-          if (response.statusCode !== 200 || typeof value.ip !== "string") {
+          if (
+            response.statusCode !== 200 ||
+            typeof value.ip !== "string" ||
+            net.isIP(value.ip) === 0
+          ) {
             throw new Error(`IP check returned ${response.statusCode}.`);
           }
           resolveIp(value.ip);

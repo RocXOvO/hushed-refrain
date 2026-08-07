@@ -13,10 +13,12 @@ import {
   importExternalProxyPool,
   proxyPoolRunning,
   readProxyPool,
+  refreshProxyPool,
   startMihomoPool,
   stopMihomoPool,
   verifyProxyPool,
   type ProxyPoolEntry,
+  type ProxyPoolFile,
   type ProxyPoolSource,
 } from "./mihomo-pool";
 import {
@@ -43,6 +45,8 @@ export interface DashboardOptions {
   platform?: NodeJS.Platform;
   arch?: string;
   updateChecker?: () => Promise<UpdateSnapshot>;
+  poolRefreshIntervalMs?: number;
+  poolRefresher?: typeof refreshProxyPool;
 }
 
 interface RuntimePaths {
@@ -162,6 +166,9 @@ interface PoolSnapshot {
   source?: ProxyPoolSource;
   pid?: number;
   generatedAt?: string;
+  lastCheckedAt?: string;
+  refreshing: boolean;
+  refreshError?: string;
   sourceConfigPath?: string;
   entries: ProxyPoolEntry[];
   discovery: ReturnType<typeof discoverClashVerge>;
@@ -406,16 +413,29 @@ class ParallelJobManager {
 
 class PoolManager {
   private starting = false;
-  constructor(private readonly paths: RuntimePaths) {}
+  private refreshPromise?: Promise<void>;
+  private nextRefreshAt = 0;
+  private refreshError?: string;
+
+  constructor(
+    private readonly paths: RuntimePaths,
+    private readonly refreshIntervalMs: number,
+    private readonly refresher: typeof refreshProxyPool,
+  ) {}
 
   async status(): Promise<PoolSnapshot> {
     const pool = await readProxyPool(this.paths.pool);
+    const running = proxyPoolRunning(pool);
+    if (!this.starting && running && pool) this.scheduleRefresh(pool);
     return {
-      status: this.starting ? "starting" : proxyPoolRunning(pool) ? "running" : "not-running",
+      status: this.starting ? "starting" : running ? "running" : "not-running",
       poolPath: this.paths.pool,
       source: pool?.source,
       pid: pool?.pid,
       generatedAt: pool?.generatedAt,
+      lastCheckedAt: pool?.lastCheckedAt ?? pool?.generatedAt,
+      refreshing: Boolean(this.refreshPromise),
+      refreshError: this.refreshError,
       sourceConfigPath: pool?.sourceConfigPath,
       entries: publicPoolEntries(pool?.entries ?? []),
       discovery: discoverClashVerge(),
@@ -436,6 +456,8 @@ class PoolManager {
         size: integer(input.size ?? defaults.size, "size", 1, 32),
         candidateCount: integer(input.candidates ?? defaults.candidateCount, "candidates", 1, 128),
       });
+      this.nextRefreshAt = Date.now() + this.refreshIntervalMs;
+      this.refreshError = undefined;
       return this.status();
     } finally { this.starting = false; }
   }
@@ -447,13 +469,35 @@ class PoolManager {
       const endpoints = proxyEndpoints(input.proxies);
       const size = integer(input.size ?? 0, "size", 0, 64);
       await importExternalProxyPool(endpoints, this.paths.pool, size);
+      this.nextRefreshAt = Date.now() + this.refreshIntervalMs;
+      this.refreshError = undefined;
       return this.status();
     } finally { this.starting = false; }
   }
 
   async stop(): Promise<PoolSnapshot> {
     await stopMihomoPool(this.paths.pool);
+    this.nextRefreshAt = 0;
+    this.refreshError = undefined;
     return this.status();
+  }
+
+  private scheduleRefresh(pool: ProxyPoolFile): void {
+    if (this.refreshPromise) return;
+    const lastCheckedAt = Date.parse(pool.lastCheckedAt ?? pool.generatedAt);
+    const persistedDueAt = Number.isFinite(lastCheckedAt)
+      ? lastCheckedAt + this.refreshIntervalMs
+      : 0;
+    const now = Date.now();
+    if (now < Math.max(this.nextRefreshAt, persistedDueAt)) return;
+
+    this.nextRefreshAt = now + this.refreshIntervalMs;
+    this.refreshPromise = this.refresher(this.paths.pool)
+      .then(() => { this.refreshError = undefined; })
+      .catch(() => {
+        this.refreshError = "代理池后台复测暂时失败，将在下个周期重试。";
+      })
+      .finally(() => { this.refreshPromise = undefined; });
   }
 }
 
@@ -490,7 +534,11 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
   const paths = runtimePaths(options.runtimeRoot ?? projectRoot);
   const jobs = new JobManager(paths);
   const parallel = new ParallelJobManager(paths);
-  const pool = new PoolManager(paths);
+  const pool = new PoolManager(
+    paths,
+    options.poolRefreshIntervalMs ?? 60_000,
+    options.poolRefresher ?? refreshProxyPool,
+  );
   const auth = new AuthManager(paths);
   const currentVersion = options.currentVersion ?? await applicationVersion();
   const updateChecker = cachedUpdateChecker(options.updateChecker ?? (() => checkForUpdate({

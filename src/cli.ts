@@ -69,7 +69,7 @@ Parallel song options:
   --fresh
 
 Proxy pool commands:
-  npm run start -- proxy-pool start    build and verify distinct egress listeners
+  npm run start -- proxy-pool start    build and verify network-diverse egress listeners
   npm run start -- proxy-pool import   verify and use external HTTP proxy endpoints
   npm run start -- proxy-pool status   show the active pool and verified IPs
   npm run start -- proxy-pool stop     stop the dedicated Mihomo process

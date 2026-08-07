@@ -173,14 +173,61 @@ function releaseFields(info: UpdateInfoLike = {}): Partial<Pick<WindowsUpdateSta
 }
 
 function normalizeReleaseNotes(value: unknown): string | undefined {
-  if (typeof value === "string") return value.trim() || undefined;
+  if (typeof value === "string") return plainReleaseNote(value) || undefined;
   if (!Array.isArray(value)) return undefined;
   const notes = value.flatMap((entry) => {
     if (!entry || typeof entry !== "object" || !("note" in entry)) return [];
-    const note = textValue((entry as { note?: unknown }).note);
+    const rawNote = (entry as { note?: unknown }).note;
+    const note = typeof rawNote === "string" ? plainReleaseNote(rawNote) : undefined;
     return note ? [note] : [];
   });
   return notes.length > 0 ? notes.join("\n\n") : undefined;
+}
+
+function plainReleaseNote(value: string): string {
+  const decoded = decodeHtmlEntities(value);
+  return decoded
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<(script|style|template)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(/<\s*br\s*\/?\s*>/gi, "\n")
+    .replace(/<\s*li\b[^>]*>/gi, "\n• ")
+    .replace(/<\s*\/\s*(?:p|div|li|h[1-6]|ul|ol|blockquote|pre|section|article)\s*>/gi, "\n")
+    .replace(/<(?:"[^"]*"|'[^']*'|[^'">])*>/g, "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[\t ]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
+function decodeHtmlEntities(value: string): string {
+  const named: Record<string, string> = {
+    amp: "&",
+    apos: "'",
+    bull: "•",
+    gt: ">",
+    hellip: "…",
+    lt: "<",
+    mdash: "—",
+    middot: "·",
+    nbsp: " ",
+    ndash: "–",
+    quot: "\"",
+  };
+  let decoded = value;
+  for (let pass = 0; pass < 2; pass += 1) {
+    decoded = decoded.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (entity, reference: string) => {
+      if (!reference.startsWith("#")) return named[reference.toLowerCase()] ?? entity;
+      const hexadecimal = reference[1]?.toLowerCase() === "x";
+      const codePoint = Number.parseInt(reference.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+      if (!Number.isInteger(codePoint) || codePoint < 0 || codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+        return entity;
+      }
+      return String.fromCodePoint(codePoint);
+    });
+  }
+  return decoded;
 }
 
 function textValue(value: unknown): string | undefined {

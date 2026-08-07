@@ -18,7 +18,7 @@
 Windows 用户可直接运行：
 
 ```text
-release/NCM-Comment-Finder-Setup-0.4.0.exe
+release/NCM-Comment-Finder-Setup-0.5.0.exe
 ```
 
 安装器支持选择目录，并使用应用的多尺寸 Windows 图标创建桌面及开始菜单快捷方式。桌面版将 Cookie、代理池、检查点和结果写入 Electron 用户数据目录。
@@ -32,7 +32,7 @@ Windows 自动更新从 `v0.3.1` 开始提供。更早的客户端需要先手�
 macOS Apple Silicon 用户可打开：
 
 ```text
-release/NCM-Comment-Finder-0.2.0-arm64.dmg
+release/NCM-Comment-Finder-0.5.0-arm64.dmg
 ```
 
 将“云评检索台”拖入 Applications 即可安装。当前本地包使用 ad-hoc 签名；向其他用户公开分发时，应使用 Apple Developer ID 证书签名并公证。
@@ -227,7 +227,7 @@ listeners:
 也可以让工具直接从 Clash Verge 当前合并配置构建独立的 Mihomo 池：
 
 ```powershell
-# 抽取订阅节点，启动独立 Mihomo，并筛选 4 个不同公网出口
+# 抽取订阅节点，启动独立 Mihomo，并筛选 4 个不同公网出口网段
 npm run start -- proxy-pool start --size 4 --candidates 24
 
 # 查看 PID、Listener、节点和实测出口 IP
@@ -236,6 +236,13 @@ npm run start -- proxy-pool status
 # 停止工具创建的独立 Mihomo
 npm run start -- proxy-pool stop
 ```
+
+代理池不仅去重完整出口 IP，还会按网络前缀隔离：IPv4 的同一 `/24`、IPv6 的同一 `/48`
+最多保留延迟最低的一个节点。如果不同网段的可用出口不足 `--size`，构建会停止并提示增加不同地区或
+服务商的节点，不会使用同网段地址补足并发出口。
+
+GUI 保持打开且代理池在线时，会约每 60 秒在后台重新验证出口 IP、网易云连通性和延迟。同一时刻只会
+运行一轮复测；整轮成功后才更新池文件，临时失败会保留上次可用结果并在下个周期重试。
 
 程序会按平台自动发现 Clash Verge：
 
@@ -255,7 +262,7 @@ npm run start -- proxy-pool import \
   --proxy http://user:password@proxy.example:8080
 ```
 
-所有导入代理都会检查真实出口 IP，按 IP 去重，再用网易云评论接口实测并按总延迟排序。带账号密码的代理 URL 保存在本地代理池文件中，该文件在 macOS/Linux 上使用 `0600` 权限，GUI API 返回时会隐去凭据。
+所有导入代理都会检查真实出口 IP，按 IPv4 `/24` 或 IPv6 `/48` 网段去重，再用网易云评论接口实测并按总延迟排序。带账号密码的代理 URL 保存在本地代理池文件中，该文件在 macOS/Linux 上使用 `0600` 权限，GUI API 返回时会隐去凭据。
 
 池配置写入 `.ncm/mihomo-pool/config.yaml`，验证结果写入 `.ncm/proxy-pool.json`。这两个路径都被 Git 忽略。构建过程执行两级检查：
 

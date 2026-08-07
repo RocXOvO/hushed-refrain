@@ -83,3 +83,22 @@ test("returns a safe error state when checking fails", async () => {
   assert.equal(state.phase, "error");
   assert.equal(state.error, "network failed secret detail");
 });
+
+test("converts HTML release notes into readable safe text", async () => {
+  const updater = new FakeUpdater();
+  updater.checkForUpdates = async () => {
+    updater.emit("update-available", {
+      version: "0.4.1",
+      releaseNotes: `<h2>更新内容</h2><ul>
+        <li><strong>修复</strong>启动闪退</li>
+        <li>并发 &amp; 估算同步 &#x1F680;</li>
+      </ul><p>感谢使用&nbsp;云评检索台。</p><script>alert("hidden")</script>`,
+    });
+  };
+  const controller = new WindowsUpdateController(updater, "0.4.0", () => {});
+
+  const state = await controller.check();
+
+  assert.equal(state.releaseNotes, "更新内容\n• 修复启动闪退\n• 并发 & 估算同步 🚀\n感谢使用 云评检索台。");
+  assert.doesNotMatch(state.releaseNotes ?? "", /<[^>]+>|alert\(/);
+});
