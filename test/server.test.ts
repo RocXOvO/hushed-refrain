@@ -53,8 +53,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="activeSongsList"/);
   assert.match(pageText, /评论读取进度/);
   assert.match(pageText, /主机并发会硬性限制总 Worker 数/);
-  assert.match(pageText, /styles\.css\?v=32/);
-  assert.match(pageText, /app\.js\?v=34/);
+  assert.match(pageText, /styles\.css\?v=34/);
+  assert.match(pageText, /app\.js\?v=35/);
   assert.match(pageText, /id="speedMetric"/);
   assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
@@ -93,6 +93,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /tabSwitchVersion/);
   assert.match(appText, /renderActiveSongs/);
   assert.match(appText, /renderSongReadProgress/);
+  assert.match(appText, /refreshActiveSongRequestAges/);
+  assert.match(appText, /个分片请求中/);
+  assert.match(appText, /inspectorOverlayQuery\.addEventListener\("change"/);
   assert.match(appText, /时间覆盖/);
   assert.match(appText, /topologyCapacityNote/);
   assert.match(appText, /Worker 活跃/);
@@ -125,6 +128,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /transform 210ms/);
   assert.match(styleText, /font-size:\s*16px/);
   assert.match(styleText, /\.pool-state-indicator\.is-ready \.pool-state-led/);
+  assert.match(styleText, /container-type:\s*inline-size/);
+  assert.match(styleText, /@container \(max-width:\s*1210px\)/);
+  assert.match(styleText, /@container \(max-width:\s*560px\)/);
+  assert.match(styleText, /\.task-actions\s*\{[^}]*min-width:\s*max-content/);
   assert.doesNotMatch(styleText, /backdrop-filter:/);
 
   const idleJob = await fetch(`${base}/api/job`);

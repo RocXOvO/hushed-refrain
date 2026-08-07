@@ -413,7 +413,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   config.source = "record";
   config.commentPageSize = 100;
   const activities: Array<{ songId: string; songName?: string; workerId?: string; pageInSong: number; requestingPage?: number; commentsProcessed: number; totalComments?: number }> = [];
-  const requestActivities: Array<{ phase: string; songId?: string; songName?: string; workerId?: string }> = [];
+  const requestActivities: Array<{ phase: string; songId?: string; songName?: string; workerId?: string; startedAt?: string }> = [];
   config.onSongProgress = (activity) => activities.push(activity);
   config.onRequestActivity = (activity) => requestActivities.push(activity);
   const tracker = { active: 0, maxActive: 0, calls: [] as string[] };
@@ -464,6 +464,48 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(activities.every((activity) => /^worker-\d+$/.test(activity.workerId ?? "")));
   assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
   assert.ok(requestActivities.some((activity) => activity.phase === "start" && activity.songId === "3" && activity.songName === "song-3" && /^worker-\d+$/.test(activity.workerId ?? "")));
+  assert.ok(requestActivities.filter((activity) => activity.phase === "start").every((activity) => Number.isFinite(Date.parse(activity.startedAt ?? ""))));
+});
+
+test("trailing-publishes a pooled-source page burst while the next request is still running", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-live-checkpoints-"));
+  const config = await options(directory);
+  config.source = "record";
+  const songs: SongCandidate[] = Array.from({ length: 4 }, (_, index) => ({
+    id: String(index + 1),
+    name: `song-${index + 1}`,
+    sources: ["record"],
+  }));
+  let pageCalls = 0;
+  let thirdPageFinished = false;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => songs,
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      pageCalls += 1;
+      if (pageCalls === 3) await new Promise((resolve) => setTimeout(resolve, 400));
+      if (pageCalls === 3) thirdPageFinished = true;
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const pages: number[] = [];
+  let sawBurstBeforeThirdFinished = false;
+  config.onCheckpoint = (activity) => {
+    pages.push(activity.pagesProcessed);
+    if (activity.pagesProcessed === 2 && !thirdPageFinished) sawBurstBeforeThirdFinished = true;
+  };
+
+  await runPooledCommentFinder([{
+    name: "lane-1",
+    client,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 1, maxWorkers: 1, requestBudget: 100 });
+
+  assert.equal(sawBurstBeforeThirdFinished, true);
+  assert.equal(pages.at(-1), 4);
 });
 
 test("hydrates unnamed liked songs in a batch when resuming an old pooled checkpoint", async () => {

@@ -290,6 +290,7 @@ export interface SongScanActivity {
 
 export interface ScanRequestActivity {
   phase: "start" | "success" | "failure";
+  startedAt?: string;
   lane: string;
   workerId?: string;
   operation: "comment-page";

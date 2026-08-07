@@ -163,11 +163,11 @@ test("assigns comments without timestamps to the shard that returned them", asyn
   assert.equal(result.commentId, "missing-time");
 });
 
-test("publishes stable worker identity and song metadata for live activity", async () => {
+test("publishes stable worker identity, request timing, and song metadata for live activity", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-activity-"));
   const client = new ParallelFakeClient();
   const config = await options(directory);
-  const activities: Array<{ phase: string; workerId?: string; songId: string; songName?: string }> = [];
+  const activities: Array<{ phase: string; workerId?: string; songId: string; songName?: string; startedAt?: string }> = [];
   config.onRequestActivity = (activity) => activities.push(activity);
 
   await runParallelSongScan([{
@@ -180,9 +180,43 @@ test("publishes stable worker identity and song metadata for live activity", asy
   assert.equal(starts.length, 2);
   assert.deepEqual(new Set(starts.map((activity) => activity.workerId)), new Set(["worker-1", "worker-2"]));
   assert.ok(activities.every((activity) => activity.songId === "186016" && activity.songName === "song"));
+  assert.ok(starts.every((activity) => Number.isFinite(Date.parse(activity.startedAt ?? ""))));
   for (const start of starts) {
     assert.ok(activities.some((activity) => activity.phase === "success" && activity.workerId === start.workerId));
   }
+});
+
+test("trailing-publishes a parallel page burst while the next request is still running", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-live-checkpoints-"));
+  const client = new ParallelFakeClient();
+  const getPage = client.getSongCommentsByCursor.bind(client);
+  let pageCalls = 0;
+  let thirdPageFinished = false;
+  client.getSongCommentsByCursor = async (...args) => {
+    pageCalls += 1;
+    if (pageCalls === 3) await new Promise((resolve) => setTimeout(resolve, 400));
+    const page = await getPage(...args);
+    if (pageCalls === 3) thirdPageFinished = true;
+    return page;
+  };
+  const config = await options(directory);
+  config.shardCount = 4;
+  config.workersPerLane = 1;
+  const pages: number[] = [];
+  let sawBurstBeforeThirdFinished = false;
+  config.onCheckpoint = (activity) => {
+    pages.push(activity.pagesProcessed);
+    if (activity.pagesProcessed === 2 && !thirdPageFinished) sawBurstBeforeThirdFinished = true;
+  };
+
+  await runParallelSongScan([{
+    name: "lane-1",
+    client,
+    governor: governor(),
+  }], config);
+
+  assert.equal(sawBurstBeforeThirdFinished, true);
+  assert.equal(pages.at(-1), 4);
 });
 
 test("hard-caps parallel worker loops while rotating across every selected lane", async () => {

@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
+  classifyManagedMihomoProcess,
   discoverClashVerge,
   defaultMihomoPoolOptions,
   egressNetworkKey,
   managedMihomoCommandMatches,
+  managedGenerationHealthy,
   mergeProxyDefinitions,
   proxyPoolRunning,
   proxyPoolStatusRunning,
@@ -18,9 +20,12 @@ import {
   readProxyPool,
   refreshProxyPool,
   selectFastestDistinct,
+  selectManagedPortPlan,
   stopMihomoPool,
   verifyProxyPool,
+  waitForProcessExit,
   waitForPorts,
+  withPoolBuildLock,
 } from "../src/mihomo-pool";
 import type { ProxyPoolEntry, ProxyPoolFile } from "../src/mihomo-pool";
 
@@ -179,6 +184,43 @@ test("refreshes and persists current proxy latency", async () => {
   assert.deepEqual((await readProxyPool(poolPath))?.entries, refreshed.entries);
 });
 
+test("does not let a slow refresh overwrite a newer proxy-pool generation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pool-refresh-generation-"));
+  const poolPath = join(directory, "proxy-pool.json");
+  const entries = [
+    entry("lane-a", "1.1.1.1", 20, 30),
+    entry("lane-b", "2.2.2.2", 25, 35),
+  ];
+  const original: ProxyPoolFile = {
+    version: 1,
+    generationId: "generation-a",
+    generatedAt: new Date(0).toISOString(),
+    source: "external",
+    active: true,
+    entries,
+  };
+  const replacement: ProxyPoolFile = {
+    ...original,
+    generationId: "generation-b",
+    generatedAt: new Date(1).toISOString(),
+    entries: entries.map((value) => ({ ...value, latencyMs: 7 })),
+  };
+  await writeFile(poolPath, JSON.stringify(original));
+  let replaced = false;
+
+  const refreshed = await refreshProxyPool(poolPath, async (name, endpoint) => {
+    if (!replaced) {
+      replaced = true;
+      await writeFile(poolPath, JSON.stringify(replacement));
+    }
+    return { ...entries.find((value) => value.name === name)!, endpoint };
+  });
+
+  assert.equal(refreshed.generationId, "generation-b");
+  assert.equal((await readProxyPool(poolPath))?.generationId, "generation-b");
+  assert.deepEqual((await readProxyPool(poolPath))?.entries, replacement.entries);
+});
+
 test("treats an active external pool as running without a managed PID", () => {
   assert.equal(proxyPoolRunning({
     version: 1,
@@ -240,6 +282,10 @@ test("uses a cheap PID liveness hint for frequently polled managed-pool status",
 
   assert.equal(proxyPoolStatusRunning(pool), true);
   assert.equal(proxyPoolRunning(pool), false);
+  assert.equal(recentlyVerifiedProxyPoolEntries({
+    ...pool,
+    lastCheckedAt: new Date().toISOString(),
+  }), undefined);
   assert.equal(proxyPoolStatusRunning({ ...pool, active: false }), false);
 });
 
@@ -300,6 +346,77 @@ test("matches a managed Mihomo process by executable and config path", () => {
     "C:\\Pool\\config.yaml",
     "C:\\Apps\\verge-mihomo.exe",
   ), false);
+});
+
+test("classifies managed process ownership without treating an unreadable command as foreign", () => {
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date(0).toISOString(),
+    source: "clash-verge",
+    active: true,
+    pid: 123,
+    mihomoConfigPath: "C:\\Pool\\config.yaml",
+    mihomoExecutablePath: "C:\\Apps\\verge-mihomo.exe",
+    entries: [entry("managed", "8.8.8.8", 20, 30)],
+  };
+  assert.equal(classifyManagedMihomoProcess(pool, false, undefined), "not-running");
+  assert.equal(classifyManagedMihomoProcess(pool, true, undefined), "unavailable");
+  assert.equal(classifyManagedMihomoProcess(pool, true, "node unrelated.js"), "mismatch");
+  assert.equal(classifyManagedMihomoProcess(
+    pool,
+    true,
+    '"C:\\Apps\\verge-mihomo.exe" -f "C:\\Pool\\config.yaml"',
+  ), "verified");
+});
+
+test("allocates a fallback generation port range when the preferred range is occupied", async () => {
+  const occupied = new Set([17_891, 19_097]);
+  const plan = await selectManagedPortPlan(
+    { basePort: 17_891, controllerPort: 19_097 },
+    4,
+    async (port) => occupied.has(port),
+  );
+  assert.notEqual(plan.basePort, 17_891);
+  assert.deepEqual(plan.listenerPorts, [17_912, 17_913, 17_914, 17_915]);
+  assert.equal(plan.controllerPort, 17_917);
+  assert.equal(new Set([...plan.listenerPorts, plan.controllerPort]).size, 5);
+});
+
+test("refuses to claim a process exited when the PID is still alive", async () => {
+  assert.equal(await waitForProcessExit(process.pid, 0), false);
+});
+
+test("requires the new PID and every selected listener to stay healthy before retiring the old generation", async () => {
+  assert.equal(await managedGenerationHealthy(process.pid, [17_891, 17_892], async () => true), true);
+  let probes = 0;
+  assert.equal(await managedGenerationHealthy(2_147_483_647, [17_891], async () => {
+    probes += 1;
+    return true;
+  }), false);
+  assert.equal(probes, 0);
+  assert.equal(await managedGenerationHealthy(process.pid, [17_891, 17_892], async (port) => port === 17_891), false);
+});
+
+test("serializes proxy-pool mutations with an ownership-safe file lock", async () => {
+  const workDirectory = await mkdtemp(join(tmpdir(), "ncm-pool-build-lock-"));
+  let markEntered!: () => void;
+  let releaseFirst!: () => void;
+  const entered = new Promise<void>((resolve) => { markEntered = resolve; });
+  const hold = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const first = withPoolBuildLock(workDirectory, async () => {
+    markEntered();
+    await hold;
+    return "first";
+  });
+  await entered;
+
+  await assert.rejects(
+    withPoolBuildLock(workDirectory, async () => "second"),
+    /另一个客户端正在构建或更新代理池/,
+  );
+  releaseFirst();
+  assert.equal(await first, "first");
+  assert.equal(await withPoolBuildLock(workDirectory, async () => "third"), "third");
 });
 
 test("does not kill a reused PID whose process identity is not Mihomo", async () => {

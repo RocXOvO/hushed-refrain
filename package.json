@@ -1,6 +1,6 @@
 {
   "name": "ncm-comment-finder",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music comment finder",
@@ -26,10 +26,12 @@
     "@neteasecloudmusicapienhanced/api": "4.39.0",
     "electron-updater": "6.8.9",
     "lucide-static": "1.28.0",
+    "proper-lockfile": "^4.1.2",
     "yaml": "^2.9.0"
   },
   "devDependencies": {
     "@types/node": "^24.10.0",
+    "@types/proper-lockfile": "^4.1.4",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
     "tsx": "^4.23.9",

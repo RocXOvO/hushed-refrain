@@ -136,6 +136,7 @@ async function proxyPoolCommand(args: string[]): Promise<void> {
   });
   const action = parsed.positionals[0] ?? "status";
   const poolPath = resolve(parsed.values.output!);
+  const poolWorkDirectory = resolve(parsed.values["work-dir"]!);
   if (action === "stop") {
     const stopped = await stopMihomoPool(poolPath);
     process.stdout.write(`${JSON.stringify({ status: stopped ? "stopped" : "not-running", poolPath }, null, 2)}\n`);
@@ -167,7 +168,7 @@ async function proxyPoolCommand(args: string[]): Promise<void> {
   const pool = await startMihomoPool({
     sourceConfigPaths: parsed.values["source-config"]!.map((path) => resolve(path)),
     mihomoPath: resolve(parsed.values.mihomo!),
-    workDirectory: resolve(parsed.values["work-dir"]!),
+    workDirectory: poolWorkDirectory,
     poolPath,
     basePort: integer(parsed.values["base-port"], "base-port", 1, 65_535),
     size: integer(parsed.values.size, "size", 1, 32),

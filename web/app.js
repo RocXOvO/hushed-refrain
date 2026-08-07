@@ -76,6 +76,7 @@ let visibleResultOrder = [];
 const disclosureAnimations = new WeakMap();
 let activeSongsSignature = "";
 const activeSongRows = new Map();
+const inspectorOverlayQuery = matchMedia("(max-width: 1120px)");
 
 async function api(path, options) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -206,7 +207,7 @@ async function togglePool() {
     const nextPool = await api(path, { method: "POST", body: JSON.stringify(value) });
     poolBuildError = "";
     renderPool(nextPool);
-    toast(stopping ? "代理池已停止" : "已选出可用的最优出口");
+    toast(stopping ? "代理池已停止" : nextPool.managementNotice || "已选出可用的最优出口");
   } catch (error) {
     poolBuildError = stopping ? "" : error.message;
     if (!stopping) {
@@ -344,6 +345,7 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
     workers: Math.max(0, Number(song.workers || 0)),
     pagesProcessed: finiteNumber(song.pagesProcessed),
     requestingPage: finiteNumber(song.requestingPage),
+    requestStartedAt: song.requestStartedAt == null ? undefined : finiteNumber(song.requestStartedAt),
     commentsProcessed: finiteNumber(song.commentsProcessed),
     totalComments: finiteNumber(song.totalComments),
     progressPercent: finiteNumber(song.progressPercent),
@@ -409,6 +411,7 @@ function createActiveSongRow() {
 }
 
 function updateActiveSongRow(entry, song) {
+  entry.song = song;
   entry.badge.textContent = song.workers > 0 ? "扫描中" : "等待调度";
   entry.badge.classList.toggle("is-waiting", song.workers === 0);
   entry.name.textContent = song.name || "正在读取歌曲名称";
@@ -424,14 +427,25 @@ function renderSongReadProgress(song, entry) {
     : undefined;
   const measuredPercent = total ? comments / total * 100 : undefined;
   const percent = Math.max(0, Math.min(100, song.progressPercent ?? measuredPercent ?? 0));
+  const activeRequest = song.workers > 0
+    ? ` · ${fmt(song.workers)} 个分片请求中${song.requestStartedAt !== undefined
+      ? ` · 最长 ${duration(Math.max(0, Math.floor((Date.now() - song.requestStartedAt) / 1_000)))}`
+      : ""}`
+    : "";
+  const completedPages = song.pagesProcessed !== undefined && song.pagesProcessed > 0
+    ? ` · 已完成 ${fmt(song.pagesProcessed)} 页`
+    : "";
+  const coverage = percent > 0 && percent < 1 ? "<1" : String(Math.round(percent));
   const label = song.progressBasis === "time" && song.progressPercent !== undefined
-    ? `已读 ${fmt(comments)} 条 · 时间覆盖 ${Math.round(percent)}%`
+    ? `已读 ${fmt(comments)} 条 · 时间覆盖 ${coverage}%${completedPages}${activeRequest}`
     : total
-    ? `已读 ${fmt(comments)} / ${fmt(total)} 条 · ${Math.round(percent)}%`
+    ? `已读 ${fmt(comments)} / ${fmt(total)} 条 · ${coverage}%${completedPages}${activeRequest}`
     : song.pagesProcessed !== undefined && song.pagesProcessed > 0
-    ? `已读 ${fmt(comments)} 条 · 已完成 ${fmt(song.pagesProcessed)} 页${song.workers > 0 ? ` · ${fmt(song.workers)} 个分片处理中` : ""}`
+    ? `已读 ${fmt(comments)} 条${completedPages}${activeRequest}`
     : song.requestingPage !== undefined
-    ? "正在处理首批评论分片"
+    ? `正在请求第 ${fmt(song.requestingPage)} 页${activeRequest}`
+    : song.workers > 0
+    ? `正在请求首批评论分片${activeRequest}`
     : song.pagesProcessed !== undefined
     ? `已读 ${fmt(comments)} 条 · 已完成 ${fmt(song.pagesProcessed)} 页`
     : "等待首个评论页";
@@ -439,6 +453,12 @@ function renderSongReadProgress(song, entry) {
   entry.progressTrack.classList.toggle("is-unknown", song.progressPercent === undefined && measuredPercent === undefined);
   entry.progressFill.style.width = `${percent}%`;
   entry.progress.setAttribute("aria-label", label);
+}
+
+function refreshActiveSongRequestAges() {
+  for (const entry of activeSongRows.values()) {
+    if (entry.song?.workers > 0) renderSongReadProgress(entry.song, entry);
+  }
 }
 
 function setProgressBar(bar, percent, indeterminate) {
@@ -568,6 +588,9 @@ function renderPoolState(pool) {
   } else if (pool.status === "running" && pool.refreshError) {
     state = "is-degraded";
     text = `${pool.entries.length} 个出口 · 复测待重试`;
+  } else if (pool.status === "running" && pool.managementNotice) {
+    state = "is-degraded";
+    text = `${pool.entries.length} 个出口 · 新代已接管`;
   } else if (pool.status === "running") {
     state = "is-ready";
     text = `${pool.entries.length} 个出口 · 已就绪`;
@@ -1455,6 +1478,9 @@ function setInspectorCollapsed(collapsed) {
   el.inspectorToggle.setAttribute("aria-expanded", String(!collapsed));
   $('[data-nav-view="pool"]')?.setAttribute("aria-expanded", String(!collapsed));
 }
+function syncInspectorForViewport(event = inspectorOverlayQuery) {
+  if (event.matches) setInspectorCollapsed(true);
+}
 function setBusy(value) {
   startSubmissionBusy = value;
   el.toolbarStart.querySelector("span").textContent = value ? "启动中…" : "启动";
@@ -1567,13 +1593,17 @@ $$('.tab').forEach((tab) => {
 });
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));
-if (innerWidth <= 1120) setInspectorCollapsed(true);
+syncInspectorForViewport();
+inspectorOverlayQuery.addEventListener("change", syncInspectorForViewport);
 syncToolbarContext();
 void boot().finally(() => {
   scheduleRefreshLoop();
   scheduleAuthRefreshLoop();
 });
-const runtimeTimerInterval = setInterval(renderRuntimeTimer, 1_000);
+const runtimeTimerInterval = setInterval(() => {
+  renderRuntimeTimer();
+  refreshActiveSongRequestAges();
+}, 1_000);
 
 function scheduleRefreshLoop(delay = document.hidden ? 10_000 : 1_500) {
   clearTimeout(refreshTimer);
@@ -1606,6 +1636,7 @@ addEventListener("pagehide", () => {
   clearTimeout(refreshTimer);
   clearTimeout(authRefreshTimer);
   clearInterval(runtimeTimerInterval);
+  inspectorOverlayQuery.removeEventListener("change", syncInspectorForViewport);
 });
 
 async function activateTaskTab(tab) {

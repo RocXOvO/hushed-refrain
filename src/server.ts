@@ -94,6 +94,7 @@ interface ActiveSongSnapshot {
   workers: number;
   pagesProcessed?: number;
   requestingPage?: number;
+  requestStartedAt?: number;
   commentsProcessed?: number;
   totalComments?: number;
   progressPercent?: number;
@@ -239,6 +240,7 @@ interface PoolSnapshot {
   lastCheckedAt?: string;
   refreshing: boolean;
   refreshError?: string;
+  managementNotice?: string;
   sourceConfigPath?: string;
   sourceConfigPaths?: string[];
   entries: ProxyPoolEntry[];
@@ -250,6 +252,7 @@ type MatchSubscriber = (comment: FoundComment) => void;
 const projectRoot = resolve(__dirname, "..");
 const webRoot = join(projectRoot, "web");
 const iconRoot = join(projectRoot, "node_modules", "lucide-static", "icons");
+const ACTIVE_SONG_PROGRESS_LIMIT = 64;
 
 class JobManager {
   private snapshotValue: JobSnapshot = emptySnapshot();
@@ -259,8 +262,8 @@ class JobManager {
   private outputPath?: string;
   private terminalStateSyncedId?: string;
   private abortController?: AbortController;
-  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage?: number; active: boolean }>();
-  private readonly activeSongProgress = new Map<string, Omit<ActiveSongSnapshot, "id" | "name" | "workers" | "requestingPage">>();
+  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage?: number; requestStartedAt?: number; active: boolean }>();
+  private readonly activeSongProgress = new Map<string, Omit<ActiveSongSnapshot, "id" | "workers" | "requestingPage" | "requestStartedAt">>();
   private readonly songNameById = new Map<string, string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
   private readonly commentRate = new CommentRateTracker();
@@ -394,13 +397,16 @@ class JobManager {
         const progressPercent = activity.totalComments && activity.totalComments > 0
           ? Math.min(100, activity.commentsProcessed / activity.totalComments * 100)
           : undefined;
+        this.activeSongProgress.delete(activity.songId);
         this.activeSongProgress.set(activity.songId, {
+          name: activity.songName ?? this.songNameById.get(activity.songId),
           pagesProcessed: activity.pageInSong,
           commentsProcessed: activity.commentsProcessed,
           totalComments: activity.totalComments,
           progressPercent,
           progressBasis: "comments",
         });
+        this.trimActiveSongProgress();
         if (activity.done) this.removeScheduledSong(activity.songId);
         this.publishActiveSongs(activeId);
         this.snapshotValue = {
@@ -620,6 +626,7 @@ class JobManager {
         id: activity.songId,
         name: activity.songName,
         requestingPage: activity.page,
+        requestStartedAt: requestStartedAt(activity.startedAt),
         active: true,
       });
     } else {
@@ -627,6 +634,7 @@ class JobManager {
       if (scheduled?.id === activity.songId) {
         scheduled.active = false;
         scheduled.requestingPage = undefined;
+        scheduled.requestStartedAt = undefined;
       }
     }
     this.publishActiveSongs(activeId);
@@ -643,6 +651,9 @@ class JobManager {
         if (active.requestingPage !== undefined) {
           existing.requestingPage = Math.min(existing.requestingPage ?? active.requestingPage, active.requestingPage);
         }
+        if (active.requestStartedAt !== undefined) {
+          existing.requestStartedAt = Math.min(existing.requestStartedAt ?? active.requestStartedAt, active.requestStartedAt);
+        }
       } else {
         songs.set(active.id, {
           id: active.id,
@@ -650,12 +661,13 @@ class JobManager {
           workers: active.active ? 1 : 0,
           ...this.activeSongProgress.get(active.id),
           requestingPage: active.requestingPage,
+          requestStartedAt: active.requestStartedAt,
         });
       }
     }
-    const scheduledIds = new Set(songs.keys());
-    for (const id of this.activeSongProgress.keys()) {
-      if (!scheduledIds.has(id)) this.activeSongProgress.delete(id);
+    for (const [id, progress] of this.activeSongProgress) {
+      if (songs.has(id)) continue;
+      songs.set(id, { id, workers: 0, ...progress });
     }
     this.snapshotValue = { ...this.snapshotValue, activeSongs: [...songs.values()] };
   }
@@ -665,6 +677,16 @@ class JobManager {
       if (scheduled.id === songId) this.activeSongByWorker.delete(workerId);
     }
     this.activeSongProgress.delete(songId);
+  }
+
+  private trimActiveSongProgress(): void {
+    if (this.activeSongProgress.size <= ACTIVE_SONG_PROGRESS_LIMIT) return;
+    const activeIds = new Set([...this.activeSongByWorker.values()].map((song) => song.id));
+    for (const songId of this.activeSongProgress.keys()) {
+      if (activeIds.has(songId)) continue;
+      this.activeSongProgress.delete(songId);
+      if (this.activeSongProgress.size <= ACTIVE_SONG_PROGRESS_LIMIT) return;
+    }
   }
 
   private fail(activeId: string | undefined, error: unknown): void {
@@ -683,7 +705,7 @@ class ParallelJobManager {
   private outputPath?: string;
   private terminalStateSyncedId?: string;
   private abortController?: AbortController;
-  private readonly activeWorkers = new Set<string>();
+  private readonly activeWorkers = new Map<string, number>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
   private readonly commentRate = new CommentRateTracker();
 
@@ -937,7 +959,10 @@ class ParallelJobManager {
   private trackActiveSong(activeId: string, activity: ScanRequestActivity): void {
     if (this.snapshotValue.id !== activeId || !activity.workerId) return;
     if (activity.phase === "start") {
-      this.activeWorkers.add(activity.workerId);
+      this.activeWorkers.set(
+        activity.workerId,
+        requestStartedAt(activity.startedAt),
+      );
     } else {
       this.activeWorkers.delete(activity.workerId);
     }
@@ -947,6 +972,9 @@ class ParallelJobManager {
         id: activity.songId,
         name: activity.songName ?? this.snapshotValue.songName,
         workers: this.activeWorkers.size,
+        requestStartedAt: this.activeWorkers.size > 0
+          ? Math.min(...this.activeWorkers.values())
+          : undefined,
       }],
     };
   }
@@ -984,6 +1012,7 @@ class PoolManager {
       lastCheckedAt: pool?.lastCheckedAt ?? pool?.generatedAt,
       refreshing: Boolean(this.refreshPromise),
       refreshError: this.refreshError,
+      managementNotice: pool?.managementNotice,
       sourceConfigPath: pool?.sourceConfigPath,
       sourceConfigPaths: pool?.sourceConfigPaths,
       entries: publicPoolEntries(pool?.entries ?? []),
@@ -1384,6 +1413,10 @@ async function readJsonl(path: string | undefined, max: number): Promise<FoundCo
 
 async function exists(path: string): Promise<boolean> { try { await access(path); return true; } catch { return false; } }
 function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function requestStartedAt(value: string | undefined): number {
+  const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(parsed) ? parsed : Date.now();
+}
 function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {

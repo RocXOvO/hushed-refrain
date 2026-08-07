@@ -1,5 +1,6 @@
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -7,6 +8,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
 import { spawn, execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import lockfile from "proper-lockfile";
 import { parse, stringify } from "yaml";
 import { EnhancedNcmClient } from "./api";
 import {
@@ -55,8 +57,21 @@ export interface ProxyPoolFile {
   sourceConfigPaths?: string[];
   mihomoConfigPath?: string;
   mihomoExecutablePath?: string;
+  generationId?: string;
+  listenerPorts?: number[];
+  controllerPort?: number;
+  controllerSecret?: string;
   pid?: number;
+  managementNotice?: string;
   entries: ProxyPoolEntry[];
+}
+
+export type ManagedMihomoProcessIdentity = "not-running" | "verified" | "mismatch" | "unavailable";
+
+export interface ManagedPortPlan {
+  basePort: number;
+  listenerPorts: number[];
+  controllerPort: number;
 }
 
 export interface ClashVergeDiscovery {
@@ -78,6 +93,13 @@ export interface ClashVergeProfile {
 }
 
 export async function startMihomoPool(
+  options: MihomoPoolOptions,
+): Promise<ProxyPoolFile> {
+  await mkdir(options.workDirectory, { recursive: true });
+  return withPoolBuildLock(options.poolPath, () => startMihomoPoolGeneration(options));
+}
+
+async function startMihomoPoolGeneration(
   options: MihomoPoolOptions,
 ): Promise<ProxyPoolFile> {
   const sourceConfigPaths = [...new Set(options.sourceConfigPaths)];
@@ -110,17 +132,27 @@ export async function startMihomoPool(
     throw new Error(`Only ${candidates.length} proxy candidates are available.`);
   }
 
-  await mkdir(options.workDirectory, { recursive: true });
-  const configPath = join(options.workDirectory, "config.yaml");
-  const stagingConfigPath = join(options.workDirectory, "config.next.yaml");
-  const logPath = join(options.workDirectory, "mihomo.log");
+  const previous = await readProxyPool(options.poolPath);
+  const previousIdentity = previous?.pid
+    ? await managedMihomoProcessIdentityAsync(previous)
+    : "not-running";
+  // A new generation always starts beside the old one on a free port range.
+  // Only after the new listeners and exits pass verification is the pool file
+  // switched atomically. An uninspectable or reused old PID is never killed.
+  const portPlan = await selectManagedPortPlan(options, candidates.length);
+  const generationId = `${Date.now()}-${randomUUID().slice(0, 8)}`;
+  const generationDirectory = join(options.workDirectory, "generations", generationId);
+  const configPath = join(generationDirectory, "config.yaml");
+  const logPath = join(generationDirectory, "mihomo.log");
+  const controllerSecret = randomUUID();
+  await mkdir(generationDirectory, { recursive: true });
   const config = {
     "log-level": "warning",
     "allow-lan": false,
     ipv6: false,
     mode: "rule",
-    "external-controller": `127.0.0.1:${options.controllerPort}`,
-    secret: "ncm-pool-local",
+    "external-controller": `127.0.0.1:${portPlan.controllerPort}`,
+    secret: controllerSecret,
     tun: { enable: false },
     dns: { enable: false },
     proxies: candidates,
@@ -128,38 +160,27 @@ export async function startMihomoPool(
       name: `ncm-pool-${index + 1}`,
       type: "mixed",
       listen: "127.0.0.1",
-      port: options.basePort + index,
+      port: portPlan.listenerPorts[index],
       proxy: String(proxy.name),
       users: [],
     })),
     rules: ["MATCH,DIRECT"],
   };
   const serializedConfig = stringify(config, { lineWidth: 0 });
-  await writeFile(stagingConfigPath, serializedConfig, "utf8");
-  if (process.platform !== "win32") await chmod(stagingConfigPath, 0o600);
+  await writeFile(configPath, serializedConfig, "utf8");
+  if (process.platform !== "win32") await chmod(configPath, 0o600);
   await execFileAsync(options.mihomoPath, [
     "-t",
     "-d",
-    options.workDirectory,
+    generationDirectory,
     "-f",
-    stagingConfigPath,
+    configPath,
   ], { windowsHide: true, timeout: 30_000 });
-
-  const previous = await readProxyPool(options.poolPath);
-  if (previous?.pid && isProcessAlive(previous.pid)) {
-    if (!managedMihomoProcessAlive(previous)) {
-      throw new Error("现有代理池 PID 的进程身份无法确认，已取消替换以避免误杀。");
-    }
-    process.kill(previous.pid);
-    await waitForProcessExit(previous.pid, 5_000);
-  }
-  await writeFile(configPath, serializedConfig, "utf8");
-  if (process.platform !== "win32") await chmod(configPath, 0o600);
 
   const output = openSync(logPath, "a");
   const child = spawn(options.mihomoPath, [
     "-d",
-    options.workDirectory,
+    generationDirectory,
     "-f",
     configPath,
   ], {
@@ -174,12 +195,12 @@ export async function startMihomoPool(
 
   try {
     await waitForPorts(
-      candidates.map((_, index) => options.basePort + index),
+      portPlan.listenerPorts,
       15_000,
       16,
     );
     const checks = await mapLimit(candidates, 6, async (proxy, index) => {
-      const endpoint = `http://127.0.0.1:${options.basePort + index}`;
+      const endpoint = `http://127.0.0.1:${portPlan.listenerPorts[index]}`;
       const startedAt = Date.now();
       try {
         const egressIp = await verificationGate.run(() => fetchEgressIp(endpoint, 12_000));
@@ -233,6 +254,22 @@ export async function startMihomoPool(
         "为避免同网段出口集中触发风控，已取消构建；请增加来自不同地区或服务商的节点。",
       );
     }
+    if (!isProcessAlive(child.pid)) {
+      throw new Error("新代理池进程在验证完成后意外退出，未切换当前代理池。");
+    }
+    const newIdentity = await managedMihomoProcessIdentityAsync({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      source: "clash-verge",
+      active: true,
+      mihomoConfigPath: configPath,
+      mihomoExecutablePath: options.mihomoPath,
+      pid: child.pid,
+      entries: distinct,
+    });
+    if (newIdentity === "not-running" || newIdentity === "mismatch") {
+      throw new Error("新代理池进程身份验证失败，未切换当前代理池。");
+    }
     const generatedAt = new Date().toISOString();
     const pool: ProxyPoolFile = {
       version: 1,
@@ -244,25 +281,87 @@ export async function startMihomoPool(
       sourceConfigPaths,
       mihomoConfigPath: configPath,
       mihomoExecutablePath: options.mihomoPath,
+      generationId,
+      listenerPorts: portPlan.listenerPorts,
+      controllerPort: portPlan.controllerPort,
+      controllerSecret,
       pid: child.pid,
+      managementNotice: previousIdentity === "unavailable"
+        ? "旧代理池进程身份暂时不可读取；新一代已在独立端口完成验证并接管，旧进程未被结束。"
+        : previousIdentity === "mismatch"
+        ? "检测到已复用或不匹配的旧 PID；未结束该进程，新一代代理池已安全接管。"
+        : undefined,
       entries: distinct,
     };
     await writeProxyPool(options.poolPath, pool);
+    if (previous?.pid && previous.pid !== child.pid) {
+      // The build and network checks above can take tens of seconds. Re-read
+      // ownership immediately before signalling so a reused PID is never
+      // killed based on a stale decision made at build start.
+      const cleanupIdentity = await managedMihomoProcessIdentityAsync(previous);
+      const selectedListenerPorts = distinct.map((entry) => Number(new URL(entry.endpoint).port));
+      if (!await managedGenerationHealthy(child.pid, selectedListenerPorts)) {
+        // The old generation has not been signalled yet and remains the safest
+        // authority. Restore its descriptor before surfacing the failed
+        // handover so a late new-process exit never takes both generations
+        // offline.
+        await writeProxyPool(options.poolPath, previous);
+        throw new Error("新代理池在接管确认期间失去响应；旧代理池已保留并恢复为当前代理池。");
+      }
+      if (cleanupIdentity === "verified") {
+        delete pool.managementNotice;
+        try {
+          process.kill(previous.pid);
+          if (!await waitForProcessExit(previous.pid, 5_000)) {
+            pool.managementNotice = "新一代代理池已接管；旧代理池进程未能及时退出，已保留且不会阻塞当前任务。";
+          }
+        } catch {
+          pool.managementNotice = "新一代代理池已接管；旧代理池进程清理失败，已保留且不会阻塞当前任务。";
+        }
+      } else if (cleanupIdentity === "unavailable") {
+        pool.managementNotice = "旧代理池进程身份暂时不可读取；新一代已在独立端口完成验证并接管，旧进程未被结束。";
+      } else if (cleanupIdentity === "mismatch") {
+        pool.managementNotice = "检测到已复用或不匹配的旧 PID；未结束该进程，新一代代理池已安全接管。";
+      } else {
+        delete pool.managementNotice;
+      }
+      await writeProxyPool(options.poolPath, pool).catch(() => {});
+    }
     return pool;
   } catch (error) {
-    if (isProcessAlive(child.pid)) process.kill(child.pid);
+    if (isProcessAlive(child.pid)) {
+      try {
+        process.kill(child.pid);
+        await waitForProcessExit(child.pid, 2_000).catch(() => false);
+      } catch {
+        // Preserve the build/verification error; cleanup failure is secondary.
+      }
+    }
     throw error;
   }
 }
 
-export async function stopMihomoPool(poolPath: string): Promise<boolean> {
+export async function stopMihomoPool(
+  poolPath: string,
+): Promise<boolean> {
+  return withPoolBuildLock(poolPath, () => stopMihomoPoolUnlocked(poolPath));
+}
+
+async function stopMihomoPoolUnlocked(poolPath: string): Promise<boolean> {
   const pool = await readProxyPool(poolPath);
   if (!pool || !pool.active) return false;
-  if (pool.pid && managedMihomoProcessAlive(pool)) {
+  const identity = await managedMihomoProcessIdentityAsync(pool);
+  if (identity === "verified" && pool.pid) {
     process.kill(pool.pid);
-    await waitForProcessExit(pool.pid, 5_000);
+    if (!await waitForProcessExit(pool.pid, 5_000)) {
+      throw new Error("代理池进程未能在 5 秒内退出，状态保持为运行中。");
+    }
+  } else if (identity === "unavailable") {
+    throw new Error("Windows 暂时无法读取代理池进程命令行，未结束进程也未修改运行状态。");
   }
   pool.active = false;
+  delete pool.pid;
+  delete pool.managementNotice;
   await writeProxyPool(poolPath, pool);
   return true;
 }
@@ -306,6 +405,14 @@ export async function importExternalProxyPool(
   poolPath: string,
   size = 0,
 ): Promise<ProxyPoolFile> {
+  return withPoolBuildLock(poolPath, () => importExternalProxyPoolUnlocked(endpoints, poolPath, size));
+}
+
+async function importExternalProxyPoolUnlocked(
+  endpoints: string[],
+  poolPath: string,
+  size: number,
+): Promise<ProxyPoolFile> {
   const normalized = [...new Set(endpoints.map(normalizeProxyEndpoint))];
   if (normalized.length === 0) {
     throw new Error("At least one HTTP/HTTPS proxy endpoint is required.");
@@ -330,6 +437,7 @@ export async function importExternalProxyPool(
     lastCheckedAt: generatedAt,
     source: "external",
     active: true,
+    generationId: `external-${Date.now()}-${randomUUID().slice(0, 8)}`,
     entries: selected,
   };
   await writeProxyPool(poolPath, pool);
@@ -363,7 +471,8 @@ export function recentlyVerifiedProxyPoolEntries(
   now = Date.now(),
   maximumAgeMs = START_POOL_VERIFICATION_MAX_AGE_MS,
 ): ProxyPoolEntry[] | undefined {
-  if (!proxyPoolStatusRunning(pool) || pool.entries.length === 0) return undefined;
+  const running = pool.source === "external" ? proxyPoolStatusRunning(pool) : proxyPoolRunning(pool);
+  if (!running || pool.entries.length === 0) return undefined;
   const checkedAt = Date.parse(pool.lastCheckedAt ?? pool.generatedAt);
   const age = now - checkedAt;
   if (!Number.isFinite(checkedAt) || age < 0 || age > maximumAgeMs) return undefined;
@@ -378,15 +487,17 @@ export async function refreshProxyPool(
 ): Promise<ProxyPoolFile> {
   const pool = await readProxyPool(poolPath);
   if (!pool) throw new Error("The proxy pool is not active.");
-  const processIdentityVerified = proxyPoolRunning(pool);
-  if (!processIdentityVerified && !proxyPoolStatusRunning(pool)) {
+  if (!proxyPoolStatusRunning(pool)) {
     throw new Error("The proxy pool is not active.");
   }
   const verificationGate = poolVerificationGate();
   const checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) =>
     verificationGate.run(() => verifier(entry.name, entry.endpoint))
   );
-  assertStableFallbackExits(pool, checked, processIdentityVerified);
+  // Background refresh must not synchronously query Windows CIM every minute.
+  // Stable live exits are the authority here; lifecycle code retains the only
+  // permission to signal a PID after its full identity check.
+  assertStableFallbackExits(pool, checked, false);
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
     throw new Error(
@@ -395,21 +506,29 @@ export async function refreshProxyPool(
   }
 
   // Do not let a slow refresh resurrect a stopped pool or overwrite a rebuild.
-  const current = await readProxyPool(poolPath);
-  if (
-    !current ||
-    !proxyPoolStatusRunning(current) ||
-    current.generatedAt !== pool.generatedAt
-  ) {
-    throw new Error("代理池已在复测期间停止或重新构建。");
-  }
-  const refreshed: ProxyPoolFile = {
-    ...current,
-    lastCheckedAt: new Date().toISOString(),
-    entries: distinct,
-  };
-  await writeProxyPool(poolPath, refreshed);
-  return refreshed;
+  return withPoolBuildLock(poolPath, async () => {
+    const current = await readProxyPool(poolPath);
+    if (!current || !proxyPoolStatusRunning(current)) {
+      throw new Error("代理池已在复测期间停止。");
+    }
+    if (proxyPoolGenerationKey(current) !== proxyPoolGenerationKey(pool)) return current;
+    const refreshed: ProxyPoolFile = {
+      ...current,
+      lastCheckedAt: new Date().toISOString(),
+      entries: distinct,
+    };
+    await writeProxyPool(poolPath, refreshed);
+    return refreshed;
+  });
+}
+
+function proxyPoolGenerationKey(pool: ProxyPoolFile): string {
+  return pool.generationId ?? [
+    pool.source,
+    pool.generatedAt,
+    pool.pid ?? "external",
+    pool.mihomoConfigPath ?? "",
+  ].join("\u0000");
 }
 
 function assertStableFallbackExits(
@@ -626,13 +745,44 @@ function isProcessAlive(pid: number): boolean {
 }
 
 function managedMihomoProcessAlive(pool: ProxyPoolFile): boolean {
-  if (!pool.pid || !isProcessAlive(pool.pid) || !pool.mihomoConfigPath) return false;
-  const commandLine = processCommandLine(pool.pid);
-  return commandLine !== undefined && managedMihomoCommandMatches(
+  return managedMihomoProcessIdentity(pool) === "verified";
+}
+
+export function managedMihomoProcessIdentity(
+  pool: ProxyPoolFile,
+): ManagedMihomoProcessIdentity {
+  const alive = pool.pid ? isProcessAlive(pool.pid) : false;
+  return classifyManagedMihomoProcess(
+    pool,
+    alive,
+    pool.pid && alive ? processCommandLine(pool.pid) : undefined,
+  );
+}
+
+async function managedMihomoProcessIdentityAsync(
+  pool: ProxyPoolFile,
+): Promise<ManagedMihomoProcessIdentity> {
+  const alive = pool.pid ? isProcessAlive(pool.pid) : false;
+  return classifyManagedMihomoProcess(
+    pool,
+    alive,
+    pool.pid && alive ? await processCommandLineAsync(pool.pid) : undefined,
+  );
+}
+
+export function classifyManagedMihomoProcess(
+  pool: ProxyPoolFile,
+  alive: boolean,
+  commandLine: string | undefined,
+): ManagedMihomoProcessIdentity {
+  if (!pool.pid || !alive) return "not-running";
+  if (commandLine === undefined) return "unavailable";
+  if (!pool.mihomoConfigPath) return "mismatch";
+  return managedMihomoCommandMatches(
     commandLine,
     pool.mihomoConfigPath,
     pool.mihomoExecutablePath,
-  );
+  ) ? "verified" : "mismatch";
 }
 
 export function managedMihomoCommandMatches(
@@ -654,11 +804,12 @@ function normalizeCommandIdentity(value: string): string {
 }
 
 function processCommandLine(pid: number): string | undefined {
-  try {
-    if (process.platform === "win32") {
+  if (process.platform === "win32") {
+    try {
       // Write the raw string instead of letting PowerShell format it. The
       // default formatter can wrap long AppData paths, making a valid managed
-      // Mihomo command fail the exact config-path identity check.
+      // Mihomo command fail the exact config-path identity check. Synchronous
+      // callers get only a short hint; lifecycle mutations use the async path.
       const script = `$managed = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($null -ne $managed) { [Console]::Out.Write([string]$managed.CommandLine) }`;
       const output = execFileSync("powershell.exe", [
         "-NoProfile",
@@ -667,7 +818,11 @@ function processCommandLine(pid: number): string | undefined {
         script,
       ], { encoding: "utf8", timeout: 2_000, windowsHide: true });
       return output.trim() || undefined;
+    } catch {
+      return undefined;
     }
+  }
+  try {
     const output = execFileSync("ps", ["-p", String(pid), "-o", "command="], {
       encoding: "utf8",
       timeout: 2_000,
@@ -676,6 +831,118 @@ function processCommandLine(pid: number): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+async function processCommandLineAsync(pid: number): Promise<string | undefined> {
+  if (process.platform === "win32") {
+    const script = `$managed = Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\"; if ($null -ne $managed) { [Console]::Out.Write([string]$managed.CommandLine) }`;
+    try {
+      const { stdout } = await execFileAsync("powershell.exe", [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        script,
+      ], { encoding: "utf8", timeout: 6_000, windowsHide: true });
+      return stdout.trim() || undefined;
+    } catch {
+      try {
+        const { stdout } = await execFileAsync("wmic.exe", [
+          "process",
+          "where",
+          `ProcessId=${pid}`,
+          "get",
+          "CommandLine",
+          "/value",
+        ], { encoding: "utf8", timeout: 2_000, windowsHide: true });
+        const line = stdout.split(/\r?\n/).find((value) => value.startsWith("CommandLine="));
+        return line?.slice("CommandLine=".length).trim() || undefined;
+      } catch {
+        return undefined;
+      }
+    }
+  }
+  try {
+    const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      timeout: 2_000,
+    });
+    return stdout.trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function selectManagedPortPlan(
+  options: Pick<MihomoPoolOptions, "basePort" | "controllerPort">,
+  listenerCount: number,
+  portOpen: (port: number) => Promise<boolean> = isLocalPortOpen,
+): Promise<ManagedPortPlan> {
+  if (!Number.isInteger(listenerCount) || listenerCount < 1) {
+    throw new Error("At least one managed listener port is required.");
+  }
+  const stride = listenerCount + 17;
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const basePort = options.basePort + attempt * stride;
+    const listenerPorts = Array.from({ length: listenerCount }, (_, index) => basePort + index);
+    const controllerPort = attempt === 0 ? options.controllerPort : basePort + listenerCount + 1;
+    if (listenerPorts.at(-1)! > 65_535 || controllerPort > 65_535) break;
+    if (controllerPort >= basePort && controllerPort <= listenerPorts.at(-1)!) continue;
+    const occupied = await openPorts([...listenerPorts, controllerPort], portOpen);
+    if (occupied.length === 0) return { basePort, listenerPorts, controllerPort };
+  }
+  throw new Error("没有找到可用的本地代理监听端口段；请关闭遗留代理进程后重试。");
+}
+
+async function openPorts(
+  ports: readonly number[],
+  portOpen: (port: number) => Promise<boolean> = isLocalPortOpen,
+): Promise<number[]> {
+  const checks = await Promise.all(ports.map(async (port) => ({
+    port,
+    open: await portOpen(port),
+  })));
+  return checks.filter((check) => check.open).map((check) => check.port);
+}
+
+export async function withPoolBuildLock<T>(
+  poolPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  await mkdir(dirname(poolPath), { recursive: true });
+  let release: (() => Promise<void>) | undefined;
+  try {
+    release = await lockfile.lock(poolPath, {
+      realpath: false,
+      retries: 0,
+      stale: 120_000,
+      update: 20_000,
+    });
+    return await operation();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ELOCKED") {
+      throw new Error("另一个客户端正在构建或更新代理池，请等待该操作完成。");
+    }
+    throw error;
+  } finally {
+    await release?.().catch(() => {});
+  }
+}
+
+function isLocalPortOpen(port: number): Promise<boolean> {
+  return new Promise((resolveOpen) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+    const settle = (open: boolean): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolveOpen(open);
+    };
+    socket.setTimeout(300);
+    socket.once("connect", () => settle(true));
+    socket.once("timeout", () => settle(false));
+    socket.once("error", () => settle(false));
+  });
 }
 
 function normalizeProxyEndpoint(value: string): string {
@@ -694,14 +961,24 @@ function isCommandName(path: string): boolean {
 
 async function writeProxyPool(path: string, pool: ProxyPoolFile): Promise<void> {
   await writeAtomicJson(path, pool);
-  if (process.platform !== "win32") await chmod(path, 0o600);
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+export async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (isProcessAlive(pid) && Date.now() < deadline) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
+  return !isProcessAlive(pid);
+}
+
+export async function managedGenerationHealthy(
+  pid: number,
+  listenerPorts: readonly number[],
+  portOpen: (port: number) => Promise<boolean> = isLocalPortOpen,
+): Promise<boolean> {
+  if (!isProcessAlive(pid) || listenerPorts.length === 0) return false;
+  const listening = await openPorts(listenerPorts, portOpen);
+  return listening.length === listenerPorts.length && isProcessAlive(pid);
 }
 
 export function defaultMihomoPoolOptions(projectRoot: string): MihomoPoolOptions {

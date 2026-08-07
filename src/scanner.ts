@@ -169,12 +169,42 @@ export async function runPooledCommentFinder(
 
   let checkpointTail = Promise.resolve();
   let lastCheckpointAt = 0;
-  const checkpoint = async (force = false): Promise<void> => {
+  let lastLiveCheckpointAt = 0;
+  let liveCheckpointTimer: NodeJS.Timeout | undefined;
+  let liveCheckpointDirty = false;
+  const publishLiveCheckpoint = (force: boolean): void => {
     const now = Date.now();
+    if (force) {
+      if (liveCheckpointTimer) clearTimeout(liveCheckpointTimer);
+      liveCheckpointTimer = undefined;
+      liveCheckpointDirty = false;
+      lastLiveCheckpointAt = now;
+      publishCheckpointProgress(options, state);
+      return;
+    }
+    const remaining = 200 - (now - lastLiveCheckpointAt);
+    if (remaining <= 0 && !liveCheckpointTimer) {
+      lastLiveCheckpointAt = now;
+      publishCheckpointProgress(options, state);
+      return;
+    }
+    liveCheckpointDirty = true;
+    if (liveCheckpointTimer) return;
+    liveCheckpointTimer = setTimeout(() => {
+      liveCheckpointTimer = undefined;
+      if (!liveCheckpointDirty) return;
+      liveCheckpointDirty = false;
+      lastLiveCheckpointAt = Date.now();
+      publishCheckpointProgress(options, state);
+    }, Math.max(1, remaining));
+    liveCheckpointTimer.unref?.();
+  };
+  const checkpoint = async (force = false): Promise<void> => {
+    state.requestCount = initialRequests + pooledRequestsUsed(lanes);
+    const now = Date.now();
+    publishLiveCheckpoint(force);
     if (!force && now - lastCheckpointAt < 350) return;
     lastCheckpointAt = now;
-    state.requestCount = initialRequests + pooledRequestsUsed(lanes);
-    publishCheckpointProgress(options, state);
     const snapshot = structuredClone(state);
     checkpointTail = checkpointTail.then(() => saveState(options.statePath, snapshot));
     await checkpointTail;
@@ -355,6 +385,7 @@ export async function runPooledCommentFinder(
         songName: song.name,
         page: requestedPageNo,
         shardId: shard?.id,
+        startedAt: new Date(requestStartedAt).toISOString(),
       };
       publishRequestActivity(options, { ...requestActivity, phase: "start" });
       let page;
