@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { startDashboard, validateClashConfigSelection } from "../src/server";
 import type { ProxyPoolFile } from "../src/mihomo-pool";
@@ -105,7 +105,7 @@ test("validates multiple Clash config selections against one discovery snapshot"
   };
   assert.deepEqual(
     validateClashConfigSelection(["/profiles/a.yaml", "/profiles/b.yaml"], discovery),
-    ["/profiles/a.yaml", "/profiles/b.yaml"],
+    [resolve("/profiles/a.yaml"), resolve("/profiles/b.yaml")],
   );
   assert.throws(
     () => validateClashConfigSelection(["/profiles/a.yaml", "/profiles/nope.yaml"], discovery),
