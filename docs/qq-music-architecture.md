@@ -1,6 +1,6 @@
 # QQ 音乐评论查询架构
 
-本文只描述 `v0.21.0` 源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
+本文只描述 `v0.22.0` 源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
 
 桌面显示品牌为“乐评寻踪 / MUSIC COMMENT TRACE”，`productName` 为“乐评寻踪”；这不改变 QQ 数据或升级身份。包名 `ncm-comment-finder`、appId `cn.local.ncm.commentfinder`、仓库 `RocXOvO/ncm-comment-finder`、安装包文件名前缀 `NCM-Comment-Finder` 和持久目录 `appData/ncm-comment-finder` 保持不变。
 
@@ -41,7 +41,17 @@ QQ 音乐首发支持两种任务：
  命中 JSONL write+sync --> 取消屏障 --> 状态提交与 checkpoint
 ```
 
-`EncryptUin` 是不透明作者标识。代码只做完整字符串相等匹配，不尝试解密或反推 QQ 号。任务路径由 canonical `EncryptUin`、模式和 song 模式下的原始十进制 `requestedSongId` 稳定派生。
+扫描主流程始终把 `EncryptUin` 当作不透明作者标识，只做完整字符串相等匹配。任务路径由 canonical `EncryptUin`、模式和 song 模式下的原始十进制 `requestedSongId` 稳定派生；下面的单次身份解析实验不会替换 canonical target、stable task key、generation、状态路径或评论匹配条件。
+
+## EncryptUin 与官方主页单次解析实验
+
+Dashboard 的 QQ 两个任务表单共用“EncryptUin 解析实验”入口。它只接受单次手动输入：裸 EncryptUin、严格允许的 QQ 音乐官方个人主页 URL，或 5..12 / 19 位十进制候选标识。`POST /api/qq/encrypt-uin/decode` 只允许 loopback，请求体是 `{input,proxy?,allowDirect?}`；返回 `{inputKind,resolution,format,identityKind,encryptUin,identifier,maskedIdentifier}`。完整 `identifier` 会存在于 API 响应和 renderer 内存，但前端默认只把 `maskedIdentifier` 写入可见 DOM；只有用户明确点击“显示”或“复制”后，完整值才进入可见 UI 或剪贴板。改变输入、关闭弹窗或离开页面都会清除完整值和相关 DOM。实验不保存历史，不提供批量导入、枚举、爬取或批量反查。
+
+本地解码只支持冻结字符表中的两类严格格式：8/12/16 字符的经典 QQ 短格式必须解码为 5..12 位、非 `0` 开头数字，标为 `QQ号候选`；28 字符格式必须解码为恰好 19 位、非 `0` 开头数字，标为 `QQ音乐微信内部ID（wxuin候选）`。后者不是微信号，公开资料也不提供到 `wxid/openid/unionid` 的转换。逆替换必须是规范标准 Base64 且只产生 ASCII 数字；未知字符、非规范 Base64、32 位新式 ID 和其他 opaque token 全部拒绝。
+
+官方 URL allowlist 固定为 `https://y.qq.com/n/ryqq/profile/<identity>`、`https://y.qq.com/n/ryqq_v2/profile?uin=<identity>` 和 `https://y.qq.com/portal/profile.html?uin=<identity>`。解析器在 WHATWG 规范化前拒绝原始 authority 中的任何端口语义和原始路径中的 dot-segment（含编码变体），不访问 URL、不跟随重定向，并拒绝 HTTP、非精确 `y.qq.com` host、userinfo、fragment、非 profile path、缺失/空/重复 `uin`、任意 `id` 身份参数、额外查询参数和非法百分号编码。URL 中直接携带 EncryptUin 时 `resolution=local`，不获取 lease、Lane 或网络；直接数字或 URL 数字时 `resolution=network`，用户显式点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经 lookup lease、Governor、TransportGate、超时与取消只访问固定 QQ 公开资料端点，获得 canonical EncryptUin 后用同一严格解码器对账。代理池或显式代理存在时联网 fail-closed；只有用户明确 `allowDirect` 才直连，且绝不静默回退。QQ Client 对这些请求设置 `redirect:"error"`，不会访问用户提供的 URL 或跟转到外域/私网。生产扫描使用独立 parser，可安全提取同一 allowlist URL 中的数字或 established opaque EncryptUin，但不要求 opaque 值可被本实验解码。
+
+用户可另行点击“在线正向验证”。loopback-only 的 `POST /api/qq/encrypt-uin/verify` 使用上一步得到的 canonical EncryptUin，分别以原 Token 和解码候选访问官方公开资料，同时比较 canonical EncryptUin、昵称和头像。三项全部一致才是 `match`，任一差异是 `mismatch`，缺失昵称/头像是不可验证的上游响应。响应只返回 `{format,identityKind,status,maskedIdentifier,checks}`，不返回完整候选值。解析和验证都不创建/修改扫描 generation；匹配只证明当次公开响应一致，不证明账号所有权或任何私密数据访问权。完整 URL、EncryptUin、QQ 候选和 19 位内部 ID 都不得进入日志、错误、截图或 Release 说明；测试只用合成数据。
 
 ## 分页与身份不变量
 
@@ -130,4 +140,4 @@ npm run bench:qq
 git diff --check
 ```
 
-专项测试覆盖 Client、状态、writer、Scanner、CLI、代理、TransportGate、benchmark、严格歌曲搜索协议以及共享 QQJobManager 的接口联调。搜索测试必须覆盖空结果、畸形响应、超大字符串 ID、代理失败不直连、取消和 lease 释放。真实 QQ CGI 是非公开且可能变化的上游，低频实网只能作为兼容性观察，不能替代确定性测试。
+专项测试覆盖 Client、状态、writer、Scanner、CLI、代理、TransportGate、benchmark、严格歌曲搜索协议以及共享 QQJobManager 的接口联调。搜索测试必须覆盖空结果、畸形响应、超大字符串 ID、代理失败不直连、取消和 lease 释放。身份解析测试覆盖合成的 8/12/16 和 28 字符向量、QQ/wxuin 掩码、严格 Base64/数字/长度拒绝、三个官方 URL 正例与 host/path/query/encoding 负例、本地零请求、数字单请求、重定向拒绝、loopback 路由、在线三字段 match/mismatch、畸形上游、fail-closed、超时/取消/lease 释放、generation 不变和错误脱敏。真实 QQ CGI 是非公开且可能变化的上游，低频实网只能作为兼容性观察，不能替代确定性测试。

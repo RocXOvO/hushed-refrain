@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { RunCancelled } from "../src/errors";
+import { encodeClassicEncryptUin } from "../src/qq-music/classic-encrypt-uin";
 import {
   isLoopbackAddress,
   NcmSongSearchRouter,
@@ -152,6 +153,11 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
   const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-song-search-"));
   const neteaseCalls: Array<{ query: string; limit: number; proxy?: string }> = [];
   const lookupCalls: string[] = [];
+  const classicIdentifier = "123456789012";
+  const classicEncryptUin = encodeClassicEncryptUin(classicIdentifier);
+  const wechatInternalId = "1150000000000000472";
+  const wechatEncryptUin = "oK6koenzoenzoenzoenzoevloc**";
+  let publicProfileCalls = 0;
   const client: QQMusicPlatformClient = {
     searchSongs: async (query, limit) => [{
       id: "900719925474099312345",
@@ -159,7 +165,24 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
       name: query,
       artists: [String(limit)],
     }],
-    resolveUser: async (input) => ({ input, encryptUin: "canonical-user" }),
+    resolveUser: async (input) => ({
+      input,
+      encryptUin: input === classicIdentifier
+        ? encodeClassicEncryptUin(input)
+        : "canonical-user",
+    }),
+    getPublicUserProfile: async (input) => {
+      publicProfileCalls += 1;
+      const isWechat = input === wechatInternalId || input === wechatEncryptUin;
+      return {
+        input,
+        encryptUin: isWechat ? wechatEncryptUin : classicEncryptUin,
+        nickname: isWechat ? "synthetic-wechat-profile" : "synthetic-qq-profile",
+        avatarUrl: isWechat
+          ? "https://example.invalid/wechat-avatar"
+          : "https://example.invalid/qq-avatar",
+      };
+    },
     getSongInfo: async (songId) => ({ id: songId, name: "song" }),
     getLikedSongsPage: async () => ({ songs: [], hasMore: false, nextOffset: 0 }),
     getNewComments: async () => ({ comments: [], hasMore: false }),
@@ -212,9 +235,151 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
     }],
   });
 
+  const decoded = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encryptUin: classicEncryptUin }),
+  });
+  assert.equal(decoded.status, 200);
+  assert.deepEqual(await decoded.json(), {
+    inputKind: "raw-encrypt-uin",
+    resolution: "local",
+    format: "classic-qq-short",
+    identityKind: "qq-number-candidate",
+    encryptUin: classicEncryptUin,
+    identifier: classicIdentifier,
+    maskedIdentifier: "12****12",
+  });
+
+  const decodedWechat = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encryptUin: wechatEncryptUin }),
+  });
+  assert.equal(decodedWechat.status, 200);
+  assert.deepEqual(await decodedWechat.json(), {
+    inputKind: "raw-encrypt-uin",
+    resolution: "local",
+    format: "wechat-28",
+    identityKind: "wxuin-candidate",
+    encryptUin: wechatEncryptUin,
+    identifier: wechatInternalId,
+    maskedIdentifier: "115***472",
+  });
+  assert.equal(publicProfileCalls, 0);
+
+  const decodedProfileUrl = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      input: `https://y.qq.com/n/ryqq_v2/profile?uin=${encodeURIComponent(classicEncryptUin)}`,
+    }),
+  });
+  assert.equal(decodedProfileUrl.status, 200);
+  assert.equal((await decodedProfileUrl.json() as { resolution: string }).resolution, "local");
+  assert.equal(publicProfileCalls, 0);
+
+  const resolvedNumericProfile = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: wechatInternalId, allowDirect: true }),
+  });
+  assert.equal(resolvedNumericProfile.status, 200);
+  assert.deepEqual(await resolvedNumericProfile.json(), {
+    inputKind: "numeric-identifier",
+    resolution: "network",
+    format: "wechat-28",
+    identityKind: "wxuin-candidate",
+    encryptUin: wechatEncryptUin,
+    identifier: wechatInternalId,
+    maskedIdentifier: "115***472",
+  });
+  assert.equal(publicProfileCalls, 1);
+
+  const verified = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encryptUin: classicEncryptUin, allowDirect: true }),
+  });
+  assert.equal(verified.status, 200);
+  assert.deepEqual(await verified.json(), {
+    format: "classic-qq-short",
+    identityKind: "qq-number-candidate",
+    status: "match",
+    maskedIdentifier: "12****12",
+    checks: { encryptUin: true, nickname: true, avatar: true },
+  });
+
+  const verifiedWechat = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encryptUin: wechatEncryptUin, allowDirect: true }),
+  });
+  assert.equal(verifiedWechat.status, 200);
+  assert.deepEqual(await verifiedWechat.json(), {
+    format: "wechat-28",
+    identityKind: "wxuin-candidate",
+    status: "match",
+    maskedIdentifier: "115***472",
+    checks: { encryptUin: true, nickname: true, avatar: true },
+  });
+
+  const invalidClassic = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encryptUin: "n".repeat(32) }),
+  });
+  assert.equal(invalidClassic.status, 400);
+  const invalidClassicBody = await invalidClassic.json() as { code: string; error: string };
+  assert.equal(invalidClassicBody.code, "unsupported-format");
+  assert.match(invalidClassicBody.error, /不支持此格式/);
+  assert.doesNotMatch(invalidClassicBody.error, /n{8}/);
+
+  const invalidProfileUrl = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: "https://example.invalid/n/ryqq/profile/123456" }),
+  });
+  assert.equal(invalidProfileUrl.status, 400);
+  const invalidProfileBody = await invalidProfileUrl.json() as { code: string; error: string };
+  assert.equal(invalidProfileBody.code, "invalid-profile-url");
+  assert.doesNotMatch(invalidProfileBody.error, /example\.invalid|123456/);
+
+  for (const invalidBody of [null, []]) {
+    const invalidObject = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(invalidBody),
+    });
+    assert.equal(invalidObject.status, 400);
+    assert.match(await invalidObject.text(), /必须是 JSON 对象/);
+  }
+  const conflictingDecode = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ input: classicEncryptUin, encryptUin: wechatEncryptUin }),
+  });
+  assert.equal(conflictingDecode.status, 400);
+  assert.match(await conflictingDecode.text(), /不能同时包含 input 和 encryptUin/);
+
+  const invalidVerifyBody = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "null",
+  });
+  assert.equal(invalidVerifyBody.status, 400);
+  assert.match(await invalidVerifyBody.text(), /必须是 JSON 对象/);
+
   assert.equal((await fetch(`${base}/api/song/search?q=x`)).status, 400);
   assert.equal((await fetch(`${base}/api/song/search?q=valid&limit=11`)).status, 400);
   assert.equal((await fetch(`${base}/api/qq/song/search?q=valid&limit=1`)).status, 409);
+  const unsafeVerify = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ encryptUin: classicEncryptUin }),
+  });
+  assert.equal(unsafeVerify.status, 409);
+  assert.match(await unsafeVerify.text(), /不会回退到本机直连|未检测到可用代理/);
 });
 
 test("aborting an HTTP QQ song search releases the lookup lease for the next query", async (context) => {
@@ -317,11 +482,33 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=43/);
-  assert.match(pageText, /app\.js\?v=49/);
-  assert.match(pageText, /id="platformSwitch"/);
+  assert.match(pageText, /styles\.css\?v=46/);
+  assert.match(pageText, /platform-wave\.js\?v=3/);
+  assert.match(pageText, /app\.js\?v=56/);
+  assert.match(pageText, /id="loginButton"[^>]+aria-label="二维码登录"/);
+  assert.match(pageText, /id="globalPlatformSwitch"[^>]*role="tablist"/);
+  assert.match(pageText, /data-platform-target="netease"[^>]*aria-controls="neteaseWorkbench"/);
+  assert.match(pageText, /data-platform-target="qq"[^>]*aria-controls="qqWorkbench"/);
+  assert.match(pageText, /id="neteaseWorkbench"[^>]*data-workbench="netease"/);
+  assert.match(pageText, /id="qqWorkbench"[^>]*data-workbench="qq"[^>]*hidden[^>]*inert/);
+  assert.match(pageText, /id="neteaseModeSwitch"[^>]*role="radiogroup"/);
+  assert.match(pageText, /name="neteaseMode"[^>]*value="parallel"/);
+  assert.match(pageText, /id="qqModeSwitch"[^>]*role="radiogroup"/);
+  assert.match(pageText, /name="qqMode"[^>]*value="song"/);
+  assert.ok(pageText.indexOf('id="globalPlatformSwitch"') < pageText.indexOf('id="taskSidebar"'));
+  assert.doesNotMatch(pageText, /id="platformSwitch"/);
   assert.match(pageText, /id="qqSongForm"/);
   assert.match(pageText, /id="qqLikesForm"/);
+  assert.match(pageText, /data-open-classic-encrypt-uin/);
+  assert.match(pageText, /id="classicEncryptUinDialog"/);
+  assert.match(pageText, /先判断输入类型/);
+  assert.match(pageText, /EncryptUin \/ QQ音乐个人主页链接 \/ 数字标识/);
+  assert.match(pageText, /32 位新式 ID/);
+  assert.match(pageText, /完整候选标识属于个人标识符/);
+  assert.match(pageText, /代理池或显式代理存在时请求 fail-closed/);
+  assert.match(pageText, /显示完整标识/);
+  assert.match(pageText, /复制完整标识/);
+  assert.match(pageText, /不会批量导入、枚举或反查/);
   assert.match(pageText, /name="pageSize"[^>]*max="25"[^>]*value="25"/);
   assert.match(pageText, /name="likedPageSize"[^>]*max="500"[^>]*value="500"/);
   assert.match(pageText, /QQ 音乐按实际出口和总工作线程上限设置独立聚合保护/);
@@ -336,6 +523,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="settlementCoverage"/);
   assert.match(pageText, /id="speedMetric"/);
   assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(pageText, /class="pool-source-switch segmented two"[^>]*role="radiogroup"[^>]*aria-label="代理池来源"/);
   assert.doesNotMatch(pageText, /id="songProgressBar"/);
   assert.match(pageText, /主机保护/);
   assert.match(pageText, /允许本机直连/);
@@ -367,6 +555,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /startSubmissionBusy \|\| qqLookupBusy \|\| Boolean\(activeTaskMode\)/);
   assert.match(appText, /activateNavigation/);
   assert.match(appText, /syncToolbarContext/);
+  assert.match(appText, /"QQ 目标已填写"/);
+  assert.match(appText, /job\?\.targetLabel/);
+  assert.doesNotMatch(appText, /`QQ \$\{target\}`/);
   assert.match(appText, /visibleResultOrder/);
   assert.match(appText, /resultGenerations/);
   assert.match(appText, /"qq:song"/);
@@ -410,18 +601,62 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /inspectorBody\.inert/);
   assert.match(appText, /\/api\/song\/search/);
   assert.match(appText, /\/api\/qq\/song\/search/);
+  assert.match(appText, /\/api\/qq\/encrypt-uin\/decode/);
+  assert.match(appText, /\/api\/qq\/encrypt-uin\/verify/);
+  assert.match(appText, /"QQ号候选"/);
+  assert.match(appText, /"QQ音乐微信内部ID（wxuin候选）"/);
+  assert.match(appText, /不是微信号，也不能公开转换为微信号/);
+  assert.match(appText, /decoded\.identifier/);
+  assert.match(appText, /decoded\.maskedIdentifier/);
+  assert.doesNotMatch(appText, /decoded\.qq|decoded\.maskedQq|classicMaskedQq/);
+  assert.match(appText, /navigator\.clipboard\.writeText/);
+  assert.match(appText, /qqLookupControllers\.add\(controller\)/);
+  assert.match(appText, /classicVerificationController\?\.abort\(\)/);
+  assert.match(appText, /window\.addEventListener\("pagehide", \(\) => \{[\s\S]*el\.classicInput\.value = "";[\s\S]*resetClassicDecodeState\(\)/);
+  assert.match(appText, /if \(classicVerificationController === controller\) \{[\s\S]*classicVerify\.disabled = false/);
   assert.match(appText, /new AbortController\(\)/);
   assert.match(appText, /job\.commentsInspected/);
   assert.match(appText, /function createPlatformTransition/);
-  assert.match(appText, /Math\.min\(1\.5/);
-  assert.match(appText, /width <= 820 \? 76 : 148/);
-  assert.match(appText, /const duration = 660/);
-  assert.match(appText, /const commitPoint = \.48/);
+  assert.match(appText, /PlatformWaveTransition/);
+  assert.match(appText, /platformSwitchVersion/);
+  assert.match(appText, /selectedTabs/);
+  assert.match(appText, /input\[name="neteaseMode"\], input\[name="qqMode"\]/);
+  assert.match(appText, /data-platform-target/);
+  assert.match(appText, /platform-switching/);
   assert.match(appText, /desiredPlatform/);
   assert.match(appText, /platformTransition\?\.cancel\(\)/);
+  assert.match(appText, /function cancelSongLookup/);
+  assert.doesNotMatch(appText, /function cancelSongLookup[\s\S]*?qqLookupControllers\.delete[\s\S]*?function renderSongResults/);
+  assert.match(appText, /modeSwitchVersion \+= 1/);
+  assert.match(appText, /platform === ownerPlatform/);
+  assert.match(appText, /function renderSelectedTaskSnapshot/);
+  assert.match(appText, /resetVisibleLogs\(\);\s*renderSelectedTaskSnapshot\(\);\s*connectResultStream\(\)/);
+  assert.match(appText, /function refreshSelectedTaskPresentation/);
+  assert.match(appText, /!outcome\.committed \|\| platform !== value/);
+  assert.match(appText, /panel\.setAttribute\("aria-hidden", String\(hidden\)\)/);
+  assert.match(appText, /shouldCommit = \(\) => true/);
   assert.doesNotMatch(appText, /当前生效配置（合并）/);
   assert.doesNotMatch(appText, /resultTimestamp/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
+
+  const platformWave = await fetch(`${base}/platform-wave.js`);
+  assert.equal(platformWave.status, 200);
+  const platformWaveText = await platformWave.text();
+  assert.match(platformWaveText, /getContext\("webgl2"/);
+  assert.match(platformWaveText, /gl\.TRIANGLE_STRIP/);
+  assert.match(platformWaveText, /gl\.POINTS/);
+  assert.match(platformWaveText, /const particleCount = innerWidth <= 820 \? 36 : 68/);
+  assert.match(platformWaveText, /Math\.min\(1\.25/);
+  assert.match(platformWaveText, /prefers-reduced-motion: reduce/);
+  assert.match(platformWaveText, /webglcontextlost/);
+  assert.match(platformWaveText, /translate3d\(0,/);
+  assert.match(platformWaveText, /deleteProgram/);
+  assert.match(platformWaveText, /function uniformLocations/);
+  assert.match(platformWaveText, /commitAttempted/);
+  assert.match(platformWaveText, /return immediate\(commit\)/);
+  assert.match(platformWaveText, /function safely/);
+  assert.match(platformWaveText, /powerPreference: "low-power"/);
+  assert.match(platformWaveText, /WEBGL_lose_context/);
 
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
@@ -453,7 +688,16 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /@media \(max-width:\s*1120px\)/);
   assert.match(styleText, /body\[data-platform="qq"\]/);
   assert.match(styleText, /\.platform-transition-canvas/);
+  assert.match(styleText, /\.platform-portal/);
+  assert.match(styleText, /body\[data-platform="qq"\] \.app-shell\s*\{[^}]*grid-template-columns:\s*184px/s);
+  assert.match(styleText, /body\[data-platform="qq"\] \.navigation-label\s*\{[^}]*position:\s*static/s);
+  assert.match(styleText, /\.netease-workbench/);
+  assert.match(styleText, /\.qq-workbench/);
   assert.match(styleText, /\.parameter-help-button/);
+  assert.match(styleText, /\.classic-encrypt-uin-dialog/);
+  assert.match(styleText, /max-height:\s*calc\(100dvh - 24px\)/);
+  assert.match(styleText, /\.classic-encrypt-uin-content\s*\{[^}]*overflow-y:\s*auto/s);
+  assert.match(styleText, /\[data-desktop-platform="win32"\] \.topbar/s);
   assert.match(styleText, /body\.inspector-collapsed \.inspector-heading > div\s*\{[^}]*position:\s*absolute/s);
   assert.match(styleText, /\.inspector-body\s*\{[^}]*transition:/s);
   assert.match(styleText, /prefers-reduced-motion:\s*reduce/);

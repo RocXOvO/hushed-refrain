@@ -6,6 +6,7 @@ export interface QQMusicUser {
   encryptUin: string;
   numericUin?: string;
   nickname?: string;
+  avatarUrl?: string;
 }
 
 export interface QQMusicSong {
@@ -47,6 +48,8 @@ export interface QQMusicPlatformClient {
   close?(): void;
   searchSongs?(query: string, limit: number, signal?: AbortSignal): Promise<SongSearchResult[]>;
   resolveUser(input: string, signal?: AbortSignal): Promise<QQMusicUser>;
+  /** Always performs the public-profile request, including for an EncryptUin input. */
+  getPublicUserProfile?(input: string, signal?: AbortSignal): Promise<QQMusicUser>;
   getSongInfo(songId: string, signal?: AbortSignal): Promise<QQMusicSong>;
   getLikedSongsPage(
     encryptUin: string,

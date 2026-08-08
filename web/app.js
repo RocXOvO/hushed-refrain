@@ -15,6 +15,7 @@ const el = {
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"), exportResults: $("#exportResultsButton"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), parameterHelpDialog: $("#parameterHelpDialog"), parameterHelpTitle: $("#parameterHelpTitle"), parameterHelpDescription: $("#parameterHelpDescription"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
+  classicDialog: $("#classicEncryptUinDialog"), classicInput: $("#classicEncryptUinInput"), classicDecode: $("#classicDecodeButton"), classicResult: $("#classicDecodeResult"), classicIdentityKind: $("#classicIdentityKind"), classicMaskedIdentifier: $("#classicMaskedIdentifier"), classicIdentifierWarning: $("#classicIdentifierWarning"), classicReveal: $("#classicRevealButton"), classicCopy: $("#classicCopyButton"), classicVerify: $("#classicVerifyButton"), classicDecodeStatus: $("#classicDecodeStatus"), classicVerifyStatus: $("#classicVerifyStatus"),
   settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementCoverage: $("#settlementCoverage"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"), settlementFootnote: $("#settlementFootnote"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
@@ -25,7 +26,8 @@ const el = {
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
   activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
-  appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"),
+  appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"), platformSurface: $("#platformSurface"), platformLiveRegion: $("#platformLiveRegion"),
+  neteaseWorkbench: $("#neteaseWorkbench"), qqWorkbench: $("#qqWorkbench"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
 let platform = "netease";
@@ -74,6 +76,10 @@ let activeTaskViewKey;
 let startSubmissionBusy = false;
 let qqLookupBusy = false;
 const qqLookupControllers = new Set();
+let classicDecoded;
+let classicDecodeVersion = 0;
+let classicDecodeController;
+let classicVerificationController;
 let desiredPlatform = platform;
 let platformTransition;
 let runtimeClock;
@@ -81,7 +87,9 @@ let runtimeClockText = "";
 let refreshTimer;
 let authRefreshTimer;
 let modeSwitchVersion = 0;
+let platformSwitchVersion = 0;
 let tabSwitchVersion = 0;
+const selectedTabs = { netease: "results", qq: "results" };
 const settlementPending = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
 const visibleResults = new Map();
 let visibleResultOrder = [];
@@ -156,12 +164,243 @@ async function api(path, options) {
   return payload;
 }
 
+function setClassicStatus(node, message, tone) {
+  node.textContent = message;
+  node.classList.toggle("is-success", tone === "success");
+  node.classList.toggle("is-error", tone === "error");
+}
+
+function classicIdentityLabel(identityKind) {
+  return identityKind === "qq-number-candidate"
+    ? "QQ号候选"
+    : identityKind === "wxuin-candidate"
+    ? "QQ音乐微信内部ID（wxuin候选）"
+    : undefined;
+}
+
+function cancelClassicVerification() {
+  classicVerificationController?.abort();
+}
+
+function cancelClassicResolution() {
+  classicDecodeController?.abort();
+}
+
+function classicResolutionHint(value) {
+  const input = String(value || "").trim();
+  if (!input) return undefined;
+  if (/^\d+$/.test(input)) return "network";
+  try {
+    const url = new URL(input);
+    if (url.protocol !== "https:" || url.hostname !== "y.qq.com") return "local";
+    const pathIdentity = url.pathname.match(/^\/n\/ryqq\/profile\/([^/]+)\/?$/)?.[1];
+    const queryIdentity = /^\/(?:n\/ryqq_v2\/profile\/?|portal\/profile\.html)$/.test(url.pathname)
+      ? url.searchParams.get("uin")
+      : undefined;
+    return /^\d+$/.test(pathIdentity || queryIdentity || "") ? "network" : "local";
+  } catch {
+    return "local";
+  }
+}
+
+function syncClassicDecodeButton() {
+  const hint = classicResolutionHint(el.classicInput.value);
+  el.classicDecode.textContent = hint === "network"
+    ? "联网解析"
+    : hint === "local"
+    ? "本地提取 / 离线解码"
+    : "解析输入";
+}
+
+function resetClassicDecodeState() {
+  classicDecodeVersion += 1;
+  cancelClassicResolution();
+  cancelClassicVerification();
+  classicDecoded = undefined;
+  el.classicDecode.disabled = false;
+  el.classicResult.hidden = true;
+  el.classicIdentityKind.textContent = "解析结果";
+  el.classicMaskedIdentifier.textContent = "-";
+  el.classicReveal.textContent = "显示完整标识";
+  el.classicReveal.disabled = true;
+  el.classicCopy.disabled = true;
+  el.classicVerify.disabled = true;
+  el.classicVerifyStatus.hidden = true;
+  syncClassicDecodeButton();
+  setClassicStatus(el.classicDecodeStatus, "输入只会在你点击后处理一次；数字候选需要联网，EncryptUin 或携带它的官方链接只做本地提取。", undefined);
+}
+
+function openClassicEncryptUinDialog(button) {
+  resetClassicDecodeState();
+  el.classicInput.value = "";
+  el.classicDialog.dataset.formId = button.closest("form")?.id || "qqSongForm";
+  el.classicDialog.showModal();
+  el.classicInput.focus();
+}
+
+function closeClassicEncryptUinDialog() {
+  el.classicDialog.close();
+}
+
+async function decodeClassicEncryptUin() {
+  const sourceInput = el.classicInput.value.trim();
+  if (!el.classicInput.reportValidity()) return undefined;
+  const version = ++classicDecodeVersion;
+  const resolutionHint = classicResolutionHint(sourceInput);
+  cancelClassicResolution();
+  const controller = new AbortController();
+  classicDecodeController = controller;
+  qqLookupControllers.add(controller);
+  qqLookupBusy = true;
+  syncTaskStartAvailability();
+  el.classicDecode.disabled = true;
+  setClassicStatus(
+    el.classicDecodeStatus,
+    resolutionHint === "network"
+      ? "正在经当前 QQ 代理配置联网获取 canonical EncryptUin…"
+      : "正在本机提取并离线校验受支持格式…",
+    undefined,
+  );
+  const form = document.getElementById(el.classicDialog.dataset.formId) || el.qqSongForm;
+  const proxy = form.elements.proxy.value.trim();
+  const allowDirect = form.elements.allowDirect.checked;
+  try {
+    const decoded = await api("/api/qq/encrypt-uin/decode", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({ input: sourceInput, proxy, allowDirect }),
+    });
+    if (controller.signal.aborted || version !== classicDecodeVersion || sourceInput !== el.classicInput.value.trim()) return undefined;
+    const identityLabel = classicIdentityLabel(decoded.identityKind);
+    if (!identityLabel
+      || !["classic-qq-short", "wechat-28"].includes(decoded.format)
+      || !["raw-encrypt-uin", "profile-url-encrypt-uin", "numeric-identifier", "profile-url-numeric"].includes(decoded.inputKind)
+      || !["local", "network"].includes(decoded.resolution)
+      || typeof decoded.encryptUin !== "string"
+      || typeof decoded.identifier !== "string"
+      || typeof decoded.maskedIdentifier !== "string") {
+      throw new Error("本地解析响应格式无效。");
+    }
+    classicDecoded = {
+      sourceInput,
+      inputKind: decoded.inputKind,
+      resolution: decoded.resolution,
+      encryptUin: decoded.encryptUin,
+      format: decoded.format,
+      identityKind: decoded.identityKind,
+      identifier: decoded.identifier,
+      maskedIdentifier: decoded.maskedIdentifier,
+    };
+    el.classicIdentityKind.textContent = identityLabel;
+    el.classicMaskedIdentifier.textContent = decoded.maskedIdentifier;
+    el.classicIdentifierWarning.textContent = decoded.identityKind === "wxuin-candidate"
+      ? "这是 QQ 音乐微信内部ID（wxuin候选），不是微信号，也不能公开转换为微信号。完整值属于个人标识符；只有明确显示或复制后才会进入可见界面或剪贴板。在线验证会把原 EncryptUin 与候选 ID 经当前代理发送到 QQ 官方公开资料接口。"
+      : "这是 QQ号候选，不代表账号所有权。完整值属于个人标识符；只有明确显示或复制后才会进入可见界面或剪贴板。在线验证会把原 EncryptUin 与候选 QQ 经当前代理发送到 QQ 官方公开资料接口。";
+    el.classicResult.hidden = false;
+    el.classicReveal.disabled = false;
+    el.classicCopy.disabled = false;
+    el.classicVerify.disabled = false;
+    const completedStage = decoded.resolution === "network"
+      ? "联网解析完成"
+      : decoded.inputKind === "profile-url-encrypt-uin" ? "本地提取与离线解码完成" : "本地离线解码完成";
+    setClassicStatus(el.classicDecodeStatus, `${completedStage}：${identityLabel} ${decoded.maskedIdentifier}。完整值默认保持隐藏。`, "success");
+    return classicDecoded;
+  } catch (error) {
+    if (controller.signal.aborted || version !== classicDecodeVersion) return undefined;
+    classicDecoded = undefined;
+    el.classicResult.hidden = true;
+    const message = String(error.message || "不支持此格式。");
+    setClassicStatus(el.classicDecodeStatus, resolutionHint === "network"
+      ? `联网解析失败：${message}`
+      : message.includes("不支持") ? message : `格式不支持：${message}`, "error");
+    return undefined;
+  } finally {
+    qqLookupControllers.delete(controller);
+    qqLookupBusy = qqLookupControllers.size > 0;
+    if (classicDecodeController === controller) classicDecodeController = undefined;
+    if (version === classicDecodeVersion) el.classicDecode.disabled = false;
+    syncTaskStartAvailability();
+  }
+}
+
+function toggleClassicIdentifierReveal() {
+  if (!classicDecoded || classicDecoded.sourceInput !== el.classicInput.value.trim()) return;
+  const revealed = el.classicMaskedIdentifier.textContent === classicDecoded.identifier;
+  el.classicMaskedIdentifier.textContent = revealed ? classicDecoded.maskedIdentifier : classicDecoded.identifier;
+  el.classicReveal.textContent = revealed ? "显示完整标识" : "隐藏完整标识";
+  if (!revealed) setClassicStatus(el.classicDecodeStatus, `已按你的操作显示${classicIdentityLabel(classicDecoded.identityKind)}完整值；请勿公开传播。`, undefined);
+}
+
+async function copyClassicIdentifier() {
+  if (!classicDecoded || classicDecoded.sourceInput !== el.classicInput.value.trim()) return;
+  try {
+    await navigator.clipboard.writeText(classicDecoded.identifier);
+    toast(`${classicIdentityLabel(classicDecoded.identityKind)}完整值已复制；请妥善处理`);
+  } catch {
+    setClassicStatus(el.classicDecodeStatus, "复制失败；请先点击“显示完整标识”后手动复制。", "error");
+  }
+}
+
+async function verifyClassicEncryptUin() {
+  const decoded = classicDecoded?.sourceInput === el.classicInput.value.trim()
+    ? classicDecoded
+    : await decodeClassicEncryptUin();
+  if (!decoded) return;
+
+  cancelClassicVerification();
+  const controller = new AbortController();
+  classicVerificationController = controller;
+  qqLookupControllers.add(controller);
+  qqLookupBusy = true;
+  syncTaskStartAvailability();
+  el.classicVerify.disabled = true;
+  el.classicVerifyStatus.hidden = false;
+  setClassicStatus(el.classicVerifyStatus, "正在通过当前 QQ 代理配置进行官方正向验证…", undefined);
+  const form = document.getElementById(el.classicDialog.dataset.formId) || el.qqSongForm;
+  const proxy = form.elements.proxy.value.trim();
+  const allowDirect = form.elements.allowDirect.checked;
+  try {
+    const verification = await api("/api/qq/encrypt-uin/verify", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({ encryptUin: decoded.encryptUin, proxy, allowDirect }),
+    });
+    if (controller.signal.aborted
+      || decoded.sourceInput !== el.classicInput.value.trim()
+      || verification.format !== decoded.format
+      || verification.identityKind !== decoded.identityKind
+      || verification.maskedIdentifier !== decoded.maskedIdentifier) return;
+    if (verification.status === "match") {
+      setClassicStatus(el.classicVerifyStatus, "验证匹配：两次官方公开资料响应的 EncryptUin、昵称和头像均一致。", "success");
+    } else if (verification.status === "mismatch") {
+      const failedChecks = [
+        verification.checks?.encryptUin === false ? "EncryptUin" : "",
+        verification.checks?.nickname === false ? "昵称" : "",
+        verification.checks?.avatar === false ? "头像" : "",
+      ].filter(Boolean).join("、");
+      setClassicStatus(el.classicVerifyStatus, `验证不匹配：${failedChecks || "公开身份字段"}不一致，请不要把解析结果当作有效映射。`, "error");
+    } else throw new Error("在线验证响应格式无效。");
+  } catch (error) {
+    if (controller.signal.aborted) return;
+    setClassicStatus(el.classicVerifyStatus, `网络验证失败：${error.message}`, "error");
+  } finally {
+    qqLookupControllers.delete(controller);
+    qqLookupBusy = qqLookupControllers.size > 0;
+    if (classicVerificationController === controller) {
+      classicVerificationController = undefined;
+      if (decoded.sourceInput === el.classicInput.value.trim()) el.classicVerify.disabled = false;
+    }
+    syncTaskStartAvailability();
+  }
+}
+
 function payload(form) {
   const data = new FormData(form);
   return Object.fromEntries([...data.entries()].map(([key, value]) => [key, ["uid", "songId", "target", "proxy"].includes(key) ? String(value).trim() : Number.isNaN(Number(value)) || value === "" ? value : Number(value)]));
 }
 
 async function startParallel() {
+  if (document.body.classList.contains("platform-switching")) return;
   if (!ensureSongSelection(SONG_SEARCHES.netease) || !el.parallelForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
   if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
     toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
@@ -190,6 +429,7 @@ async function startParallel() {
 }
 
 async function startSource(dryRun) {
+  if (document.body.classList.contains("platform-switching")) return;
   if (!el.sourceForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
   if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
     toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
@@ -223,6 +463,7 @@ async function startSource(dryRun) {
 }
 
 async function startQQ(qqMode) {
+  if (document.body.classList.contains("platform-switching")) return;
   if (startSubmissionBusy) return;
   const viewKey = `qq:${qqMode}`;
   const form = TASK_VIEWS[viewKey].form;
@@ -273,6 +514,18 @@ function clearSongResults(search) {
   search.results.hidden = true;
   search.query.setAttribute("aria-expanded", "false");
   search.query.removeAttribute("aria-activedescendant");
+}
+
+function cancelSongLookup(search) {
+  clearTimeout(search?.timer);
+  if (!search) return;
+  search.timer = undefined;
+  search.generation += 1;
+  const controller = search.controller;
+  search.controller = undefined;
+  controller?.abort();
+  clearSongResults(search);
+  search.button.disabled = false;
 }
 
 function renderSongResults(search, songs) {
@@ -1959,9 +2212,16 @@ async function restoreResumeTask() {
 }
 
 async function switchMode(value) {
+  if (document.body.classList.contains("platform-switching")) {
+    configureModeSwitch();
+    return;
+  }
   if (value === mode || !TASK_VIEWS[`${platform}:${value}`]) return;
+  const ownerPlatform = platform;
   const switchVersion = ++modeSwitchVersion;
+  const previousMode = mode;
   const previousForm = currentForm();
+  if (["parallel", "song"].includes(previousMode)) cancelSongLookup(SONG_SEARCHES[ownerPlatform]);
   mode = value;
   selectedModes[platform] = mode;
   document.body.dataset.mode = mode;
@@ -1969,9 +2229,15 @@ async function switchMode(value) {
   syncResultExportAvailability();
   resetVisibleResults();
   resetVisibleLogs();
+  renderSelectedTaskSnapshot();
   connectResultStream();
-  await slideSwap(previousForm, currentForm(), ["source", "likes"].includes(mode) ? 1 : -1);
-  if (switchVersion !== modeSwitchVersion) {
+  const converged = await slideSwap(
+    previousForm,
+    currentForm(),
+    ["source", "likes"].includes(mode) ? 1 : -1,
+    () => switchVersion === modeSwitchVersion && platform === ownerPlatform,
+  );
+  if (!converged || switchVersion !== modeSwitchVersion || platform !== ownerPlatform) {
     syncModeVisibility();
     return;
   }
@@ -1990,18 +2256,28 @@ function syncModeVisibility() {
 }
 
 function configureModeSwitch() {
-  const definitions = platform === "qq"
-    ? [{ value: "song", label: "单曲顺序", icon: "/icons/music-2.svg" }, { value: "likes", label: "公开喜欢", icon: "/icons/heart.svg" }]
-    : [{ value: "parallel", label: "单曲并行", icon: "/icons/gauge.svg" }, { value: "source", label: "用户来源", icon: "/icons/list-music.svg" }];
-  $$("#modeSwitch label").forEach((label, index) => {
-    const definition = definitions[index];
-    const input = label.querySelector('input[name="mode"]');
-    const image = label.querySelector("img");
-    input.value = definition.value;
-    input.checked = definition.value === mode;
-    image.src = definition.icon;
-    image.nextSibling.textContent = definition.label;
-  });
+  $$('input[name="neteaseMode"]').forEach((input) => { input.checked = input.value === selectedModes.netease; });
+  $$('input[name="qqMode"]').forEach((input) => { input.checked = input.value === selectedModes.qq; });
+}
+
+function applyRememberedTaskTab() {
+  const tabName = selectedTabs[platform] || "results";
+  const tabs = $$('.tab');
+  for (const item of tabs) {
+    const active = item.dataset.tab === tabName;
+    item.classList.toggle("active", active);
+    item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
+  }
+  for (const name of ["results", "activity", "logs", "pool", "estimate"]) {
+    const panel = panelForTab(name);
+    if (panel) {
+      const hidden = name !== tabName;
+      panel.hidden = hidden;
+      panel.setAttribute("aria-hidden", String(hidden));
+    }
+  }
+  setActiveNavigation(tabName);
 }
 
 function applyPlatformPresentation() {
@@ -2009,151 +2285,126 @@ function applyPlatformPresentation() {
   document.body.dataset.mode = mode;
   el.platformIdentity.textContent = platform === "qq" ? "QQ MUSIC WORKSPACE" : "NETEASE WORKSPACE";
   el.login.hidden = platform === "qq";
-  for (const input of $$('input[name="platform"]')) input.checked = input.value === platform;
+  for (const item of $$('[data-platform-target]')) {
+    const active = item.dataset.platformTarget === platform;
+    item.classList.toggle("is-active", active);
+    item.setAttribute("aria-selected", String(active));
+    item.tabIndex = active ? 0 : -1;
+  }
+  for (const item of $$('.netease-only')) item.hidden = platform !== "netease";
+  for (const item of $$('.qq-only')) item.hidden = platform !== "qq";
+  for (const workbench of [el.neteaseWorkbench, el.qqWorkbench]) {
+    const active = workbench.dataset.workbench === platform;
+    workbench.hidden = !active;
+    workbench.inert = !active;
+  }
+  const activityLabel = platform === "qq" ? "活动歌曲" : "并行歌曲";
+  const activityNavigation = $('[data-nav-view="activity"]');
+  if (activityNavigation) {
+    activityNavigation.ariaLabel = activityLabel;
+    activityNavigation.title = activityLabel;
+    const label = activityNavigation.querySelector(".navigation-label");
+    if (label) label.textContent = activityLabel;
+  }
   configureModeSwitch();
   syncModeVisibility();
+  applyRememberedTaskTab();
   syncToolbarContext();
   syncResultExportAvailability();
+  el.platformLiveRegion.textContent = platform === "qq" ? "已进入 QQ 音乐工作台" : "已进入网易云音乐工作台";
 }
 
 function createPlatformTransition(targetPlatform, commit) {
-  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
-  if (reducedMotion.matches || document.hidden || typeof HTMLCanvasElement === "undefined") {
-    commit();
-    return { finished: Promise.resolve(true), cancel() {} };
+  const engine = globalThis.PlatformWaveTransition;
+  if (!engine?.create) {
+    let commitError;
+    try { commit(); } catch (error) { commitError = error; }
+    return { finished: Promise.resolve({ committed: !commitError, completed: true, renderer: "none", commitError }), cancel() {} };
   }
-  const canvas = document.createElement("canvas");
-  canvas.className = "platform-transition-canvas";
-  canvas.setAttribute("aria-hidden", "true");
-  const context = canvas.getContext("2d", { alpha: true });
-  if (!context) {
-    commit();
-    return { finished: Promise.resolve(true), cancel() {} };
+  try {
+    return engine.create({
+      sourcePlatform: platform,
+      targetPlatform,
+      motionLayers: $$(".platform-motion-layer"),
+      commit,
+    });
+  } catch {
+    let commitError;
+    try { commit(); } catch (error) { commitError = error; }
+    return { finished: Promise.resolve({ committed: !commitError, completed: true, renderer: "none", commitError }), cancel() {} };
   }
-  const width = Math.max(1, innerWidth);
-  const height = Math.max(1, innerHeight);
-  const dpr = Math.min(1.5, Math.max(1, devicePixelRatio || 1));
-  canvas.width = Math.round(width * dpr);
-  canvas.height = Math.round(height * dpr);
-  context.setTransform(dpr, 0, 0, dpr, 0, 0);
-  document.body.append(canvas);
+}
 
-  const particleCount = width <= 820 ? 76 : 148;
-  const particles = Array.from({ length: particleCount }, () => ({
-    x: -width * (.08 + Math.random() * .42),
-    y: height * (.7 + Math.random() * .55),
-    z: 40 + Math.random() * 520,
-    velocity: .72 + Math.random() * .8,
-    size: 1.1 + Math.random() * 3.1,
-    alpha: .28 + Math.random() * .66,
-    drift: (Math.random() - .5) * 26,
-  }));
-  const targetColor = targetPlatform === "qq" ? [7, 140, 171] : [211, 58, 67];
-  const sourceColor = platform === "qq" ? [7, 140, 171] : [211, 58, 67];
-  const duration = 660;
-  const commitPoint = .48;
-  const startedAt = performance.now();
-  let frame;
-  let settled = false;
-  let committed = false;
-  let finishPromiseResolve;
-  const finished = new Promise((resolve) => { finishPromiseResolve = resolve; });
+function renderSelectedTaskSnapshot() {
+  const viewKey = taskViewKey();
+  const cached = latestJobs[viewKey] ?? (platform === "qq"
+    ? emptyQQSnapshot(mode)
+    : { status: "idle", activeSongs: [], songs: 0, songsProcessed: 0, shards: 0, shardsComplete: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0 });
+  renderedJobSignature = "";
+  if (viewKey === "netease:parallel") renderParallel(cached);
+  else if (viewKey === "netease:source") renderSource(cached);
+  else renderQQ(cached);
+}
 
-  const cleanup = () => {
-    if (frame !== undefined) cancelAnimationFrame(frame);
-    document.removeEventListener("visibilitychange", handleVisibility);
-    reducedMotion.removeEventListener("change", handleMotionPreference);
-    canvas.width = 1;
-    canvas.height = 1;
-    canvas.remove();
-  };
-  const settle = (complete) => {
-    if (settled) return;
-    settled = true;
-    if (complete && !committed) {
-      committed = true;
-      commit();
-    }
-    cleanup();
-    finishPromiseResolve(complete);
-  };
-  const handleVisibility = () => { if (document.hidden) settle(true); };
-  const handleMotionPreference = (event) => { if (event.matches) settle(true); };
-  document.addEventListener("visibilitychange", handleVisibility);
-  reducedMotion.addEventListener("change", handleMotionPreference);
-
-  const draw = (now) => {
-    if (settled) return;
-    const progress = Math.min(1, (now - startedAt) / duration);
-    if (!committed && progress >= commitPoint) {
-      committed = true;
-      commit();
-    }
-    context.clearRect(0, 0, width, height);
-    const envelope = Math.sin(Math.PI * progress);
-    const veil = context.createLinearGradient(0, height, width, 0);
-    veil.addColorStop(0, `rgba(${sourceColor.join(",")},${.09 * envelope})`);
-    veil.addColorStop(.5, `rgba(${targetColor.join(",")},${.15 * envelope})`);
-    veil.addColorStop(1, "rgba(255,255,255,0)");
-    context.fillStyle = veil;
-    context.fillRect(0, 0, width, height);
-    for (const particle of particles) {
-      const depth = 330 / (330 + particle.z);
-      const travel = progress * particle.velocity;
-      const x = particle.x + width * 1.55 * travel + particle.drift * progress;
-      const y = particle.y - height * 1.5 * travel - particle.drift * .35 * progress;
-      const radius = Math.max(.55, particle.size * depth * 1.65);
-      const alpha = particle.alpha * envelope * (.5 + depth * .8);
-      const trail = 18 + 58 * depth;
-      const gradient = context.createLinearGradient(x - trail, y + trail, x, y);
-      gradient.addColorStop(0, `rgba(${targetColor.join(",")},0)`);
-      gradient.addColorStop(1, `rgba(${targetColor.join(",")},${alpha})`);
-      context.beginPath();
-      context.moveTo(x - trail, y + trail);
-      context.lineTo(x, y);
-      context.strokeStyle = gradient;
-      context.lineWidth = Math.max(.6, radius * .7);
-      context.stroke();
-      context.beginPath();
-      context.arc(x, y, radius, 0, Math.PI * 2);
-      context.fillStyle = `rgba(${targetColor.join(",")},${Math.min(1, alpha + .12)})`;
-      context.fill();
-    }
-    if (progress >= 1) settle(true);
-    else frame = requestAnimationFrame(draw);
-  };
-  frame = requestAnimationFrame(draw);
-  return { finished, cancel: () => settle(false) };
+function refreshSelectedTaskPresentation() {
+  knownMatches = -1;
+  void refresh();
+  void refreshResults();
+  if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
+  if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
 }
 
 async function switchPlatform(value) {
   if (!["netease", "qq"].includes(value)) return;
   desiredPlatform = value;
-  const switchVersion = ++modeSwitchVersion;
+  const switchVersion = ++platformSwitchVersion;
+  modeSwitchVersion += 1;
   platformTransition?.cancel();
   platformTransition = undefined;
   if (value === platform) {
     applyPlatformPresentation();
+    renderSelectedTaskSnapshot();
+    connectResultStream();
+    refreshSelectedTaskPresentation();
     return;
   }
   const transition = createPlatformTransition(value, () => {
-    if (switchVersion !== modeSwitchVersion || desiredPlatform !== value) return;
+    if (switchVersion !== platformSwitchVersion || desiredPlatform !== value) return;
+    const restorePlatformFocus = el.taskSidebar.contains(document.activeElement) || document.activeElement === el.login;
+    selectedTabs[platform] = $('.tab.active')?.dataset.tab || "results";
+    cancelSongLookup(SONG_SEARCHES[platform]);
     selectedModes[platform] = mode;
     platform = value;
     mode = selectedModes[platform];
+    modeSwitchVersion += 1;
     applyPlatformPresentation();
     resetVisibleResults();
     resetVisibleLogs();
+    renderSelectedTaskSnapshot();
     connectResultStream();
+    if (restorePlatformFocus) $(`[data-platform-target="${platform}"]`)?.focus({ preventScroll: true });
   });
   platformTransition = transition;
-  const completed = await transition.finished;
+  const outcome = await transition.finished;
   if (platformTransition === transition) platformTransition = undefined;
-  if (!completed || switchVersion !== modeSwitchVersion || desiredPlatform !== value || platform !== value) return;
-  knownMatches = -1;
-  void refresh(); void refreshResults();
-  if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
-  if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
+  if (!outcome.completed || switchVersion !== platformSwitchVersion || desiredPlatform !== value) return;
+  if (!outcome.committed || platform !== value) {
+    try {
+      platform = value;
+      mode = selectedModes[platform];
+      modeSwitchVersion += 1;
+      applyPlatformPresentation();
+      resetVisibleResults();
+      resetVisibleLogs();
+      renderSelectedTaskSnapshot();
+      connectResultStream();
+      toast("平台动画已安全降级，工作台状态已恢复。");
+    } catch {
+      toast("平台切换未能完成，请重试。");
+      return;
+    }
+  }
+  refreshSelectedTaskPresentation();
 }
 
 async function switchToView(viewKey) {
@@ -2182,8 +2433,8 @@ function syncPoolSourceVisibility() {
   el.externalPoolPane.hidden = clash;
   el.externalPoolPane.setAttribute("aria-hidden", String(clash));
 }
-async function slideSwap(outgoing, incoming, direction = 1) {
-  if (outgoing === incoming) return;
+async function slideSwap(outgoing, incoming, direction = 1, shouldCommit = () => true) {
+  if (outgoing === incoming) return true;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
   if (!reduced && !outgoing.hidden) {
     await playMotion(outgoing, [
@@ -2191,12 +2442,14 @@ async function slideSwap(outgoing, incoming, direction = 1) {
       { opacity: 0, transform: `translateX(${-18 * direction}px)` },
     ], 170, "cubic-bezier(.4,0,.2,1)");
   }
+  if (!shouldCommit()) return false;
   outgoing.hidden = true; outgoing.setAttribute("aria-hidden", "true");
   incoming.hidden = false; incoming.setAttribute("aria-hidden", "false");
   if (!reduced) void playMotion(incoming, [
     { opacity: 0, transform: `translateX(${18 * direction}px)` },
     { opacity: 1, transform: "translateX(0)" },
   ], 240, "cubic-bezier(.2,.8,.2,1)");
+  return true;
 }
 async function playMotion(element, frames, duration, easing) {
   if (typeof element.animate === "function") {
@@ -2291,6 +2544,14 @@ function selectedTaskLaneCount(workersPerLane) {
   const requested = Math.max(0, Number(el.exitLimit.value || 0));
   return Math.min(poolLaneCount, requested > 0 ? requested : poolLaneCount);
 }
+function qqToolbarTargetLabel(viewKey, rawTarget) {
+  const job = latestJobs[viewKey];
+  const locallyStarted = localRequestedTargets[viewKey];
+  const managerOwnsVisibleTarget = activeTaskViewKey === viewKey
+    || (job?.id && locallyStarted?.jobId === String(job.id) && locallyStarted.value === rawTarget);
+  if (managerOwnsVisibleTarget && job?.targetLabel) return `QQ ${job.targetLabel}`;
+  return rawTarget ? "QQ 目标已填写" : "QQ 目标待填写";
+}
 function syncToolbarContext() {
   const view = currentView();
   const form = view.form;
@@ -2302,7 +2563,9 @@ function syncToolbarContext() {
   const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
   const actualWorkers = mode === "song" ? 1 : Math.min(lanes * workers, hostConcurrency);
   const laneMode = Number(el.exitLimit.value || 0) > 0 ? "手动" : "自动";
-  el.toolbarUid.textContent = target ? (platform === "qq" ? `QQ ${target}` : `UID ${target}`) : platform === "qq" ? "QQ 目标待填写" : "UID 待填写";
+  el.toolbarUid.textContent = platform === "qq"
+    ? qqToolbarTargetLabel(taskViewKey(), target)
+    : target ? `UID ${target}` : "UID 待填写";
   el.toolbarMode.textContent = mode === "parallel"
     ? "单曲并行"
     : mode === "source"
@@ -2478,9 +2741,27 @@ el.estimateButton.addEventListener("click", () => void refreshEstimate());
 allEstimateInputs().forEach((input) => input.addEventListener("input", () => scheduleEstimateRefresh()));
 $$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
 $$('[data-open-uid-help]').forEach((button) => button.addEventListener("click", () => el.uidHelpDialog.showModal()));
+$$('[data-open-classic-encrypt-uin]').forEach((button) => button.addEventListener("click", () => openClassicEncryptUinDialog(button)));
 $$('[data-help-key]').forEach((button) => button.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); openParameterHelp(button.dataset.helpKey); }));
 $("#closeUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
 $("#gotUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
+el.classicInput.addEventListener("input", resetClassicDecodeState);
+el.classicDecode.addEventListener("click", () => void decodeClassicEncryptUin());
+el.classicReveal.addEventListener("click", toggleClassicIdentifierReveal);
+el.classicCopy.addEventListener("click", () => void copyClassicIdentifier());
+el.classicVerify.addEventListener("click", () => void verifyClassicEncryptUin());
+$("#closeClassicEncryptUinButton").addEventListener("click", closeClassicEncryptUinDialog);
+$("#doneClassicEncryptUinButton").addEventListener("click", closeClassicEncryptUinDialog);
+el.classicDialog.addEventListener("close", () => {
+  cancelClassicResolution();
+  cancelClassicVerification();
+  el.classicInput.value = "";
+  resetClassicDecodeState();
+});
+window.addEventListener("pagehide", () => {
+  el.classicInput.value = "";
+  resetClassicDecodeState();
+});
 $("#closeParameterHelpButton").addEventListener("click", () => el.parameterHelpDialog.close());
 $("#gotParameterHelpButton").addEventListener("click", () => el.parameterHelpDialog.close());
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
@@ -2491,8 +2772,23 @@ el.updateButton.addEventListener("click", () => void checkUpdates(true));
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
 $("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
 el.updateDownload.addEventListener("click", (event) => void activateUpdate(event));
-$$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
-$$('input[name="platform"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPlatform(input.value); }));
+$$('input[name="neteaseMode"], input[name="qqMode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
+$$('[data-platform-target]').forEach((item) => {
+  item.addEventListener("click", () => void switchPlatform(item.dataset.platformTarget));
+  item.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const tabs = $$('[data-platform-target]');
+    const index = tabs.indexOf(item);
+    const next = event.key === "Home"
+      ? tabs[0]
+      : event.key === "End"
+      ? tabs.at(-1)
+      : tabs[(index + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length];
+    next.focus();
+    void switchPlatform(next.dataset.platformTarget);
+  });
+});
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
 $$('.tab').forEach((tab) => {
@@ -2556,6 +2852,7 @@ addEventListener("visibilitychange", () => {
 });
 addEventListener("pagehide", () => {
   platformTransition?.cancel();
+  cancelClassicVerification();
   for (const search of Object.values(SONG_SEARCHES)) {
     clearTimeout(search.timer);
     search.controller?.abort();
@@ -2570,6 +2867,7 @@ addEventListener("pagehide", () => {
 
 async function activateTaskTab(tab) {
   const switchVersion = ++tabSwitchVersion;
+  selectedTabs[platform] = tab.dataset.tab;
   setTaskPanelCollapsed(true);
   const current = $('.tab.active');
   if (current === tab) {

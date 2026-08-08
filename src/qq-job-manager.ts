@@ -24,7 +24,14 @@ import {
   runQQMusicScan,
   cancelQQMusicLanes,
   QQMusicTransportGate,
+  ClassicEncryptUinError,
+  decodeClassicEncryptUin,
   normalizeUserInput,
+  parseClassicEncryptUinExperimentInput,
+  type ClassicEncryptUinFormat,
+  type ClassicEncryptUinIdentityKind,
+  type ClassicEncryptUinInputKind,
+  type ClassicEncryptUinResolution,
 } from "./qq-music";
 import {
   DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT,
@@ -193,6 +200,28 @@ export class QQJobManagerError extends Error {
     super(message);
     this.name = "QQJobManagerError";
   }
+}
+
+export interface QQClassicEncryptUinVerification {
+  format: ClassicEncryptUinFormat;
+  identityKind: ClassicEncryptUinIdentityKind;
+  status: "match" | "mismatch";
+  maskedIdentifier: string;
+  checks: {
+    encryptUin: boolean;
+    nickname: boolean;
+    avatar: boolean;
+  };
+}
+
+export interface QQClassicEncryptUinResolution {
+  inputKind: ClassicEncryptUinInputKind;
+  resolution: ClassicEncryptUinResolution;
+  format: ClassicEncryptUinFormat;
+  identityKind: ClassicEncryptUinIdentityKind;
+  encryptUin: string;
+  identifier: string;
+  maskedIdentifier: string;
 }
 
 type MatchSubscriber = (event: QQMatchEvent) => void;
@@ -591,6 +620,119 @@ export class QQJobManager {
       }),
       signal,
     );
+  }
+
+  async verifyClassicEncryptUin(
+    encryptUinInput: unknown,
+    proxyInput?: unknown,
+    allowDirectInput?: unknown,
+    signal?: AbortSignal,
+  ): Promise<QQClassicEncryptUinVerification> {
+    const decoded = decodeClassicEncryptUin(String(encryptUinInput ?? ""));
+    try {
+      const profiles = await this.withLookupLanes(
+        proxyInput,
+        allowDirectInput,
+        async (lanes) => {
+          const readProfile = (input: string, label: string) => executeControlAcrossLanes(
+            lanes,
+            label,
+            (lane) => {
+              if (!lane.client.getPublicUserProfile) {
+                throw new QQJobManagerError(501, "当前 QQ 音乐客户端不支持公开身份验证实验。");
+              }
+              return lane.client.getPublicUserProfile(input, lane.transportGate.signal);
+            },
+          );
+          const original = await readProfile(decoded.encryptUin, "qq_encrypt_uin_verify_original");
+          const decodedIdentifier = await readProfile(decoded.identifier, "qq_encrypt_uin_verify_decoded");
+          return { original, decodedIdentifier };
+        },
+        signal,
+      );
+      const originalEncryptUin = canonicalEncryptUin(profiles.original.encryptUin);
+      const decodedEncryptUin = canonicalEncryptUin(profiles.decodedIdentifier.encryptUin);
+      const originalNickname = verificationProfileField(profiles.original.nickname, "昵称");
+      const decodedNickname = verificationProfileField(profiles.decodedIdentifier.nickname, "昵称");
+      const originalAvatar = verificationProfileField(profiles.original.avatarUrl, "头像");
+      const decodedAvatar = verificationProfileField(profiles.decodedIdentifier.avatarUrl, "头像");
+      const checks = {
+        encryptUin: originalEncryptUin === decoded.encryptUin && decodedEncryptUin === decoded.encryptUin,
+        nickname: originalNickname === decodedNickname,
+        avatar: originalAvatar === decodedAvatar,
+      };
+      return {
+        format: decoded.format,
+        identityKind: decoded.identityKind,
+        status: Object.values(checks).every(Boolean) ? "match" : "mismatch",
+        maskedIdentifier: decoded.maskedIdentifier,
+        checks,
+      };
+    } catch (error) {
+      if (error instanceof ClassicEncryptUinError
+        || error instanceof QQJobManagerError
+        || error instanceof RunCancelled) throw error;
+      if (error instanceof CooldownRequired) {
+        throw new QQJobManagerError(429, "在线验证被 QQ 音乐暂时限流；请稍后重试。");
+      }
+      throw new QQJobManagerError(502, "在线验证请求失败；未从 QQ 音乐收到可比较的官方身份响应。");
+    }
+  }
+
+  async resolveClassicEncryptUinInput(
+    input: unknown,
+    proxyInput?: unknown,
+    allowDirectInput?: unknown,
+    signal?: AbortSignal,
+  ): Promise<QQClassicEncryptUinResolution> {
+    const parsed = parseClassicEncryptUinExperimentInput(String(input ?? ""));
+    if (parsed.resolution === "local") {
+      return {
+        inputKind: parsed.inputKind,
+        resolution: parsed.resolution,
+        ...decodeClassicEncryptUin(parsed.encryptUin),
+      };
+    }
+
+    let profile;
+    try {
+      profile = await this.withLookupLanes(
+        proxyInput,
+        allowDirectInput,
+        (lanes) => executeControlAcrossLanes(
+          lanes,
+          "qq_encrypt_uin_resolve_numeric",
+          (lane) => {
+            if (!lane.client.getPublicUserProfile) {
+              throw new QQJobManagerError(501, "当前 QQ 音乐客户端不支持公开身份解析实验。");
+            }
+            return lane.client.getPublicUserProfile(parsed.identifier, lane.transportGate.signal);
+          },
+        ),
+        signal,
+      );
+    } catch (error) {
+      if (error instanceof QQJobManagerError || error instanceof RunCancelled) throw error;
+      if (error instanceof CooldownRequired) {
+        throw new QQJobManagerError(429, "联网解析被 QQ 音乐暂时限流；请稍后重试。");
+      }
+      throw new QQJobManagerError(502, "联网解析失败；未从 QQ 音乐收到可用的官方公开身份响应。");
+    }
+
+    let decoded;
+    try {
+      decoded = decodeClassicEncryptUin(canonicalEncryptUin(profile.encryptUin));
+    } catch {
+      throw new QQJobManagerError(502, "QQ 音乐返回的 canonical EncryptUin 不属于当前实验支持的格式。");
+    }
+    if (decoded.identifier !== parsed.identifier || decoded.identityKind !== parsed.identityKind) {
+      throw new QQJobManagerError(502, "QQ 音乐公开身份响应与输入候选标识不一致。");
+    }
+    return {
+      inputKind: parsed.inputKind,
+      resolution: parsed.resolution,
+      ...decoded,
+    };
   }
 
   private async withLookupLanes<T>(
@@ -1113,6 +1255,14 @@ function canonicalEncryptUin(value: unknown): string {
     throw new QQJobManagerError(502, "QQ 音乐返回了无效的 EncryptUin。");
   }
   return canonical;
+}
+
+function verificationProfileField(value: unknown, field: string): string {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) {
+    throw new QQJobManagerError(502, `QQ 音乐公开身份响应缺少可验证的${field}。`);
+  }
+  return normalized;
 }
 
 async function abortRace<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {

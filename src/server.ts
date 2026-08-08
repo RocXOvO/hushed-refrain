@@ -16,6 +16,9 @@ import {
 } from "./jsonl-snapshot";
 import { readJsonlTail } from "./jsonl-tail";
 import { PagePerformanceTracker, type PagePerformanceSnapshot } from "./page-performance";
+import {
+  ClassicEncryptUinError,
+} from "./qq-music";
 import { qqMusicTransportProfile } from "./qq-music/transport-gate";
 import {
   QQJobManager,
@@ -1532,8 +1535,14 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
     try { await route(request, response, paths, coordinator, jobs, parallel, qq, pool, auth, userProbes, songSearch, updateChecker, updatePreparation); }
     catch (error) {
       if (response.destroyed) return;
-      const status = error instanceof HttpError || error instanceof QQJobManagerError ? error.status : 500;
-      if (!response.headersSent) json(response, status, { error: message(error) });
+      const classicError = error instanceof ClassicEncryptUinError;
+      const status = error instanceof HttpError || error instanceof QQJobManagerError
+        ? error.status
+        : classicError ? 400 : 500;
+      if (!response.headersSent) json(response, status, {
+        error: message(error),
+        ...(classicError ? { code: error.code } : {}),
+      });
       else if (!response.destroyed) response.end();
     }
   });
@@ -1654,6 +1663,39 @@ async function route(
   if (method === "POST" && url.pathname === "/api/pool/start") return json(response, 202, await pool.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/pool/import") return json(response, 202, await pool.import(await body(request)));
   if (method === "POST" && url.pathname === "/api/pool/stop") return json(response, 200, await pool.stop());
+  if (method === "POST" && url.pathname === "/api/qq/encrypt-uin/decode") {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      throw new HttpError(403, "EncryptUin 解析实验仅允许从本机访问。");
+    }
+    const input = jsonObject(await body(request));
+    if (Object.hasOwn(input, "input") && Object.hasOwn(input, "encryptUin")) {
+      throw new HttpError(400, "请求体不能同时包含 input 和 encryptUin。");
+    }
+    const resolved = await withRequestAbortSignal(request, response, (signal) =>
+      qq.resolveClassicEncryptUinInput(
+        input.input ?? input.encryptUin,
+        input.proxy,
+        input.allowDirect,
+        signal,
+      )
+    );
+    return json(response, 200, resolved);
+  }
+  if (method === "POST" && url.pathname === "/api/qq/encrypt-uin/verify") {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      throw new HttpError(403, "EncryptUin 在线验证仅允许从本机访问。");
+    }
+    const input = jsonObject(await body(request));
+    const verification = await withRequestAbortSignal(request, response, (signal) =>
+      qq.verifyClassicEncryptUin(
+        input.encryptUin,
+        input.proxy,
+        input.allowDirect,
+        signal,
+      )
+    );
+    return json(response, 200, verification);
+  }
   if (method === "GET" && url.pathname === "/api/song") {
     const song = await songSearch.lookup(
       numericId(url.searchParams.get("id"), "歌曲 ID"),
@@ -1866,6 +1908,13 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
   if (chunks.length === 0) return {};
   try { return JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>; }
   catch { throw new HttpError(400, "JSON 格式错误。"); }
+}
+
+function jsonObject(value: unknown): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new HttpError(400, "请求体必须是 JSON 对象。");
+  }
+  return value as Record<string, unknown>;
 }
 
 async function file(response: ServerResponse, path: string, contentType: string, cache: boolean): Promise<void> {

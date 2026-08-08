@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>乐评寻踪</title>
   <link rel="icon" type="image/png" href="/app-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=43">
+  <link rel="stylesheet" href="/styles.css?v=46">
 </head>
 <body class="task-panel-collapsed inspector-collapsed" data-platform="netease" data-mode="parallel">
   <div id="appSplash" class="app-splash" role="status" aria-label="乐评寻踪正在启动">
@@ -15,18 +15,22 @@
     <span class="splash-progress" aria-hidden="true"><i></i></span>
   </div>
 
+  <div id="platformSurface" class="platform-surface">
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark"><img src="/app-icon.png" alt=""></span>
       <span class="brand-copy"><strong>乐评寻踪</strong><small>MUSIC COMMENT TRACE</small></span>
       <span id="platformIdentity" class="ui-version-badge">NETEASE WORKSPACE</span>
     </div>
-    <div class="topbar-context" aria-label="当前工作区"><span class="context-dot"></span><span>本地工作区</span><small>状态自动保存</small></div>
+    <div id="globalPlatformSwitch" class="platform-portal" role="tablist" aria-label="音乐平台工作台">
+      <button id="neteasePlatformTab" class="platform-portal-tab is-active" type="button" role="tab" data-platform-target="netease" aria-selected="true" aria-controls="neteaseWorkbench" tabindex="0"><span class="platform-glyph netease-glyph" aria-hidden="true">N</span><span><strong>网易云音乐</strong><small>分片与来源扫描</small></span></button>
+      <button id="qqPlatformTab" class="platform-portal-tab" type="button" role="tab" data-platform-target="qq" aria-selected="false" aria-controls="qqWorkbench" tabindex="-1"><span class="platform-glyph qq-glyph" aria-hidden="true">Q</span><span><strong>QQ 音乐</strong><small>顺序链与公开喜欢</small></span></button>
+    </div>
     <div class="topbar-end">
       <div class="top-actions">
         <span id="connectionBadge" class="status-badge neutral"><span class="status-dot"></span>本地服务</span>
         <button id="updateButton" class="button ghost update-trigger" type="button" title="检查新版本"><img src="/icons/refresh-cw.svg" alt=""><span id="updateButtonLabel">检查更新</span><i id="updateIndicator" aria-label="有新版本" hidden></i></button>
-        <button id="loginButton" class="button ghost" type="button"><img src="/icons/qr-code.svg" alt=""><span>二维码登录</span></button>
+        <button id="loginButton" class="button ghost" type="button" aria-label="二维码登录"><img src="/icons/qr-code.svg" alt=""><span>二维码登录</span></button>
       </div>
       <div class="window-controls" aria-label="窗口控制">
         <button id="windowMinimizeButton" class="window-control" type="button" title="最小化" aria-label="最小化"><span class="window-control-icon minimize-icon"></span></button>
@@ -52,18 +56,19 @@
     <main class="workspace">
       <aside id="taskSidebar" class="sidebar" aria-label="任务配置">
         <div class="section-heading">
-          <div class="section-heading-copy"><p class="eyebrow">TASK INPUT</p><h1>新建检索</h1><span>配置目标与运行参数</span></div>
+          <div class="section-heading-copy netease-only"><p class="eyebrow">NETEASE TRACE</p><h1>网易云检索任务</h1><span>配置分片、歌曲或用户来源</span></div>
+          <div class="section-heading-copy qq-only" hidden><p class="eyebrow">QQ MUSIC TRACE</p><h1>QQ 音乐检索任务</h1><span>配置顺序评论链或公开喜欢</span></div>
           <button id="taskPanelToggleButton" class="icon-button panel-toggle" type="button" title="收起任务面板" aria-label="收起任务面板"><img src="/icons/panel-left-close.svg" alt=""></button>
         </div>
 
-        <div id="platformSwitch" class="platform-switch segmented two" aria-label="音乐平台">
-          <label><input type="radio" name="platform" value="netease" checked><span><img src="/icons/music-2.svg" alt="">网易云音乐</span></label>
-          <label><input type="radio" name="platform" value="qq"><span><img src="/icons/message-circle.svg" alt="">QQ 音乐</span></label>
+        <div id="neteaseModeSwitch" class="mode-switch segmented two netease-only" role="radiogroup" aria-label="网易云检索模式">
+          <label><input type="radio" name="neteaseMode" value="parallel" checked><span><img src="/icons/gauge.svg" alt="">单曲并行</span></label>
+          <label><input type="radio" name="neteaseMode" value="source"><span><img src="/icons/list-music.svg" alt="">用户来源</span></label>
         </div>
 
-        <div id="modeSwitch" class="mode-switch segmented two" aria-label="检索模式">
-          <label><input type="radio" name="mode" value="parallel" checked><span><img src="/icons/gauge.svg" alt="">单曲并行</span></label>
-          <label><input type="radio" name="mode" value="source"><span><img src="/icons/list-music.svg" alt="">用户来源</span></label>
+        <div id="qqModeSwitch" class="mode-switch segmented two qq-only" role="radiogroup" aria-label="QQ 音乐检索模式" hidden>
+          <label><input type="radio" name="qqMode" value="song" checked><span><img src="/icons/music-2.svg" alt="">单曲顺序</span></label>
+          <label><input type="radio" name="qqMode" value="likes"><span><img src="/icons/heart.svg" alt="">公开喜欢</span></label>
         </div>
 
         <form id="parallelForm" class="control-form mode-panel" aria-hidden="false">
@@ -89,7 +94,7 @@
         </form>
 
         <form id="qqSongForm" class="control-form mode-panel" aria-hidden="true" hidden>
-          <div class="platform-notice"><strong>QQ 音乐公开评论</strong><span>支持 QQ 号、个人主页链接或 EncryptUin。共享代理池未预先验证 QQ 域名，任务请求仍会逐出口 fail-closed。</span></div>
+          <div class="platform-notice"><div class="platform-notice-heading"><strong>QQ 音乐公开评论</strong><button class="field-help-button" type="button" data-open-classic-encrypt-uin>EncryptUin 解析实验</button></div><span>支持 QQ 号、个人主页链接或 EncryptUin。共享代理池未预先验证 QQ 域名，任务请求仍会逐出口 fail-closed。</span></div>
           <div class="field"><div class="field-heading"><label for="qqSongTarget">QQ 目标用户</label><button class="parameter-help-button" type="button" data-help-key="target-qq" aria-label="了解 QQ 目标用户">?</button></div><input id="qqSongTarget" name="target" autocomplete="off" placeholder="QQ 号 / 主页链接 / EncryptUin" required maxlength="512"></div>
           <div class="field song-search" data-song-search="qq"><div class="field-heading"><label for="qqSongQuery">QQ 音乐歌曲</label><button class="parameter-help-button" type="button" data-help-key="song" aria-label="了解歌曲搜索">?</button></div><div class="input-action"><input id="qqSongQuery" type="text" minlength="2" maxlength="80" autocomplete="off" spellcheck="false" placeholder="输入歌名 / 歌手，或粘贴数字 ID" required aria-autocomplete="list" aria-controls="qqSongResults"><button id="qqSongLookupButton" class="icon-button" type="button" title="搜索 QQ 音乐歌曲" aria-label="搜索 QQ 音乐歌曲"><img src="/icons/search.svg" alt=""></button></div><input id="qqSongId" name="songId" type="hidden"><div id="qqSongResults" class="song-search-results" role="listbox" aria-label="QQ 音乐候选歌曲" hidden></div><span id="qqSongPreview" class="field-hint" hidden></span></div>
           <details class="advanced animated-disclosure">
@@ -100,7 +105,7 @@
         </form>
 
         <form id="qqLikesForm" class="control-form mode-panel" aria-hidden="true" hidden>
-          <div class="platform-notice"><strong>QQ 音乐公开“我喜欢”</strong><span>发现公开歌曲后跨歌曲并行。工作线程只增加跨歌曲调度，不缩短单出口请求周期；私密列表暂不支持。</span></div>
+          <div class="platform-notice"><div class="platform-notice-heading"><strong>QQ 音乐公开“我喜欢”</strong><button class="field-help-button" type="button" data-open-classic-encrypt-uin>EncryptUin 解析实验</button></div><span>发现公开歌曲后跨歌曲并行。工作线程只增加跨歌曲调度，不缩短单出口请求周期；私密列表暂不支持。</span></div>
           <div class="field"><div class="field-heading"><label for="qqLikesTarget">QQ 目标用户</label><button class="parameter-help-button" type="button" data-help-key="target-qq" aria-label="了解 QQ 目标用户">?</button></div><input id="qqLikesTarget" name="target" autocomplete="off" placeholder="QQ 号 / 主页链接 / EncryptUin" required maxlength="512"></div>
           <details class="advanced animated-disclosure">
             <summary aria-expanded="false"><img src="/icons/settings-2.svg" alt="">运行参数<span class="summary-hint">高级设置</span></summary>
@@ -110,7 +115,15 @@
         </form>
       </aside>
 
-      <section class="main-pane">
+      <section class="main-pane platform-motion-layer">
+        <section id="neteaseWorkbench" class="workbench-intro netease-workbench" data-workbench="netease" role="tabpanel" aria-labelledby="neteasePlatformTab">
+          <div><p class="eyebrow">NETEASE OPERATIONS</p><h1>高密度评论追踪台</h1><span>分片并行 · 用户来源 · AIMD 主机保护</span></div>
+          <div class="workbench-signal" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+        </section>
+        <section id="qqWorkbench" class="workbench-intro qq-workbench" data-workbench="qq" role="tabpanel" aria-labelledby="qqPlatformTab" hidden inert>
+          <div><p class="eyebrow">QQ MUSIC SEQUENCE LAB</p><h1>评论序列探索舱</h1><span>SeqNo 单链 · 多出口接力 · 公开喜欢并行</span></div>
+          <div class="qq-orbit" aria-hidden="true"><i></i><i></i><i></i><strong>Q</strong></div>
+        </section>
         <div class="task-command-bar">
           <div class="task-header"><button id="taskPanelOpenButton" class="icon-button" type="button" title="打开任务配置" aria-label="打开任务配置"><img src="/icons/panel-left-open.svg" alt=""></button><div><p class="eyebrow">LIVE TASK</p><h2 id="taskTitle">等待任务</h2></div></div>
           <div class="toolbar-context" aria-label="当前任务配置">
@@ -137,7 +150,7 @@
           <div id="taskNote" class="task-note" hidden></div>
         </div>
 
-        <div class="content-header"><div><span class="content-kicker">OUTPUT</span><strong>任务输出</strong></div><span>实时刷新</span></div>
+        <div class="content-header"><div><span class="content-kicker netease-only">NETEASE OUTPUT</span><span class="content-kicker qq-only" hidden>QQ SEQUENCE OUTPUT</span><strong class="netease-only">网易云任务输出</strong><strong class="qq-only" hidden>QQ 音乐任务输出</strong></div><span>实时刷新</span></div>
         <div class="tabs" role="tablist" aria-label="任务视图">
           <button id="resultsTab" class="tab active" type="button" role="tab" data-tab="results" aria-selected="true" aria-controls="resultsPanel" tabindex="0"><img src="/icons/chart-no-axes-column.svg" alt="">实时结果</button>
           <button id="activityTab" class="tab" type="button" role="tab" data-tab="activity" aria-selected="false" aria-controls="activityPanel" tabindex="-1"><img src="/icons/list-music.svg" alt="">并行歌曲</button>
@@ -153,10 +166,10 @@
       </section>
 
       <aside id="runtimeInspector" class="inspector">
-        <div class="inspector-heading"><div><p class="eyebrow">RUNTIME</p><h2>代理与节点</h2></div><button id="inspectorToggleButton" class="icon-button panel-toggle" type="button" title="展开详情" aria-label="展开详情" aria-expanded="false"><img src="/icons/panel-right-close.svg" alt=""></button></div>
+        <div class="inspector-heading"><div class="netease-only"><p class="eyebrow">NETEASE RUNTIME</p><h2>出口与分片节点</h2></div><div class="qq-only" hidden><p class="eyebrow">QQ LANE RUNTIME</p><h2>出口与序列 Lane</h2></div><button id="inspectorToggleButton" class="icon-button panel-toggle" type="button" title="展开详情" aria-label="展开详情" aria-expanded="false"><img src="/icons/panel-right-close.svg" alt=""></button></div>
         <div id="runtimeInspectorBody" class="inspector-body" inert aria-hidden="true"><section class="pool-section shared-pool-section">
           <div class="pool-heading"><div id="poolStateIndicator" class="pool-state-indicator is-offline" role="status" aria-live="polite"><span class="pool-state-led" aria-hidden="true"></span><span class="pool-state-copy"><span class="field-label">多 IP 池</span><strong id="poolStatus">未构建</strong></span></div><button id="poolToggleButton" class="button secondary compact-button" type="button"><img src="/icons/network.svg" alt=""><span>构建</span></button></div>
-          <div class="pool-source-switch segmented two" aria-label="代理池来源"><label><input type="radio" name="poolSource" value="clash-verge" checked><span>Clash Verge</span></label><label><input type="radio" name="poolSource" value="external"><span>其他代理池</span></label></div>
+          <div class="pool-source-switch segmented two" role="radiogroup" aria-label="代理池来源"><label><input type="radio" name="poolSource" value="clash-verge" checked><span>Clash Verge</span></label><label><input type="radio" name="poolSource" value="external"><span>其他代理池</span></label></div>
           <div id="clashPoolPane" class="proxy-source-pane"><div id="clashConfigField" class="field compact clash-config-field" hidden><span class="clash-config-heading"><span>代理配置</span><button id="clashConfigSelectAllButton" type="button">全选</button></span><div id="clashConfigSelect" class="clash-config-choices" role="group" aria-label="Clash Verge 代理配置"></div></div><div class="pool-build-grid"><label class="field compact"><span>独立出口数</span><input id="poolSize" type="number" min="1" max="32" value="8"></label><label class="field compact"><span>候选节点数</span><input id="poolCandidates" type="number" min="1" max="128" value="48"></label></div><p id="poolDiscovery" class="pool-discovery">正在检测 Clash Verge…</p></div>
           <div id="externalPoolPane" class="proxy-source-pane" hidden><label class="field compact"><span>代理地址（每行一个）</span><textarea id="externalProxies" rows="4" placeholder="http://127.0.0.1:17891&#10;http://user:pass@proxy.example:8080"></textarea></label><p class="pool-discovery">支持 HTTP/HTTPS 代理；会先验证出口 IP 和网易云连通性，凭据不会显示在界面中。</p></div>
           <div class="node-list-heading"><span>节点列表</span><small>延迟 / 出口</small></div>
@@ -166,13 +179,17 @@
       </aside>
     </main>
   </div>
+  </div>
+  <div id="platformLiveRegion" class="sr-only" role="status" aria-live="polite"></div>
 
   <dialog id="uidHelpDialog" class="uid-help-dialog"><div class="dialog-heading"><div><p class="eyebrow">USER ID GUIDE</p><h2>如何获取用户 UID</h2></div><button id="closeUidHelpButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="uid-help-content"><p>UID 是网易云音乐用户主页链接里的纯数字编号，不是昵称。</p><ol><li>打开网易云音乐客户端或网页版。</li><li>进入要查找的用户主页，选择“分享”并复制主页链接。</li><li>找到链接中 <code>id=</code> 后面的数字，把它粘贴到 UID 输入框。</li></ol><a class="uid-link-example" href="https://music.163.com/#/user/home?id=123456789" target="_blank" rel="noreferrer"><span><small>示例主页链接</small><code>music.163.com/#/user/home?id=123456789</code></span><img src="/icons/external-link.svg" alt="在浏览器打开"></a><p class="uid-help-note">上面示例中的 UID 是 <strong>123456789</strong>。手机分享出的短链接也可以先在浏览器打开，再从跳转后的用户主页地址中读取。</p><div class="dialog-actions"><button id="gotUidHelpButton" class="button primary" type="button">知道了</button></div></div></dialog>
+  <dialog id="classicEncryptUinDialog" class="classic-encrypt-uin-dialog"><div class="dialog-heading"><div><p class="eyebrow">IDENTITY PARSING EXPERIMENT</p><h2>EncryptUin 解析实验</h2></div><button id="closeClassicEncryptUinButton" class="icon-button" type="button" title="关闭" aria-label="关闭 EncryptUin 解析实验"><img src="/icons/x.svg" alt=""></button></div><div class="classic-encrypt-uin-content"><p class="classic-experiment-note"><strong>先判断输入类型。</strong>裸 EncryptUin 和直接携带 EncryptUin 的官方主页链接只在本地提取、离线解码；十进制 QQ / 内部 ID 候选需要你明确点击后联网获取 canonical EncryptUin。代理池或显式代理存在时请求 fail-closed；只有你明确允许本机直连才会直连。32 位新式 ID、任意外域链接和其他不透明 Token 都会拒绝。</p><label class="field"><span>EncryptUin / QQ音乐个人主页链接 / 数字标识</span><input id="classicEncryptUinInput" type="text" required maxlength="512" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="手动粘贴单个 EncryptUin、官方主页链接或十进制候选标识"></label><div class="classic-experiment-actions"><button id="classicDecodeButton" class="button primary" type="button">解析输入</button></div><section id="classicDecodeResult" class="classic-decode-result" aria-live="polite" hidden><span id="classicIdentityKind">解析结果</span><strong id="classicMaskedIdentifier">-</strong><p id="classicIdentifierWarning">完整候选标识属于个人标识符。API 响应和本页内存会暂时持有完整值，但默认不会显示或写入剪贴板；只有在你明确点击显示或复制后才会进入可见界面或剪贴板。点击在线验证会把 canonical EncryptUin 与解码候选标识按当前联网配置发送到 QQ 官方公开资料接口，并比较 EncryptUin、昵称和头像。</p><div class="classic-result-actions"><button id="classicRevealButton" class="button secondary" type="button" disabled>显示完整标识</button><button id="classicCopyButton" class="button secondary" type="button" disabled>复制完整标识</button><button id="classicVerifyButton" class="button secondary" type="button" disabled>在线正向验证</button></div></section><p id="classicDecodeStatus" class="classic-decode-status" role="status" aria-live="polite">输入只会在你点击后处理一次；不会批量导入、枚举或反查。</p><p id="classicVerifyStatus" class="classic-decode-status" role="status" aria-live="polite" hidden></p><div class="dialog-actions"><button id="doneClassicEncryptUinButton" class="button primary" type="button">完成</button></div></div></dialog>
   <dialog id="qrDialog"><div class="dialog-heading"><h2>二维码登录</h2><button id="closeQrButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="qr-stage"><img id="qrImage" alt="登录二维码"></div><p id="qrStatus">正在生成</p></dialog>
   <dialog id="settlementDialog" class="settlement-dialog"><div class="dialog-heading settlement-heading"><div><p class="eyebrow">TASK SUMMARY</p><h2 id="settlementTitle">检索已结束</h2></div><button id="closeSettlementButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="settlement-content"><div class="settlement-status"><span class="settlement-icon"><img src="/icons/check-circle-2.svg" alt=""></span><div><strong id="settlementStatus">已完成</strong><p id="settlementContext">用户来源扫描</p></div></div><div class="settlement-metrics"><div><span>本轮耗时</span><strong id="settlementElapsed">0秒</strong></div><div><span>累计命中</span><strong id="settlementMatches">0</strong></div><div><span>读取页数</span><strong id="settlementPages">0</strong></div><div><span>累计请求</span><strong id="settlementRequests">0</strong></div></div><p id="settlementCoverage" class="settlement-coverage" hidden></p><p id="settlementNote" class="settlement-note"></p><p class="settlement-log-label">调试日志</p><code id="settlementLogPath" class="settlement-log-path">-</code><p id="settlementFootnote" class="settlement-footnote">命中指标按当前检查点累计；结果页展示已经持久化的累计去重结果；耗时只统计本次任务。</p><div class="dialog-actions"><button id="viewSettlementLogsButton" class="button secondary" type="button">查看日志</button><button id="viewSettlementResultsButton" class="button primary" type="button">查看结果</button></div></div></dialog>
   <dialog id="updateDialog" class="update-dialog"><div class="dialog-heading update-dialog-heading"><div><p class="eyebrow">UPDATE AVAILABLE</p><h2>发现新版本</h2></div><button id="closeUpdateButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="update-content"><div class="update-summary"><span class="update-icon"><img src="/icons/package-open.svg" alt=""></span><div><strong id="updateReleaseName">乐评寻踪</strong><p id="updatePublishedAt">已有新版本可下载</p></div></div><div class="update-version-route"><span id="currentVersionLabel">v0.0.0</span><img src="/icons/arrow-right.svg" alt="升级到"><strong id="latestVersionLabel">v0.0.0</strong></div><div id="updateNotes" class="update-notes">查看 GitHub Release 获取更新内容。</div><p id="updateAsset" class="update-asset"></p><div id="updateProgress" class="update-progress" hidden><div><span id="updateProgressLabel">正在下载安装包</span><strong id="updateProgressPercent">0%</strong></div><span class="update-progress-track"><i id="updateProgressBar"></i></span></div><div class="dialog-actions"><button id="laterUpdateButton" class="button secondary" type="button">稍后提醒</button><a id="downloadUpdateButton" class="button primary" href="#" target="_blank" rel="noreferrer"><img src="/icons/download.svg" alt=""><span>下载更新</span></a></div></div></dialog>
   <dialog id="parameterHelpDialog" class="parameter-help-dialog"><div class="dialog-heading"><div><p class="eyebrow">PARAMETER GUIDE</p><h2 id="parameterHelpTitle">参数说明</h2></div><button id="closeParameterHelpButton" class="icon-button" type="button" title="关闭" aria-label="关闭参数说明"><img src="/icons/x.svg" alt=""></button></div><div class="parameter-help-content"><p id="parameterHelpDescription"></p><div class="dialog-actions"><button id="gotParameterHelpButton" class="button primary" type="button">知道了</button></div></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-      <script src="/app.js?v=49" defer></script>
+  <script src="/platform-wave.js?v=3" defer></script>
+  <script src="/app.js?v=56" defer></script>
 </body>
 </html>

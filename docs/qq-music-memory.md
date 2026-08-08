@@ -2,7 +2,7 @@
 
 本文件只维护当前已实现的 QQ 音乐领域事实、共享边界和安全不变量，不记录旧共享实现、浏览器验收或发布结论。QQ 代码改变身份、上游接口、分页、并发、代理、状态、结果或活动语义时，必须在同一修改阶段更新本文件并删除过时描述。
 
-QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；`v0.21.0` 源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
+QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；`v0.22.0` 源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
 
 本文件和本地测试只记录实现契约，不代表任何 commit、push、Release 或安装包已经存在；发布状态必须以 Git 与 GitHub Release 的实际记录为准。
 
@@ -24,8 +24,7 @@ QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基�
 
 ## 身份、来源与上游接口
 
-- 数字 QQ 号或主页 URL 通过公开资料接口解析为 canonical `EncryptUin`；直接输入 `EncryptUin` 时原样使用。公开资料隐藏必须明确报来源错误，不能伪造空覆盖。
-- `EncryptUin` 是不透明作者标识，不解密、不猜测、不转换回 QQ 号。
+- 生产扫描 parser 与单次解码实验隔离：数字 QQ 或 URL 中的数字通过公开资料接口解析为 canonical `EncryptUin`；直接 opaque EncryptUin 或 URL 中的 opaque EncryptUin 原样作为 canonical 值，不要求可被实验字符表反解。安全与实验细节见“EncryptUin / 官方主页单次解析实验”；实验结果绝不替换扫描 task key、generation、状态/结果路径或作者匹配条件。
 - 评论读取使用 `music.globalComment.CommentRead.GetNewCommentList`。评论 `pageSize` 新任务范围为 `1..25`，默认 `25`。
 - 公开喜欢歌曲使用 `music.srfDissInfo.DissInfo.CgiGetDiss` 的 offset 分页；`likedPageSize` 范围为 `1..500`，默认 `500`。它与评论页大小是两个独立参数。
 - 歌曲详情使用 QQ 歌曲详情接口，只补充 MID、名称和艺人。Client 将十进制 ID 作为字符串 `song_id` 发送并以字符串规范化响应；Scanner 始终以原 `requestedSongId` 建立 song 任务，不能被响应 ID/MID 替换，也不能经 JavaScript `Number` 转换。
@@ -109,6 +108,15 @@ data/logs/qq-<job-id>.jsonl
 - Scanner：`node --import tsx --test test/qq-music-scanner.test.ts`，覆盖单歌 Lane 轮转、likes hard cap 且全部 Lane 可达、task logical page budget、双取消屏障、JSONL 后提交屏障、持久化失败全局暂停、恢复 timer/flush 清理、歌曲元数据生命周期、迁移/恢复和错误分类。
 - 全部 QQ 专项：`node --import tsx --test test/qq*.test.ts`；同时覆盖 CLI、JobManager、离线 benchmark、HTTP/HTTPS 代理、共享 QQ Gate 和 generation。测试数量是易变实现细节，不写入长期记忆。
 
+## EncryptUin / 官方主页单次解析实验
+
+- `src/qq-music/user-input.ts` 拥有生产/共享的官方 URL 严格提取器；`src/qq-music/classic-encrypt-uin.ts` 复用它，并拥有冻结字符表与实验解码/掩码纯函数。实验只接受 8/12/16 字符且解码为 5..12 位非零开头数字的 `qq-number-candidate`，或 28 字符且解码为恰好 19 位非零开头数字的 `wxuin-candidate`。后者 UI 固定显示“QQ音乐微信内部ID（wxuin候选）”，它不是微信号，也没有公开的 wxuin 到用户设置微信号转换。
+- 共享 URL 提取器的 allowlist 只有 `https://y.qq.com/n/ryqq/profile/<identity>`、`https://y.qq.com/n/ryqq_v2/profile?uin=<identity>`、`https://y.qq.com/portal/profile.html?uin=<identity>`。拒绝 HTTP、非精确 host、userinfo、任何显式端口、fragment、非 profile path、缺失/空/重复 `uin`、任意 `id` 或额外查询参数、非法百分号编码、短链和重定向。用户 URL 只被当作本地字符串解析，从不作为 fetch 目标。
+- loopback-only `POST /api/qq/encrypt-uin/decode` 请求 `{input,proxy?,allowDirect?}`，返回 `{inputKind,resolution,format,identityKind,encryptUin,identifier,maskedIdentifier}`。裸/链接 EncryptUin 的 `resolution=local` 不准备 Lane 也不联网；直接/链接数字的 `resolution=network` 在用户点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经 lookup lease、Governor、TransportGate、超时/取消获得 canonical EncryptUin，再与原数字对账。代理池或显式代理存在时请求 fail-closed；只有用户明确 `allowDirect` 才直连，绝不静默回退。QQ Client 设置 `redirect:"error"`，只请求固定 QQ 公开资料端点。
+- Dashboard 的 QQ song/likes 表单共用一个单次手动弹窗。API 响应和 renderer 内存会持有 `identifier`，但初始只把 `maskedIdentifier` 渲染到可见 DOM；完整值只有显式 reveal 或 copy 操作才进入可见 UI 或剪贴板。输入改变、弹窗关闭或 `pagehide` 清除完整值及相关 DOM，并取消在途解析/验证。不得增加批量导入、枚举、爬取、历史记录或批量反查。
+- loopback-only `POST /api/qq/encrypt-uin/verify` 由 `QQJobManager.verifyClassicEncryptUin` 通过原 canonical EncryptUin 和解码候选两次公开资料请求，比较 EncryptUin、昵称和头像；只返回 `{format,identityKind,status,maskedIdentifier,checks}`。解析/验证不创建或改变扫描 generation。格式失败、网络/限流失败、上游不可验证和 mismatch 必须分开呈现；match 不证明所有权或私密数据访问权。
+- 完整 URL、EncryptUin、QQ 候选和 19 位内部 ID 都是隐私边界；不得进入日志、错误、截图、文档示例或 Release 说明。测试只用合成向量，必须覆盖两类掩码、三个 URL 正例与全部 URL 拒绝边界、本地零网络、数字只请求一次、fail-closed、超时/取消/lease 释放、match/mismatch、上游畸形与 generation 不变。
+
 ## 共享 JobManager、HTTP/SSE、Dashboard 与恢复
 
 ### Manager 与快照
@@ -121,17 +129,18 @@ data/logs/qq-<job-id>.jsonl
 
 ### HTTP、generation 与报告
 
-- QQ 路由是 `GET|POST /api/qq/job`、`POST /api/qq/job/stop`、`GET /api/qq/song`、`GET /api/qq/song/search?q=&limit=&proxy=&allowDirect=`、`GET /api/qq/results?jobId=`、`GET /api/qq/results/stream?jobId=` 和 `GET /api/logs?mode=qq&jobId=`。搜索 `q` 为 `2..80` 字符、`limit` 为 `1..10`；没有运行代理池时必须提供显式代理或明确允许直连，池运行时禁止失败回退直连。Results/logs 在异步读取前后复核 generation；SSE 发送 `{ generation, comment }`，不发送无归属的裸评论，并在连接提前 close 时幂等清理订阅。
+- QQ 路由是 `GET|POST /api/qq/job`、`POST /api/qq/job/stop`、`GET /api/qq/song`、`GET /api/qq/song/search?q=&limit=&proxy=&allowDirect=`、`POST /api/qq/encrypt-uin/decode|verify`、`GET /api/qq/results?jobId=`、`GET /api/qq/results/stream?jobId=` 和 `GET /api/logs?mode=qq&jobId=`。搜索 `q` 为 `2..80` 字符、`limit` 为 `1..10`；没有运行代理池时必须提供显式代理或明确允许直连，池运行时禁止失败回退直连。Results/logs 在异步读取前后复核 generation；SSE 发送 `{ generation, comment }`，不发送无归属的裸评论，并在连接提前 close 时幂等清理订阅。
 - 两平台搜索统一返回 `{ platform, query, songs:[{ id, mid?, name, artists, album?, durationMs? }] }`。网易云 `/api/song/search` 使用 `cloudsearch` 单曲类型，并与纯数字 `/api/song` 共用 Router：显式代理优先，运行中的已验证池轮换起点并对瞬态失败最多尝试三个出口，复核/请求失败都不回退直连，未运行池时使用直连。搜索的前端请求世代、旧响应丢弃、Canvas 切换与选中态由 GUI 层负责，后端不把搜索绑定到扫描 generation。
 - `/api/tasks/active` 与 `/api/tasks/stop` 是全局任务状态和停止操作的权威入口；后端按 `TaskCoordinator.activeMode()` 停止实际扫描 Manager。普通 stop/prepare-update 遇 `activeMode=pool` 时不绕过 pool lease，也不调用 `stopMihomoPool`；prepare 屏障继续阻止新任务并返回 active pool 供前端提示等待，用户取消后释放。Windows `installUpdate` 同步返回和异步 error 也都会释放该屏障；升级流程不以当前可见视图推断运行任务。
 - 完整报告使用固定字节截止点的 JSONL 快照，读取前后校验 platform/mode/jobId/canonical target/outputPath。导出 DTO 是 NetEase UID 与 QQ EncryptUin 的判别联合；route、Electron IPC、隐藏窗口 meta 与 fonts-ready 后校验使用同一 generation。旧网易云 `?mode=&jobId=&uid=` 报告 URL 仍归一为 `platform=netease,targetKind=uid`；QQ 报告只从验证过的 MID/十进制 songId 重建官方链接。
 
-### Dashboard 四视图
+### Dashboard 双平台工作区
 
-- 完整 viewKey 固定为 `netease:parallel`、`netease:source`、`qq:song`、`qq:likes`。`TASK_VIEWS`、`latestJobs`、`resultGenerations`、settlement 和 REST/SSE/log/estimate 请求世代都以完整 viewKey 隔离；同一个 QQ Manager 启动新 generation 时，还会失效兄弟 QQ mode 的旧 job/generation/settlement/本地目标，避免跨模式残留。
-- QQ song/likes 分别使用独立表单；评论页默认/最大为 25，likes 来源页默认/最大为 500。song 始终显示一条 SeqNo 链；likes 展示 Manager 计算的有界 Worker 拓扑和相同容量的动态总 Gate，不再显示固定 4 在途。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。
-- Renderer 从 Manager generation 取 canonical target，只用 targetLabel 展示；results/logs/SSE 响应 generation 不匹配时静默丢弃。结果 key 对 QQ 使用 `songId:commentId`；QQ SSE 的路由 jobId 与事件 generation 双重绑定。
-- 前端入口固定使用缓存版本 `styles.css?v=43`、`app.js?v=49`，发布新资源时必须同步递增，避免客户端继续执行旧缓存。
+- 顶栏全局 tabs 在网易云与 QQ 两个隔离工作区间切换，不兼作扫描模式。网易云固定拥有 `parallel/source`，QQ 固定拥有 `song/likes`，并各自记忆 mode 与输出 tab；非活动 workbench 同时 `hidden` 和 `inert`。完整 viewKey 仍为 `netease:parallel`、`netease:source`、`qq:song`、`qq:likes`，jobs、generations、settlement 和 REST/SSE/log/estimate 请求均按完整 key 隔离。
+- 平台切换同时推进 platform/mode 版本，旧 mode 动画和启动响应只能提交到原 owner/view；mode 改变会立即绘制目标 view 的缓存/空快照。离开平台或从 `parallel/song` 切到兄弟 mode 会取消对应歌曲 lookup，但不取消正式扫描；QQ lookup 的 busy 栅栏不在取消时预先释放，而在请求真正结算的异步 `finally` 中移除 controller。完成的平台过渡若回报 `committed=false` 或激活平台不符，上层会同步应用目标平台、展示、快照与 SSE；重选当前平台也会重绘并刷新。Renderer 只接受匹配 generation；QQ 结果 key 为 `songId:commentId`，SSE 由 route jobId 与事件 generation 双重绑定。
+- QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 展示有界 Worker 与同容量动态总 Gate。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。
+- `web/platform-wave.js` 用一次性 WebGL2 浪峰在 760 ms 内从左下扫向右上，46% 时提交工作区，主内容轻微上浮/倾斜并复位。使用 `low-power`，资源上限为 72 段、桌面 68/窄屏 36 粒子、DPR `1..1.25`，无抗锯齿/深度缓冲。context 获取、shader/program/buffer、setup/draw/commit/cleanup 均有异常兜底；局部资源释放后在初始化失败和正常清理路径显式调用 `WEBGL_lose_context`，promise 必定结算。提交前取消不改平台；提交后取消保留新平台，两者均释放 GPU。reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都走即时/安全完成路径。
+- 当前缓存版本是 `styles.css?v=46`、`platform-wave.js?v=3`、`app.js?v=56`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
@@ -141,4 +150,4 @@ data/logs/qq-<job-id>.jsonl
 
 ### 完整交付门禁
 
-运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`npm run desktop:smoke:mac` 与 `git diff --check`，并对四视图做真实浏览器验收。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。
+运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`npm run desktop:smoke:mac` 与 `git diff --check`。浏览器需验收双平台/四 viewKey、mode 目标快照立即切换、重选当前平台、QQ lookup 的 busy 仅由异步 `finally` 释放、平台/模式/启动竞态隔离、旧请求/SSE 抑制、`committed=false` 上层恢复、波浪提交前/后取消、`low-power` 与显式 context 释放、各异常降级、运行中 reduced-motion、矮屏 EncryptUin 弹窗、1121→1120/820 断点、Windows 900 px 登录按钮可访问名称、无横向溢出和 0 console error。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。

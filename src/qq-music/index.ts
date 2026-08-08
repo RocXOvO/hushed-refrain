@@ -5,6 +5,27 @@ export {
   normalizeUserInput,
 } from "./client";
 export { modelQQMusicBenchmark } from "./benchmark";
+export {
+  ClassicEncryptUinError,
+  decodeClassicEncryptUin,
+  encodeClassicEncryptUin,
+  maskMusicIdentifier,
+  parseClassicEncryptUinExperimentInput,
+} from "./classic-encrypt-uin";
+export type {
+  ClassicEncryptUinDecoded,
+  ClassicEncryptUinErrorCode,
+  ClassicEncryptUinExperimentInput,
+  ClassicEncryptUinFormat,
+  ClassicEncryptUinIdentityKind,
+  ClassicEncryptUinInputKind,
+  ClassicEncryptUinResolution,
+} from "./classic-encrypt-uin";
+export {
+  normalizeQQMusicUserInput,
+  parseOfficialQQMusicProfileIdentity,
+} from "./user-input";
+export type { QQMusicNormalizedUserInput } from "./user-input";
 export type {
   QQMusicBenchmarkInput,
   QQMusicBenchmarkMode,

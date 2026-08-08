@@ -1,4 +1,5 @@
 import { zzcSign } from "./sign";
+import { normalizeQQMusicUserInput } from "./user-input";
 import type { SongSearchResult } from "../types";
 import type {
   QQMusicComment,
@@ -146,6 +147,19 @@ export class QQMusicClient implements QQMusicPlatformClient {
       return { input: input.trim(), encryptUin: normalized.value };
     }
 
+    return this.requestPublicUserProfile(input, normalized, signal);
+  }
+
+  async getPublicUserProfile(input: string, signal?: AbortSignal): Promise<QQMusicUser> {
+    return this.requestPublicUserProfile(input, normalizeUserInput(input), signal);
+  }
+
+  private async requestPublicUserProfile(
+    input: string,
+    normalized: ReturnType<typeof normalizeUserInput>,
+    signal?: AbortSignal,
+  ): Promise<QQMusicUser> {
+
     const query = new URLSearchParams({
       hostUin: "0",
       hostuin: normalized.value,
@@ -169,16 +183,19 @@ export class QQMusicClient implements QQMusicPlatformClient {
     if (code !== 0 || !encryptUin) {
       const privacyHint = code === 4000 ? " The user's public playlist profile is hidden." : "";
       throw new QQMusicApiError(
-        `Unable to resolve QQ number ${normalized.value} to EncryptUin.${privacyHint}`,
+        `Unable to resolve the QQ Music public identity to EncryptUin.${privacyHint}`,
         undefined,
         payload,
       );
     }
+    const nickname = text(data.hostname);
+    const avatarUrl = text(data.headpic ?? data.headPic ?? data.avatar ?? data.avatarUrl);
     return {
       input: input.trim(),
-      numericUin: normalized.value,
+      ...(normalized.kind === "numeric-uin" ? { numericUin: normalized.value } : {}),
       encryptUin,
-      nickname: text(data.hostname),
+      ...(nickname ? { nickname } : {}),
+      ...(avatarUrl ? { avatarUrl } : {}),
     };
   }
 
@@ -441,7 +458,11 @@ export class QQMusicClient implements QQMusicPlatformClient {
       controller.abort();
     }, this.timeoutMs);
     try {
-      const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
+      const response = await this.fetchImpl(url, {
+        ...init,
+        redirect: "error",
+        signal: controller.signal,
+      });
       const body = await response.json().catch(() => undefined);
       if (!response.ok) {
         throw new QQMusicApiError(
@@ -482,24 +503,7 @@ export class QQMusicClient implements QQMusicPlatformClient {
 export function normalizeUserInput(input: string):
   | { kind: "numeric-uin"; value: string }
   | { kind: "encrypt-uin"; value: string } {
-  const trimmed = input.trim();
-  if (!trimmed) throw new Error("QQ Music user input is required.");
-  if (/^\d+$/.test(trimmed)) return { kind: "numeric-uin", value: trimmed };
-
-  if (/^https?:\/\//i.test(trimmed)) {
-    const parsed = new URL(trimmed);
-    const fromQuery = parsed.searchParams.get("uin") ?? parsed.searchParams.get("id");
-    const fromPath = parsed.pathname.match(/(?:profile\/|\/)(\d+)\/?$/)?.[1];
-    const fromHash = parsed.hash.match(/(?:^|[?&#])(?:uin|id)=(\d+)/)?.[1];
-    const numericUin = fromQuery ?? fromPath ?? fromHash;
-    if (numericUin && /^\d+$/.test(numericUin)) {
-      return { kind: "numeric-uin", value: numericUin };
-    }
-    throw new Error("The QQ Music profile URL does not contain a numeric uin.");
-  }
-
-  requireEncryptUin(trimmed);
-  return { kind: "encrypt-uin", value: trimmed };
+  return normalizeQQMusicUserInput(input);
 }
 
 function normalizeSong(raw: unknown): QQMusicSong | undefined {

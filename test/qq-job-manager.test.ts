@@ -5,6 +5,8 @@ import { basename, dirname, join } from "node:path";
 import test from "node:test";
 import { RunCancelled } from "../src/errors";
 import { JsonlSnapshotLimitError } from "../src/jsonl-snapshot";
+import { encodeClassicEncryptUin } from "../src/qq-music/classic-encrypt-uin";
+import { normalizeUserInput, QQMusicApiError } from "../src/qq-music/client";
 import { QQMusicProxyError } from "../src/qq-music/proxy-fetch";
 import {
   QQJobManager,
@@ -51,6 +53,37 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
     [fixture.options[1].statePath, fixture.options[1].outputPath],
     firstPaths,
   );
+  fixture.finish(reportFor(fixture.options[1]));
+  await fixture.settled();
+});
+
+test("keeps production opaque EncryptUin URLs independent from the classic decoding experiment", async () => {
+  const canonicalTarget = "opaque-token_32.segment";
+  const fixture = await managerFixture({
+    clientFactory: () => fakeClient({
+      resolveUser: async (input) => {
+        const normalized = normalizeUserInput(input);
+        return {
+          input,
+          encryptUin: normalized.kind === "encrypt-uin" ? normalized.value : "resolved-numeric-user",
+        };
+      },
+    }),
+  });
+
+  const raw = await fixture.manager.start({ mode: "likes", target: canonicalTarget, allowDirect: true });
+  assert.deepEqual(raw.generation?.target, { kind: "encryptUin", value: canonicalTarget });
+  const rawPaths = [fixture.options[0].statePath, fixture.options[0].outputPath];
+  fixture.finish(reportFor(fixture.options[0]));
+  await fixture.settled();
+
+  const profile = await fixture.manager.start({
+    mode: "likes",
+    target: `https://y.qq.com/n/ryqq_v2/profile?uin=${encodeURIComponent(canonicalTarget)}`,
+    allowDirect: true,
+  });
+  assert.deepEqual(profile.generation?.target, { kind: "encryptUin", value: canonicalTarget });
+  assert.deepEqual([fixture.options[1].statePath, fixture.options[1].outputPath], rawPaths);
   fixture.finish(reportFor(fixture.options[1]));
   await fixture.settled();
 });
@@ -113,7 +146,7 @@ test("rejects malformed QQ user targets before creating lanes or clients", async
     clientFactory: () => { clientCalls += 1; return fakeClient(); },
     runner: async () => { runnerCalls += 1; throw new Error("scanner must not start"); },
   });
-  for (const target of ["http://[", "https://y.qq.com/n/ryqq/profile/not-a-number", "<invalid>"]) {
+  for (const target of ["http://[", "https://y.qq.com/n/ryqq/profile/bad$value", "<invalid>"]) {
     await assert.rejects(
       manager.start({ mode: "likes", target, allowDirect: true }),
       (error) => error instanceof QQJobManagerError && error.status === 400,
@@ -322,6 +355,301 @@ test("cancels an in-flight QQ song search and releases its global lease", async 
   await manager.stop();
   await assert.rejects(search, RunCancelled);
   assert.equal(coordinator.isBusy(), false);
+});
+
+test("resolves bare and official-URL EncryptUin locally without preparing a client", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-encrypt-uin-local-"));
+  let clientCreations = 0;
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    clientFactory: () => {
+      clientCreations += 1;
+      return fakeClient();
+    },
+  });
+  const encryptUin = encodeClassicEncryptUin("123456789012");
+  assert.deepEqual(await manager.resolveClassicEncryptUinInput(encryptUin), {
+    inputKind: "raw-encrypt-uin",
+    resolution: "local",
+    format: "classic-qq-short",
+    identityKind: "qq-number-candidate",
+    encryptUin,
+    identifier: "123456789012",
+    maskedIdentifier: "12****12",
+  });
+  assert.deepEqual(
+    await manager.resolveClassicEncryptUinInput(`https://y.qq.com/n/ryqq_v2/profile?uin=${encryptUin}`),
+    {
+      inputKind: "profile-url-encrypt-uin",
+      resolution: "local",
+      format: "classic-qq-short",
+      identityKind: "qq-number-candidate",
+      encryptUin,
+      identifier: "123456789012",
+      maskedIdentifier: "12****12",
+    },
+  );
+  assert.equal(clientCreations, 0);
+});
+
+test("resolves numeric QQ and wxuin candidates through one governed public-profile request", async () => {
+  const qqIdentifier = "123456789012";
+  const qqEncryptUin = encodeClassicEncryptUin(qqIdentifier);
+  const wxIdentifier = "1150000000000000472";
+  const wxEncryptUin = encodeClassicEncryptUin(wxIdentifier);
+  const requested: string[] = [];
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-encrypt-uin-numeric-"));
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (input) => {
+        requested.push(input);
+        return { input, encryptUin: input === qqIdentifier ? qqEncryptUin : wxEncryptUin };
+      },
+    }),
+  });
+  assert.deepEqual(await manager.resolveClassicEncryptUinInput(qqIdentifier, undefined, true), {
+    inputKind: "numeric-identifier",
+    resolution: "network",
+    format: "classic-qq-short",
+    identityKind: "qq-number-candidate",
+    encryptUin: qqEncryptUin,
+    identifier: qqIdentifier,
+    maskedIdentifier: "12****12",
+  });
+  assert.deepEqual(
+    await manager.resolveClassicEncryptUinInput(
+      `https://y.qq.com/portal/profile.html?uin=${wxIdentifier}`,
+      undefined,
+      true,
+    ),
+    {
+      inputKind: "profile-url-numeric",
+      resolution: "network",
+      format: "wechat-28",
+      identityKind: "wxuin-candidate",
+      encryptUin: wxEncryptUin,
+      identifier: wxIdentifier,
+      maskedIdentifier: "115***472",
+    },
+  );
+  assert.deepEqual(requested, [qqIdentifier, wxIdentifier]);
+});
+
+test("cancels numeric EncryptUin resolution and releases its lookup lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-encrypt-uin-resolve-cancel-"));
+  let requestStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { requestStarted = resolve; });
+  const coordinator = new TaskCoordinator();
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (_input, signal) => {
+        requestStarted();
+        return new Promise((_resolve, reject) => {
+          if (signal?.aborted) return reject(new RunCancelled());
+          signal?.addEventListener("abort", () => reject(new RunCancelled()), { once: true });
+        });
+      },
+    }),
+  });
+  const controller = new AbortController();
+  const resolution = manager.resolveClassicEncryptUinInput("123456789012", undefined, true, controller.signal);
+  await started;
+  controller.abort();
+  await assert.rejects(resolution, RunCancelled);
+  assert.equal(coordinator.isBusy(), false);
+});
+
+test("verifies a classic EncryptUin match or mismatch without changing the selected generation", async () => {
+  const classicQQ = "123456789012";
+  const classicEncryptUin = encodeClassicEncryptUin(classicQQ);
+  let profileCalls = 0;
+  const fixture = await managerFixture({
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (input) => {
+        assert.ok(input === classicEncryptUin || input === classicQQ);
+        profileCalls += 1;
+        return {
+          input,
+          encryptUin: profileCalls === 4 ? "different-classic-id" : `  ${classicEncryptUin}  `,
+          nickname: "synthetic-profile",
+          avatarUrl: profileCalls === 4 ? "https://example.invalid/avatar-b" : "https://example.invalid/avatar-a",
+        };
+      },
+    }),
+  });
+  const started = await fixture.manager.start({ mode: "likes", target: "canonical-user", allowDirect: true });
+  fixture.finish(reportFor(fixture.options[0]));
+  await fixture.settled();
+  const before = await fixture.manager.status();
+
+  assert.deepEqual(
+    await fixture.manager.verifyClassicEncryptUin(classicEncryptUin, undefined, true),
+    {
+      format: "classic-qq-short",
+      identityKind: "qq-number-candidate",
+      status: "match",
+      maskedIdentifier: "12****12",
+      checks: { encryptUin: true, nickname: true, avatar: true },
+    },
+  );
+  assert.deepEqual(
+    await fixture.manager.verifyClassicEncryptUin(classicEncryptUin, undefined, true),
+    {
+      format: "classic-qq-short",
+      identityKind: "qq-number-candidate",
+      status: "mismatch",
+      maskedIdentifier: "12****12",
+      checks: { encryptUin: false, nickname: true, avatar: false },
+    },
+  );
+  const after = await fixture.manager.status();
+  assert.equal(after.id, started.id);
+  assert.deepEqual(after.generation, before.generation);
+});
+
+test("verifies a synthetic 28-character WeChat token through both public profile identities", async () => {
+  const internalId = "1150000000000000472";
+  const encryptUin = "oK6koenzoenzoenzoenzoevloc**";
+  const requestedInputs: string[] = [];
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-wechat-verify-"));
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (input) => {
+        requestedInputs.push(input);
+        return {
+          input,
+          encryptUin,
+          nickname: "synthetic-wechat-profile",
+          avatarUrl: "https://example.invalid/wechat-avatar",
+        };
+      },
+    }),
+  });
+
+  assert.deepEqual(await manager.verifyClassicEncryptUin(encryptUin, undefined, true), {
+    format: "wechat-28",
+    identityKind: "wxuin-candidate",
+    status: "match",
+    maskedIdentifier: "115***472",
+    checks: { encryptUin: true, nickname: true, avatar: true },
+  });
+  assert.deepEqual(requestedInputs, [encryptUin, internalId]);
+});
+
+test("rejects a malformed upstream EncryptUin during classic online verification", async () => {
+  const classicEncryptUin = encodeClassicEncryptUin("123456789012");
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-classic-verify-invalid-upstream-"));
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (input) => ({
+        input,
+        encryptUin: "invalid upstream identity!",
+        nickname: "synthetic-profile",
+        avatarUrl: "https://example.invalid/avatar",
+      }),
+    }),
+  });
+
+  await assert.rejects(
+    manager.verifyClassicEncryptUin(classicEncryptUin, undefined, true),
+    (error: unknown) => {
+      assert.ok(error instanceof QQJobManagerError);
+      assert.equal(error.status, 502);
+      assert.match(error.message, /无效的 EncryptUin/);
+      assert.doesNotMatch(error.message, /123456789012/);
+      return true;
+    },
+  );
+});
+
+test("classifies classic EncryptUin online verification upstream failure without leaking identifiers", async () => {
+  const classicQQ = "123456789012";
+  const classicEncryptUin = encodeClassicEncryptUin(classicQQ);
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-classic-verify-failure-"));
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async () => {
+        throw new QQMusicApiError("synthetic upstream rejection", 400, undefined, false);
+      },
+    }),
+  });
+
+  await assert.rejects(
+    manager.verifyClassicEncryptUin(classicEncryptUin, undefined, true),
+    (error: unknown) => {
+      assert.ok(error instanceof QQJobManagerError);
+      assert.equal(error.status, 502);
+      assert.match(error.message, /在线验证请求失败/);
+      assert.doesNotMatch(error.message, new RegExp(`${classicQQ}|${classicEncryptUin}`));
+      return true;
+    },
+  );
+});
+
+test("cancels classic EncryptUin online verification and releases its lookup lease", async () => {
+  const classicEncryptUin = encodeClassicEncryptUin("123456789012");
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-classic-verify-cancel-"));
+  let verificationStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { verificationStarted = resolve; });
+  const coordinator = new TaskCoordinator();
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (_input, signal) => {
+        verificationStarted();
+        return new Promise((_resolve, reject) => {
+          if (signal?.aborted) return reject(new RunCancelled());
+          signal?.addEventListener("abort", () => reject(new RunCancelled()), { once: true });
+        });
+      },
+    }),
+  });
+  const controller = new AbortController();
+  const verification = manager.verifyClassicEncryptUin(
+    classicEncryptUin,
+    undefined,
+    true,
+    controller.signal,
+  );
+  await started;
+  controller.abort();
+  await assert.rejects(verification, RunCancelled);
+  assert.equal(coordinator.isBusy(), false);
+});
+
+test("treats a missing public nickname or avatar as unverifiable instead of mismatch", async () => {
+  const classicEncryptUin = encodeClassicEncryptUin("123456789012");
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-classic-verify-missing-profile-"));
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    clientFactory: () => fakeClient({
+      getPublicUserProfile: async (input) => ({ input, encryptUin: classicEncryptUin }),
+    }),
+  });
+
+  await assert.rejects(
+    manager.verifyClassicEncryptUin(classicEncryptUin, undefined, true),
+    (error: unknown) => {
+      assert.ok(error instanceof QQJobManagerError);
+      assert.equal(error.status, 502);
+      assert.match(error.message, /缺少可验证的昵称/);
+      assert.doesNotMatch(error.message, /123456789012/);
+      return true;
+    },
+  );
 });
 
 test("rotates failed proxy lanes for QQ song search without creating a direct client", async () => {
@@ -661,6 +989,12 @@ function fakeClient(overrides: Partial<QQMusicPlatformClient> = {}): QQMusicPlat
   return {
     searchSongs: async () => [],
     resolveUser: async (input) => ({ input, encryptUin: "canonical-user" }),
+    getPublicUserProfile: async (input) => ({
+      input,
+      encryptUin: "canonical-user",
+      nickname: "synthetic-profile",
+      avatarUrl: "https://example.invalid/avatar",
+    }),
     getSongInfo: async (songId) => ({ id: songId, name: "song" }),
     getLikedSongsPage: async () => ({ songs: [], hasMore: false, nextOffset: 0 }),
     getNewComments: async () => ({ comments: [], hasMore: false }),

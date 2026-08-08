@@ -18,7 +18,29 @@ test("normalizeUserInput accepts QQ numbers, profile URLs, and EncryptUin", () =
     normalizeUserInput("https://y.qq.com/portal/profile.html?uin=778899"),
     { kind: "numeric-uin", value: "778899" },
   );
+  assert.deepEqual(
+    normalizeUserInput("https://y.qq.com/n/ryqq_v2/profile?uin=oK6koenzoenzoenzoenzoevloc%2A%2A"),
+    { kind: "encrypt-uin", value: "oK6koenzoenzoenzoenzoevloc**" },
+  );
+  assert.deepEqual(
+    normalizeUserInput("https://y.qq.com/n/ryqq_v2/profile?uin=opaque-token_32.segment"),
+    { kind: "encrypt-uin", value: "opaque-token_32.segment" },
+  );
   assert.deepEqual(normalizeUserInput("oK-i7e4s"), { kind: "encrypt-uin", value: "oK-i7e4s" });
+  assert.deepEqual(normalizeUserInput("opaque-token_32.segment"), { kind: "encrypt-uin", value: "opaque-token_32.segment" });
+});
+
+test("normalizeUserInput rejects ambiguous or non-official profile URLs", () => {
+  for (const input of [
+    "https://evil.example/n/ryqq/profile/998877",
+    "https://y.qq.com:443/n/ryqq/profile/998877",
+    "https://y.qq.com:/n/ryqq/profile/998877",
+    "https://y.qq.com/n/ryqq/profile/../profile/998877",
+    "https://y.qq.com/n/ryqq_v2/a/../profile?uin=998877",
+    "https://y.qq.com/n/ryqq_v2/profile?uin=998877&uin=998877",
+    "https://y.qq.com/n/ryqq_v2/profile?uin=998877&id=998877",
+    "https://y.qq.com/not-profile/998877",
+  ]) assert.throws(() => normalizeUserInput(input));
 });
 
 test("QQMusicClient uses the public desktop search contract and preserves large string IDs", async () => {
@@ -191,7 +213,7 @@ test("resolveUser maps a numeric QQ number to the opaque comment identity", asyn
       requestedUrl = String(url);
       return jsonResponse({
         code: 0,
-        data: { encrypt_uin: "oK-i7e4s", hostname: "example" },
+        data: { encrypt_uin: "oK-i7e4s", hostname: "example", headpic: "https://example.invalid/avatar" },
       });
     }) as typeof fetch,
   });
@@ -201,8 +223,47 @@ test("resolveUser maps a numeric QQ number to the opaque comment identity", asyn
     numericUin: "123456",
     encryptUin: "oK-i7e4s",
     nickname: "example",
+    avatarUrl: "https://example.invalid/avatar",
   });
   assert.match(requestedUrl, /hostuin=123456/);
+});
+
+test("getPublicUserProfile performs real public-profile requests for both EncryptUin and 19-digit internal IDs", async () => {
+  const encryptUin = "oK6koenzoenzoenzoenzoevloc**";
+  const internalId = "1150000000000000472";
+  const hostuins: string[] = [];
+  const redirects: Array<RequestRedirect | undefined> = [];
+  const client = new QQMusicClient({
+    fetch: (async (url: string | URL, init?: RequestInit) => {
+      hostuins.push(new URL(String(url)).searchParams.get("hostuin") ?? "");
+      redirects.push(init?.redirect);
+      return jsonResponse({
+        code: 0,
+        data: {
+          encrypt_uin: encryptUin,
+          hostname: "synthetic-wechat-profile",
+          headpic: "https://example.invalid/wechat-avatar",
+          creator: { uin: 0 },
+        },
+      });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.getPublicUserProfile(encryptUin), {
+    input: encryptUin,
+    encryptUin,
+    nickname: "synthetic-wechat-profile",
+    avatarUrl: "https://example.invalid/wechat-avatar",
+  });
+  assert.deepEqual(await client.getPublicUserProfile(internalId), {
+    input: internalId,
+    numericUin: internalId,
+    encryptUin,
+    nickname: "synthetic-wechat-profile",
+    avatarUrl: "https://example.invalid/wechat-avatar",
+  });
+  assert.deepEqual(hostuins, [encryptUin, internalId]);
+  assert.deepEqual(redirects, ["error", "error"]);
 });
 
 test("QQMusicClient normalizes liked songs, song metadata, and SeqNo comments", async () => {
