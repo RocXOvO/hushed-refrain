@@ -1,4 +1,5 @@
 import type { RequestGovernor } from "../governor";
+import type { SongSearchResult } from "../types";
 
 export interface QQMusicUser {
   input: string;
@@ -12,6 +13,8 @@ export interface QQMusicSong {
   mid?: string;
   name?: string;
   artists?: string[];
+  album?: string;
+  durationMs?: number;
 }
 
 export interface QQMusicComment {
@@ -41,6 +44,8 @@ export interface QQMusicSongPage {
 }
 
 export interface QQMusicPlatformClient {
+  close?(): void;
+  searchSongs?(query: string, limit: number, signal?: AbortSignal): Promise<SongSearchResult[]>;
   resolveUser(input: string, signal?: AbortSignal): Promise<QQMusicUser>;
   getSongInfo(songId: string, signal?: AbortSignal): Promise<QQMusicSong>;
   getLikedSongsPage(

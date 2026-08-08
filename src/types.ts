@@ -47,6 +47,24 @@ export interface SongInfo {
   publishTime?: number;
 }
 
+export type MusicPlatform = "netease" | "qq";
+
+/** Platform-neutral song identity returned by the lookup-only search APIs. */
+export interface SongSearchResult {
+  id: string;
+  mid?: string;
+  name: string;
+  artists: string[];
+  album?: string;
+  durationMs?: number;
+}
+
+export interface SongSearchResponse {
+  platform: MusicPlatform;
+  query: string;
+  songs: SongSearchResult[];
+}
+
 export interface HistoryComment extends CommentRecord {
   songId?: string;
   resourceName?: string;
@@ -64,6 +82,7 @@ export interface LoginProfile {
 }
 
 export interface NcmClient {
+  searchSongs?(query: string, limit: number): Promise<SongSearchResult[]>;
   getLoginProfile(cookie?: string): Promise<LoginProfile | undefined>;
   getUserRecord(
     uid: string,
@@ -177,6 +196,7 @@ export interface ScanCheckpointActivity {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  commentsInspected: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   blockedUntil?: string;
@@ -345,6 +365,7 @@ export interface RunReport {
   lanes?: number;
   workers?: number;
   pagesProcessed?: number;
+  commentsInspected: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   statePath: string;

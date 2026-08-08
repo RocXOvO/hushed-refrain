@@ -252,10 +252,10 @@ test("models a QQ song as one serial SeqNo chain while healthy lanes rotate", ()
   assert.equal(eightLanes.expectedSeconds, 1_750);
   assert.equal(eightLanes.effectiveWorkers, 1);
   assert.equal(eightLanes.serialRequestChain, true);
-  assert.equal(eightLanes.proxyTransportMaxConcurrent, 4);
+  assert.equal(eightLanes.proxyTransportMaxConcurrent, 1);
   assert.equal(eightLanes.proxyTransportStartDelayMs, 250);
   assert.equal(eightLanes.proxyTransportStartJitterMs, 0);
-  assert.equal(eightLanes.checkpointSlots, 4);
+  assert.equal(eightLanes.checkpointSlots, 1);
 });
 
 test("keeps QQ likes pacing shared per lane while workers overlap network work", () => {
@@ -315,11 +315,11 @@ test("keeps QQ likes pacing shared per lane while workers overlap network work",
   assert.equal(pacingBoundOne.expectedSeconds, 7_000);
   assert.equal(pacingBoundFour.expectedSeconds, pacingBoundOne.expectedSeconds);
   assert.equal(networkBoundOne.expectedSeconds, 24_000);
-  assert.equal(networkBoundFour.expectedSeconds, 6_000);
-  assert.equal(networkBoundFour.effectiveWorkers, 4);
+  assert.equal(networkBoundFour.expectedSeconds, 3_000);
+  assert.equal(networkBoundFour.effectiveWorkers, 8);
 });
 
-test("rejects illegal QQ page sizes and non-frozen gate parameters", () => {
+test("rejects illegal QQ page sizes and accepts a bounded dynamic gate", () => {
   assert.throws(() => estimateCommentScan({
     platform: "qq",
     comments: 100,
@@ -327,12 +327,21 @@ test("rejects illegal QQ page sizes and non-frozen gate parameters", () => {
     minDelayMs: 0,
     jitterMs: 0,
   }), /must not exceed 25/);
-  assert.throws(() => estimateCommentScan({
+  const dynamic = estimateCommentScan({
     platform: "qq",
-    comments: 100,
+    comments: 10_000,
     pageSize: 25,
     minDelayMs: 0,
     jitterMs: 0,
+    lanes: 2,
+    workersPerLane: 4,
+    maxWorkers: 8,
     proxyTransportMaxConcurrent: 8,
-  }), /fixed 4-concurrent/);
+    proxyTransportEffectiveConcurrent: 8,
+    proxyTransportStartDelayMs: 125,
+    checkpointSlots: 8,
+  });
+  assert.equal(dynamic.proxyTransportMaxConcurrent, 8);
+  assert.equal(dynamic.proxyTransportStartDelayMs, 125);
+  assert.equal(dynamic.checkpointSlots, 8);
 });

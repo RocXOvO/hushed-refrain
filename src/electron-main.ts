@@ -26,6 +26,10 @@ import {
   type WindowsUpdaterBackend,
 } from "./windows-updater";
 
+// The visible product name may change, but checkpoints, logs and updater
+// handoff must continue using the established v0.x data directory.
+app.setPath("userData", join(app.getPath("appData"), "ncm-comment-finder"));
+
 let dashboard: Server | undefined;
 let windowsUpdater: WindowsUpdateController | undefined;
 let windowsUpdateFallbackState: WindowsUpdateState | undefined;
@@ -146,7 +150,7 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
       pageSize: "A4",
       displayHeaderFooter: true,
       headerTemplate: "<span></span>",
-      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>云评检索台</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
+      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>乐评寻踪</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
       margins: { top: 0.4, bottom: 0.55, left: 0.35, right: 0.35 },
     });
     await writeAtomicBuffer(destination.filePath, pdf);
@@ -181,7 +185,7 @@ async function createWindow(): Promise<void> {
     show: !smokeTest,
     backgroundColor: "#f3f5f6",
     autoHideMenuBar: true,
-    title: "云评检索台",
+    title: "乐评寻踪",
     ...desktopWindowChrome(process.platform),
     webPreferences: {
       contextIsolation: true,
@@ -246,7 +250,7 @@ app.whenReady().then(createWindow).catch((error) => {
   const detail = logPath
     ? `启动日志已保存到：\n${logPath}`
     : "启动日志写入失败，请截图此提示并反馈。";
-  dialog.showErrorBox("云评检索台启动失败", `${errorText(error)}\n\n${detail}`);
+  dialog.showErrorBox("乐评寻踪启动失败", `${errorText(error)}\n\n${detail}`);
   process.stderr.write(`${errorText(error)}\n`);
   app.exit(1);
 });

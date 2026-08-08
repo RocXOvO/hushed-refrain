@@ -109,6 +109,7 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(report.coverageComplete, true);
   assert.equal(report.songs, 3);
   assert.equal(report.matches, 2);
+  assert.equal(report.commentsInspected, 3);
   assert.deepEqual(client.commentCalls.map(({ songId, pageSize, pageNo }) => ({ songId, pageSize, pageNo })), [
     { songId: "1", pageSize: 2, pageNo: 1 },
     { songId: "1", pageSize: 2, pageNo: 2 },
@@ -353,6 +354,8 @@ test("auto strategy uses direct history only for the logged-in UID", async () =>
   const report = await runCommentFinder(client, governor(10), config);
   assert.equal(report.strategy, "history");
   assert.equal(report.matches, 1);
+  assert.equal(report.commentsInspected, 1);
+  assert.equal(report.pagesProcessed, 1);
   assert.equal(historyCalls, 1);
 });
 

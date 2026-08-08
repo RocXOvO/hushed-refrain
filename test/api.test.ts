@@ -5,6 +5,90 @@ import { EnhancedNcmClient } from "../src/api";
 import { ApiResponseError, AuthenticationRequired } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
+test("searches NetEase songs through cloudsearch and normalizes lookup metadata", async () => {
+  const mutable = upstream as unknown as {
+    cloudsearch: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.cloudsearch;
+  let captured: Record<string, unknown> | undefined;
+  mutable.cloudsearch = async (params) => {
+    captured = params;
+    return {
+      status: 200,
+      body: {
+        code: 200,
+        result: {
+          songs: [{
+            id: 9001,
+            name: " Example ",
+            ar: [{ name: "Artist A" }, { name: "Artist B" }],
+            al: { name: "Album" },
+            dt: 234_567,
+          }],
+        },
+      },
+    };
+  };
+
+  try {
+    const songs = await new EnhancedNcmClient({ proxy: "http://127.0.0.1:7890/" })
+      .searchSongs("  示例歌曲  ", 7);
+    assert.deepEqual(songs, [{
+      id: "9001",
+      name: "Example",
+      artists: ["Artist A", "Artist B"],
+      album: "Album",
+      durationMs: 234_567,
+    }]);
+    assert.equal(captured?.keywords, "示例歌曲");
+    assert.equal(captured?.type, 1);
+    assert.equal(captured?.limit, 7);
+    assert.equal(captured?.offset, 0);
+    assert.equal(captured?.proxy, "http://127.0.0.1:7890/");
+  } finally {
+    mutable.cloudsearch = original;
+  }
+});
+
+test("accepts an explicitly empty NetEase song-search result", async () => {
+  const mutable = upstream as unknown as {
+    cloudsearch: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.cloudsearch;
+  mutable.cloudsearch = async () => ({ status: 200, body: { code: 200, result: { songs: [] } } });
+  try {
+    assert.deepEqual(await new EnhancedNcmClient().searchSongs("no result", 10), []);
+  } finally {
+    mutable.cloudsearch = original;
+  }
+});
+
+test("rejects malformed NetEase song-search structures and validates input before fetch", async () => {
+  const mutable = upstream as unknown as {
+    cloudsearch: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.cloudsearch;
+  let calls = 0;
+  try {
+    for (const result of [undefined, {}, { songs: {} }, { songs: [{ id: 7, name: "Song" }] }]) {
+      mutable.cloudsearch = async () => {
+        calls += 1;
+        return { status: 200, body: { code: 200, result } };
+      };
+      await assert.rejects(
+        new EnhancedNcmClient().searchSongs("valid query", 10),
+        (error) => error instanceof ApiResponseError && error.status === 502,
+      );
+    }
+    const callsBeforeValidation = calls;
+    await assert.rejects(new EnhancedNcmClient().searchSongs("x", 10), /between 2 and 80/);
+    await assert.rejects(new EnhancedNcmClient().searchSongs("valid", 11), /between 1 and 10/);
+    assert.equal(calls, callsBeforeValidation);
+  } finally {
+    mutable.cloudsearch = original;
+  }
+});
+
 test("resolves likes through the target user's owned playlist even with a login cookie", async () => {
   const mutable = upstream as unknown as {
     user_playlist: (params: Record<string, unknown>) => Promise<unknown>;

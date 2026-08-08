@@ -81,6 +81,47 @@ test("QQ HTTPS CONNECT succeeds without leaking proxy credentials to the target"
   assert.equal(targetProxyAuth, undefined);
 });
 
+test("QQ HTTPS proxy transport reuses a healthy CONNECT and disposes it explicitly", async (context) => {
+  const target = https.createServer({ key: TEST_KEY, cert: TEST_CERT }, (_request, response) => {
+    response.end("ok");
+  });
+  const targetPort = await listen(target);
+  context.after(() => close(target));
+  let connectCount = 0;
+  const tunnelSockets = new Set<net.Socket>();
+  const proxy = http.createServer();
+  proxy.on("connect", (_request, clientSocket, head) => {
+    connectCount += 1;
+    const upstream = net.connect(targetPort, "127.0.0.1", () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length > 0) upstream.write(head);
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    });
+    for (const socket of [clientSocket, upstream]) {
+      tunnelSockets.add(socket);
+      socket.once("close", () => tunnelSockets.delete(socket));
+    }
+    upstream.on("error", () => clientSocket.destroy());
+  });
+  const proxyPort = await listen(proxy);
+  context.after(() => {
+    for (const socket of tunnelSockets) socket.destroy();
+    return close(proxy);
+  });
+  const fetchViaProxy = createQQMusicProxyFetch({
+    proxyUrl: `http://127.0.0.1:${proxyPort}`,
+    targetRejectUnauthorized: false,
+  });
+
+  assert.equal(await (await fetchViaProxy(`https://localhost:${targetPort}/one`)).text(), "ok");
+  assert.equal(await (await fetchViaProxy(`https://localhost:${targetPort}/two`)).text(), "ok");
+  assert.equal(connectCount, 1);
+  fetchViaProxy.close();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal([...tunnelSockets].filter((socket) => !socket.destroyed).length, 0);
+});
+
 test("QQ proxy CONNECT is fail-closed on non-200 response", async (context) => {
   const proxy = http.createServer();
   proxy.on("connect", (_request, socket) => {

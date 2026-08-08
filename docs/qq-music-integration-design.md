@@ -1,6 +1,6 @@
 # QQ 音乐评论查询接入设计
 
-状态：`v0.20.0` QQ 接入采用的历史冻结设计；不是当前发布状态页
+状态：`v0.20.0` QQ 接入采用的历史设计记录；下述并发数已同步到当前动态 Gate，但实现真值以 `qq-music-architecture.md` 与测试为准
 
 目标基线：`main` / `v0.19.0` / `68b9810a6d721fb66c8fb6f6637e86012f2e604e`
 QQ 参考实现：实施时仅从 `../ncm-comment-finder-main` 的 v0.12 纵向切片提取 QQ 领域行为，未合并旧共享入口
@@ -92,11 +92,14 @@ qq:likes
 
 QQ HTTP 面：
 
+> 本节是 v0.19 接入时冻结的历史清单。当前实现后来增加了 lookup-only 的 `GET /api/qq/song/search`；现行接口与安全约束以 `qq-music-architecture.md`、`qq-music-memory.md` 和测试为准。
+
 - `GET|POST /api/qq/job`
 - `POST /api/qq/job/stop`
 - `GET /api/qq/results?jobId=<uuid>`
 - `GET /api/qq/results/stream?jobId=<uuid>`
 - `GET /api/qq/song`
+- `GET /api/qq/song/search`
 - `GET /api/logs?mode=qq&jobId=<uuid>`
 - `GET /report/results?platform=qq&mode=song|likes&jobId=<uuid>&targetKind=encryptUin&target=<canonical>`
 
@@ -132,7 +135,7 @@ QQ HTTP 面：
 
 - 一条 `QQCommentLane` 拥有一个 Client、一个 Lane 专属 Governor，并引用任务唯一的 QQ TransportGate。
 - 生产 Governor pacing concurrency 固定为 `1`；`workersPerLane` 只增加跨歌曲候选工作，不能缩短单出口 `3000 ms + jitter` 周期。
-- QQ Gate 固定上限为 4 个在途、实际开始间隔至少 250 ms；它与网易云 AIMD `ProxyTransportGate` 是不同策略，不复用 8/80 参数。
+- QQ Gate 按任务实际有界工作线程构建：`song` 固定 1 个在途且开始间隔至少 250 ms；`likes` 为 1–32 个在途，开始间隔为 `max(80, ceil(1000 / max(4, 容量))) ms`。它与网易云 AIMD `ProxyTransportGate` 是不同策略，且不改变单 Lane Governor 的节奏。
 - QQ likes 的实际 Worker 数为 `workerCountForTopology(lanes, workersPerLane, hostConcurrency)`；`hostConcurrency` 范围沿用主线 1..32。Worker 是 invocation-local `worker-N`，每页通过共享 `LaneAllocator` 公平取得 Lane，单 Lane 同时 permit 不超过 `workersPerLane`。禁止通过裁掉后半段 Lane 实现 hard cap。QQ song 无论配置如何都只有一个活动 Worker/SeqNo 链，但每个成功页仍公平换 Lane。
 - 自动出口 `maxProxyLanes=0` 使用全部已验证出口；正数才是本任务上限。现有共享池不因任务选择而缩容或重建。
 - 首发不增加强制 QQ 启动探针：共享池的“已验证”只表示现有出口/网易云检查，UI 不得宣称已验证 QQ 域。每次 QQ 请求仍独立 fail-closed；Lane 连续最终失败达到阈值后在本任务下线，全部 Lane 不可用时明确 `paused` 并保留检查点。未来 QQ capability probe 只能按 pool generation 低频缓存于任务侧，不能回写或缩减共享池。
@@ -192,7 +195,7 @@ data/logs/qq-<job-id>.jsonl
 
 没有证据证明 QQ `CmId` 跨歌曲唯一。去重域冻结为结构化 `(songId, commentId)`，内部可编码为经过验证的 `songId:commentId`；JSONL 仍分别保存原始 songId/commentId。状态首次发布即使用 `seenCommentKeys`，不发布未经证明的 task-global `seenCommentIds` 语义。
 
-`song` 每成功页立即原子保存。`likes` 评论页采用 400 ms 或 4 个脏页先到者刷盘，并以 4 个 pre-request 槽位限制崩溃重放窗口；所有终态强制 flush。首次持久化失败锁存全局 paused，取消剩余请求，不进行保存风暴。
+`song` 每成功页立即原子保存。`likes` 评论页采用 400 ms 或 4 个脏页先到者刷盘，并以动态 Gate 容量相同的有界 pre-request 槽位限制崩溃重放窗口；所有终态强制 flush。首次持久化失败锁存全局 paused，取消剩余请求，不进行保存风暴。
 
 状态解码可读旧 `pageSize=1..100`；扫描器在任何远程请求或 finished 早退前先把 `26..100` 单向持久化为 `25`，保留每曲 SeqNo、pageNo、命中键和 JSONL。迁移保存失败时远程请求数必须为零。Decoder 还必须验证：任务 pages/comments 等于歌曲求和、`truncated => done`、createdAt/updatedAt 是有效 ISO、song 模式基数与 requestedSongId 一致。`onCheckpoint` 若发生在原子写前只能称 live snapshot，不能冒充 durable ack。
 
@@ -217,7 +220,7 @@ data/logs/qq-<job-id>.jsonl
 - QQ likes 的 Worker 是跨歌曲调度 Worker；显示 configured lanes/workers 与本轮实际参与 lanes/workers，不把它们当同时在途峰值。
 - 活动行复用 v0.19 的 keyed/bounded/in-place 更新、64 行工作集和单例计时器；QQ manager 通过请求事件与歌曲进度事件对齐现有行模型，不在 renderer 里另建轮询器。`done/truncated` 必须移除稳定行。
 - 结果表使用平台判别渲染链接和身份；旧视图的 SSE、日志、结果和估算响应不得污染新视图。
-- 估算 API 必须显式平台化；QQ 评论拒绝 `pageSize>25`，song 使用 `serialRequestChain=1`，likes 使用 `workersShareLanePacing=1`，并受 QQ Gate 4/250 与检查点槽位 4 限制。
+- 估算 API 必须显式平台化；QQ 评论拒绝 `pageSize>25`，song 使用 `serialRequestChain=1`，likes 使用 `workersShareLanePacing=1`，并使用与实际有界工作线程一致的动态 Gate 和检查点槽位。
 - `latestJobs`、result generation、settlement、REST/SSE/log/estimate guards 全部按完整 viewKey 保存；不能把 qq:song 与 qq:likes 折叠成一个前端 mode。现有 tabSwitchVersion、Inspector、窄屏媒体监听、滚动条、SSE batching 和单飞轮询保持原样。
 
 ## 8. 实施阶段与门禁

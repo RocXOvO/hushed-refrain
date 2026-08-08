@@ -20,6 +20,7 @@ export { zzcSign } from "./sign";
 export {
   cancelQQMusicLanes,
   QQMusicTransportGate,
+  qqMusicTransportProfile,
 } from "./transport-gate";
 export {
   decodeQQMusicScanState,

@@ -716,7 +716,7 @@ test("a resumed QQ liked source keeps its old page-size 100 and non-zero offset"
   assert.equal(state?.sourceOffset, 101);
 });
 
-test("QQ likes keeps at most four dirty pages and flushes them as bounded batches", async () => {
+test("QQ likes flushes every four dirty pages without capping durable in-flight slots at four", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-liked-checkpoint-batch-"));
   const options = {
     ...scanOptions(directory),
@@ -730,8 +730,8 @@ test("QQ likes keeps at most four dirty pages and flushes them as bounded batche
   let active = 0;
   let maximumActive = 0;
   let calls = 0;
-  let firstBatchStarted = (): void => {};
-  const firstFourStarted = new Promise<void>((resolve) => { firstBatchStarted = resolve; });
+  let allRequestsStarted = (): void => {};
+  const firstEightStarted = new Promise<void>((resolve) => { allRequestsStarted = resolve; });
   let releaseFirstBatch = (): void => {};
   const firstBatchRelease = new Promise<void>((resolve) => { releaseFirstBatch = resolve; });
   const client = fakeClient({
@@ -739,10 +739,8 @@ test("QQ likes keeps at most four dirty pages and flushes them as bounded batche
       calls += 1;
       active += 1;
       maximumActive = Math.max(maximumActive, active);
-      if (calls <= 4) {
-        if (calls === 4) firstBatchStarted();
-        await firstBatchRelease;
-      }
+      if (calls === 8) allRequestsStarted();
+      await firstBatchRelease;
       active -= 1;
       return {
         comments: [comment(`comment-${songId}`, "90", "other-user")],
@@ -756,16 +754,16 @@ test("QQ likes keeps at most four dirty pages and flushes them as bounded batche
     ...options,
     onCheckpoint: (activity) => checkpointPages.push(activity.pagesProcessed),
   });
-  await firstFourStarted;
-  assert.equal(active, 4);
-  assert.equal(calls, 4);
+  await firstEightStarted;
+  assert.equal(active, 8);
+  assert.equal(calls, 8);
   releaseFirstBatch();
   const result = await running;
   const state = await loadQQMusicScanState(options.statePath);
 
   assert.equal(result.status, "complete");
   assert.deepEqual(checkpointPages, [4, 8, 8]);
-  assert.equal(maximumActive, 4);
+  assert.equal(maximumActive, 8);
   assert.equal(state?.pagesProcessed, 8);
   assert.equal(state?.finished, true);
 });

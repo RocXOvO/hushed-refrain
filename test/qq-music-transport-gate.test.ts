@@ -1,7 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RunCancelled } from "../src/errors";
-import { QQMusicTransportGate } from "../src/qq-music/transport-gate";
+import {
+  QQMusicTransportGate,
+  qqMusicTransportProfile,
+} from "../src/qq-music/transport-gate";
+
+test("QQ transport profile scales likes across independent exits within the host cap", () => {
+  assert.deepEqual(qqMusicTransportProfile("likes", 2, 8), {
+    maxConcurrent: 8,
+    minStartDelayMs: 125,
+    checkpointSlots: 8,
+  });
+  assert.deepEqual(qqMusicTransportProfile("likes", 8, 32), {
+    maxConcurrent: 32,
+    minStartDelayMs: 80,
+    checkpointSlots: 32,
+  });
+  assert.deepEqual(qqMusicTransportProfile("likes", 32, 16), {
+    maxConcurrent: 16,
+    minStartDelayMs: 80,
+    checkpointSlots: 16,
+  });
+  assert.deepEqual(qqMusicTransportProfile("song", 32, 32), {
+    maxConcurrent: 1,
+    minStartDelayMs: 250,
+    checkpointSlots: 1,
+  });
+});
 
 test("QQ transport gate caps aggregate in-flight work", async () => {
   const gate = new QQMusicTransportGate({ maxConcurrent: 2, minStartDelayMs: 0 });

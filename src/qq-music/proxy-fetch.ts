@@ -1,6 +1,7 @@
 import http, { type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import https from "node:https";
 import type { Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import tls, { type TLSSocket } from "node:tls";
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
@@ -12,7 +13,11 @@ export interface QQMusicProxyFetchOptions {
   targetRejectUnauthorized?: boolean;
   /** Intended only for a self-signed HTTPS proxy. */
   proxyRejectUnauthorized?: boolean;
+  /** Maximum reusable proxy tunnels created by one lane. */
+  maxSockets?: number;
 }
+
+export type QQMusicProxyFetch = typeof fetch & { close(): void };
 
 export class QQMusicProxyError extends Error {
   constructor(message: string, public readonly status?: number) {
@@ -33,41 +38,58 @@ interface NormalizedRequest {
  * Creates a fetch-compatible transport that never falls back to a direct request.
  * QQ's HTTPS endpoints use an HTTP CONNECT tunnel for both HTTP and HTTPS proxies.
  */
-export function createQQMusicProxyFetch(options: QQMusicProxyFetchOptions): typeof fetch {
+export function createQQMusicProxyFetch(options: QQMusicProxyFetchOptions): QQMusicProxyFetch {
   const proxy = validateProxyUrl(options.proxyUrl);
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+  const maxSockets = options.maxSockets ?? 8;
   if (!Number.isInteger(connectTimeoutMs) || connectTimeoutMs <= 0) {
     throw new Error("QQ proxy connectTimeoutMs must be a positive integer.");
   }
+  if (!Number.isInteger(maxSockets) || maxSockets <= 0) {
+    throw new Error("QQ proxy maxSockets must be a positive integer.");
+  }
+  const targetRejectUnauthorized = options.targetRejectUnauthorized ?? true;
+  const proxyRejectUnauthorized = options.proxyRejectUnauthorized ?? true;
+  const tunnelAgent = new QQHttpsProxyAgent(proxy, {
+    maxSockets,
+    connectTimeoutMs,
+    proxyRejectUnauthorized,
+    targetRejectUnauthorized,
+  });
+  const forwardAgent = proxy.protocol === "https:"
+    ? new https.Agent({ keepAlive: true, maxSockets, rejectUnauthorized: proxyRejectUnauthorized })
+    : new http.Agent({ keepAlive: true, maxSockets });
 
-  return (async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+  const proxyFetch = (async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
     const normalized = await normalizeRequest(input, init);
     const target = normalized.url;
     if (target.protocol === "https:") {
-      return tunnelHttpsRequest(proxy, target, normalized, {
-        connectTimeoutMs,
-        targetRejectUnauthorized: options.targetRejectUnauthorized ?? true,
-        proxyRejectUnauthorized: options.proxyRejectUnauthorized ?? true,
+      return tunnelHttpsRequest(tunnelAgent, target, normalized, {
+        targetRejectUnauthorized,
       });
     }
     if (target.protocol === "http:") {
       return forwardHttpRequest(proxy, target, normalized, {
         connectTimeoutMs,
-        proxyRejectUnauthorized: options.proxyRejectUnauthorized ?? true,
+        proxyRejectUnauthorized,
+        agent: forwardAgent,
       });
     }
     throw new Error("QQ proxy fetch supports only http:// and https:// targets.");
-  }) as typeof fetch;
+  }) as QQMusicProxyFetch;
+  proxyFetch.close = (): void => {
+    tunnelAgent.destroy();
+    forwardAgent.destroy();
+  };
+  return proxyFetch;
 }
 
 function tunnelHttpsRequest(
-  proxy: URL,
+  agent: QQHttpsProxyAgent,
   target: URL,
   request: NormalizedRequest,
   options: {
-    connectTimeoutMs: number;
     targetRejectUnauthorized: boolean;
-    proxyRejectUnauthorized: boolean;
   },
 ): Promise<Response> {
   return new Promise<Response>((resolve, reject) => {
@@ -76,11 +98,6 @@ function tunnelHttpsRequest(
       reject(abortError());
       return;
     }
-    const targetPort = numberPort(target.port, 443);
-    let proxySocket: Socket | undefined;
-    let tunnelSocket: Socket | undefined;
-    let tlsSocket: TLSSocket | undefined;
-    let connectRequest: ReturnType<typeof http.request> | undefined;
     let upstreamRequest: ReturnType<typeof https.request> | undefined;
     let settled = false;
 
@@ -89,10 +106,9 @@ function tunnelHttpsRequest(
       settled = true;
       cleanup();
       upstreamRequest?.destroy();
-      tlsSocket?.destroy();
-      tunnelSocket?.destroy();
-      proxySocket?.destroy();
-      connectRequest?.destroy();
+      // A failed or cancelled request invalidates the lane's pending tunnels.
+      // The reusable Agent can create fresh sockets on the next request.
+      agent.destroy();
       reject(error);
     };
     const finishResolve = (response: Response): void => {
@@ -102,36 +118,87 @@ function tunnelHttpsRequest(
       resolve(response);
     };
     const abort = (): void => finishReject(abortError());
-    const cleanup = (): void => signal?.removeEventListener("abort", abort);
+    const cleanup = (): void => {
+      signal?.removeEventListener("abort", abort);
+    };
     signal?.addEventListener("abort", abort, { once: true });
+    upstreamRequest = https.request({
+      protocol: "https:",
+      hostname: target.hostname,
+      port: numberPort(target.port, 443),
+      method: request.method,
+      path: `${target.pathname}${target.search}`,
+      headers: requestHeaders(request.headers, target, request.body),
+      agent,
+      rejectUnauthorized: options.targetRejectUnauthorized,
+    }, (incoming) => collectResponse(incoming).then(finishResolve, finishReject));
+    upstreamRequest.once("error", finishReject);
+    if (request.body) upstreamRequest.write(request.body);
+    upstreamRequest.end();
+  });
+}
 
-    connectRequest = proxyRequest(proxy, {
+class QQHttpsProxyAgent extends https.Agent {
+  private readonly pending = new Set<ReturnType<typeof http.request>>();
+
+  constructor(
+    private readonly proxy: URL,
+    private readonly tunnelOptions: {
+      maxSockets: number;
+      connectTimeoutMs: number;
+      proxyRejectUnauthorized: boolean;
+      targetRejectUnauthorized: boolean;
+    },
+  ) {
+    super({ keepAlive: true, maxSockets: tunnelOptions.maxSockets });
+  }
+
+  override createConnection(
+    options: https.RequestOptions,
+    callback?: (error: Error | null, stream: Duplex) => void,
+  ): Duplex | undefined {
+    if (!callback) throw new Error("QQ proxy tunnel requires an asynchronous connection callback.");
+    const hostname = String(options.hostname ?? options.host ?? "");
+    const port = typeof options.port === "number"
+      ? options.port
+      : numberPort(String(options.port ?? ""), 443);
+    let settled = false;
+    let proxySocket: Socket | undefined;
+    let tlsSocket: TLSSocket | undefined;
+    const finish = (error?: Error, stream?: TLSSocket): void => {
+      if (settled) return;
+      settled = true;
+      this.pending.delete(connectRequest);
+      if (error) {
+        tlsSocket?.destroy();
+        proxySocket?.destroy();
+      }
+      callback(error ?? null, stream ?? (undefined as unknown as Duplex));
+    };
+    const connectRequest = proxyRequest(this.proxy, {
       method: "CONNECT",
-      path: authority(target.hostname, targetPort),
+      path: authority(hostname, port),
       headers: {
-        host: authority(target.hostname, targetPort),
+        host: authority(hostname, port),
         "proxy-connection": "keep-alive",
-        ...proxyAuthorization(proxy),
+        ...proxyAuthorization(this.proxy),
       },
-      rejectUnauthorized: options.proxyRejectUnauthorized,
+      rejectUnauthorized: this.tunnelOptions.proxyRejectUnauthorized,
     });
-    connectRequest.setTimeout(options.connectTimeoutMs, () => {
-      finishReject(new QQMusicProxyError("QQ proxy CONNECT timed out."));
-      connectRequest.destroy();
+    this.pending.add(connectRequest);
+    connectRequest.setTimeout(this.tunnelOptions.connectTimeoutMs, () => {
+      const error = new QQMusicProxyError("QQ proxy CONNECT timed out.");
+      connectRequest.destroy(error);
+      finish(error);
     });
     connectRequest.once("socket", (socket) => { proxySocket = socket; });
-    connectRequest.once("error", finishReject);
+    connectRequest.once("error", (error) => finish(error));
     connectRequest.once("connect", (response, socket, head) => {
-      connectRequest?.setTimeout(0);
-      if (settled) {
-        response.resume();
-        socket.destroy();
-        return;
-      }
-      tunnelSocket = socket;
+      connectRequest.setTimeout(0);
+      proxySocket = socket;
       if (response.statusCode !== 200) {
         response.resume();
-        finishReject(new QQMusicProxyError(
+        finish(new QQMusicProxyError(
           `QQ proxy CONNECT failed with status ${response.statusCode ?? 0}.`,
           response.statusCode,
         ));
@@ -140,41 +207,32 @@ function tunnelHttpsRequest(
       if (head.length > 0) socket.unshift(head);
       tlsSocket = tls.connect({
         socket,
-        servername: target.hostname,
-        rejectUnauthorized: options.targetRejectUnauthorized,
+        servername: hostname,
+        rejectUnauthorized: this.tunnelOptions.targetRejectUnauthorized,
       });
-      tlsSocket.once("error", finishReject);
-      tlsSocket.once("secureConnect", () => {
-        if (settled) {
-          tlsSocket?.destroy();
-          return;
-        }
-        const headers = requestHeaders(request.headers, target, request.body);
-        const tunnelAgent = new https.Agent({ keepAlive: false });
-        tunnelAgent.createConnection = () => tlsSocket!;
-        upstreamRequest = https.request({
-          protocol: "https:",
-          hostname: target.hostname,
-          port: targetPort,
-          method: request.method,
-          path: `${target.pathname}${target.search}`,
-          headers,
-          agent: tunnelAgent,
-        }, (incoming) => collectResponse(incoming).then(finishResolve, finishReject));
-        upstreamRequest.once("error", finishReject);
-        if (request.body) upstreamRequest.write(request.body);
-        upstreamRequest.end();
-      });
+      tlsSocket.once("error", (error) => finish(error));
+      tlsSocket.once("secureConnect", () => finish(undefined, tlsSocket));
     });
     connectRequest.end();
-  });
+    return undefined;
+  }
+
+  override destroy(): void {
+    for (const request of this.pending) request.destroy(abortError());
+    this.pending.clear();
+    super.destroy();
+  }
 }
 
 function forwardHttpRequest(
   proxy: URL,
   target: URL,
   requestInit: NormalizedRequest,
-  options: { connectTimeoutMs: number; proxyRejectUnauthorized: boolean },
+  options: {
+    connectTimeoutMs: number;
+    proxyRejectUnauthorized: boolean;
+    agent: http.Agent | https.Agent;
+  },
 ): Promise<Response> {
   return new Promise<Response>((resolve, reject) => {
     if (requestInit.signal.aborted) {
@@ -189,6 +247,7 @@ function forwardHttpRequest(
         ...proxyAuthorization(proxy),
       },
       rejectUnauthorized: options.proxyRejectUnauthorized,
+      agent: options.agent,
     }, (incoming) => collectResponse(incoming).then(resolve, reject));
     const abort = (): void => {
       request.destroy(abortError());

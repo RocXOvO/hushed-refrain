@@ -23,7 +23,7 @@ import { SOURCE_CATALOG_VERSION } from "./state";
 import type { ScanOptions, SourceSelection, Strategy } from "./types";
 
 const help = `
-ncm-comments - checkpointed NetEase Cloud Music comment finder
+ncm-comments - 乐评寻踪·网易云评论检索 CLI
 
 Commands:
   auth-qr             Log in with a QR code and save the session cookie

@@ -16,10 +16,7 @@ import {
 } from "./jsonl-snapshot";
 import { readJsonlTail } from "./jsonl-tail";
 import { PagePerformanceTracker, type PagePerformanceSnapshot } from "./page-performance";
-import {
-  DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT,
-  DEFAULT_QQ_TRANSPORT_START_DELAY_MS,
-} from "./qq-music/transport-gate";
+import { qqMusicTransportProfile } from "./qq-music/transport-gate";
 import {
   QQJobManager,
   QQJobManagerError,
@@ -66,6 +63,9 @@ import type {
   RunReport,
   ScanOptions,
   ScanRequestActivity,
+  SongInfo,
+  SongSearchResponse,
+  SongSearchResult,
   SourceSelection,
 } from "./types";
 import { checkForUpdate, type UpdateSnapshot } from "./update";
@@ -85,6 +85,7 @@ export interface DashboardOptions {
   poolDiscoverer?: typeof discoverClashVerge;
   qqClientFactory?: QQJobManagerOptions["clientFactory"];
   qqRunner?: QQJobManagerOptions["runner"];
+  songSearchRouter?: NcmSongSearchRouterDependencies;
 }
 
 interface RuntimePaths {
@@ -161,6 +162,7 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  commentsInspected: number;
   commentsPerSecond: number;
   elapsedMs: number;
   logPath?: string;
@@ -365,6 +367,105 @@ export class UserProbeRouter {
       if (error instanceof AuthenticationRequired) throw new HttpError(401, error.message);
       throw userProbeHttpError(error, 1, false);
     }
+  }
+}
+
+type NcmSongSearchRequest = (
+  query: string,
+  limit: number,
+  proxy: string | undefined,
+) => Promise<SongSearchResult[]>;
+type NcmSongLookupRequest = (songId: string, proxy: string | undefined) => Promise<SongInfo>;
+
+export interface NcmSongSearchRouterDependencies {
+  readPool?: typeof readProxyPool;
+  verifyPool?: typeof verifyProxyPool;
+  search?: NcmSongSearchRequest;
+  lookup?: NcmSongLookupRequest;
+}
+
+/** Lookup-only song search with managed-pool rotation and fail-closed pool semantics. */
+export class NcmSongSearchRouter {
+  private cursor = 0;
+
+  constructor(
+    private readonly poolPath: string,
+    private readonly dependencies: NcmSongSearchRouterDependencies = {},
+  ) {}
+
+  async run(query: string, limit: number, explicitProxy?: string): Promise<SongSearchResponse> {
+    const search = this.dependencies.search ?? searchNcmSongs;
+    const songs = await this.runWithPool(
+      (proxy) => search(query, limit, proxy),
+      explicitProxy,
+      "歌曲搜索",
+    );
+    return { platform: "netease", query, songs };
+  }
+
+  async lookup(songId: string, explicitProxy?: string): Promise<SongInfo> {
+    const lookup = this.dependencies.lookup ?? lookupNcmSong;
+    return this.runWithPool(
+      (proxy) => lookup(songId, proxy),
+      explicitProxy,
+      "歌曲信息查询",
+    );
+  }
+
+  private async runWithPool<T>(
+    request: (proxy: string | undefined) => Promise<T>,
+    explicitProxy: string | undefined,
+    label: string,
+  ): Promise<T> {
+    if (explicitProxy) {
+      try {
+        return await request(explicitProxy);
+      } catch (error) {
+        throw ncmLookupHttpError(error, 1, false, true, label);
+      }
+    }
+
+    let pool: ProxyPoolFile | undefined;
+    try {
+      pool = await (this.dependencies.readPool ?? readProxyPool)(this.poolPath);
+    } catch {
+      throw new HttpError(409, `无法读取代理池状态；${label}不会回退到本机直连。`);
+    }
+    if (!proxyPoolStatusRunning(pool)) {
+      try {
+        return await request(undefined);
+      } catch (error) {
+        throw ncmLookupHttpError(error, 1, false, false, label);
+      }
+    }
+
+    let entries: ProxyPoolEntry[];
+    try {
+      entries = recentlyVerifiedProxyPoolEntries(pool!)
+        ?? await (this.dependencies.verifyPool ?? verifyProxyPool)(pool!);
+    } catch {
+      throw new HttpError(409, `代理池正在运行，但节点复核失败；${label}不会回退到本机直连，请先重新优选节点。`);
+    }
+    if (entries.length === 0) {
+      throw new HttpError(409, `代理池当前没有可用节点；${label}不会回退到本机直连。`);
+    }
+
+    const start = this.cursor % entries.length;
+    this.cursor = (this.cursor + 1) % entries.length;
+    const attempts = Math.min(3, entries.length);
+    let attempted = 0;
+    let lastError: unknown;
+    for (let index = 0; index < attempts; index += 1) {
+      const entry = entries[(start + index) % entries.length];
+      attempted = index + 1;
+      try {
+        return await request(entry.endpoint);
+      } catch (error) {
+        lastError = error;
+        if (!isNcmLookupLaneFailure(error)) break;
+      }
+    }
+    throw ncmLookupHttpError(lastError, attempted, true, false, label);
   }
 }
 
@@ -652,6 +753,7 @@ class JobManager {
           historicalCompletedSongs: report.historicalCompletedSongs, newPendingSongs: report.newPendingSongs,
           requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
           pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
+          commentsInspected: report.commentsInspected,
           workers: report.workers ?? this.snapshotValue.workers,
           commentsPerSecond: 0,
           proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
@@ -744,6 +846,9 @@ class JobManager {
           currentSong: activeCurrent ?? inferredCurrent,
           matches: state.matchCount, requestsTotal: state.requestCount,
           pagesProcessed: state.pagesProcessed ?? 0,
+          commentsInspected: state.strategy === "history"
+            ? state.commentOffset
+            : state.songProgress?.reduce((total, progress) => total + progress.commentOffset, 0) ?? state.commentOffset,
           coverageComplete: state.coverageComplete, sourceErrors: state.sourceErrors,
           blockedUntil: state.blockedUntil,
         };
@@ -805,6 +910,7 @@ class JobManager {
       matches: snapshot.matches,
       requestsTotal: snapshot.requestsTotal,
       pagesProcessed: snapshot.pagesProcessed,
+      commentsInspected: snapshot.commentsInspected,
       coverageLabel: snapshot.songs > 0
         ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲；`
           + `目录 ${snapshot.catalogSongs.toLocaleString("zh-CN")}，历史完成 ${snapshot.historicalCompletedSongs.toLocaleString("zh-CN")}，`
@@ -1186,6 +1292,7 @@ class ParallelJobManager {
       matches: snapshot.matches,
       requestsTotal: snapshot.requestsTotal,
       pagesProcessed: snapshot.pagesProcessed,
+      commentsInspected: snapshot.commentsInspected,
       coverageLabel: `${Math.max(0, Math.min(100, snapshot.coveragePercent)).toFixed(1)}% 时间范围`,
       exportedAt: new Date().toISOString(),
       comments: comments.reverse(),
@@ -1413,6 +1520,7 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
   );
   const auth = new AuthManager(paths);
   const userProbes = new UserProbeRouter(paths.cookie, paths.pool);
+  const songSearch = new NcmSongSearchRouter(paths.pool, options.songSearchRouter);
   const currentVersion = options.currentVersion ?? await applicationVersion();
   const updateChecker = cachedUpdateChecker(options.updateChecker ?? (() => checkForUpdate({
     currentVersion,
@@ -1421,8 +1529,9 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
   })));
   const updatePreparation = new UpdatePreparationGate(coordinator);
   const server = createServer(async (request, response) => {
-    try { await route(request, response, paths, coordinator, jobs, parallel, qq, pool, auth, userProbes, updateChecker, updatePreparation); }
+    try { await route(request, response, paths, coordinator, jobs, parallel, qq, pool, auth, userProbes, songSearch, updateChecker, updatePreparation); }
     catch (error) {
+      if (response.destroyed) return;
       const status = error instanceof HttpError || error instanceof QQJobManagerError ? error.status : 500;
       if (!response.headersSent) json(response, status, { error: message(error) });
       else if (!response.destroyed) response.end();
@@ -1441,6 +1550,7 @@ async function route(
   jobs: JobManager, parallel: ParallelJobManager, qq: QQJobManager,
   pool: PoolManager, auth: AuthManager,
   userProbes: UserProbeRouter,
+  songSearch: NcmSongSearchRouter,
   updateChecker: () => Promise<UpdateSnapshot>,
   updatePreparation: UpdatePreparationGate,
 ): Promise<void> {
@@ -1545,15 +1655,43 @@ async function route(
   if (method === "POST" && url.pathname === "/api/pool/import") return json(response, 202, await pool.import(await body(request)));
   if (method === "POST" && url.pathname === "/api/pool/stop") return json(response, 200, await pool.stop());
   if (method === "GET" && url.pathname === "/api/song") {
-    const song = await new EnhancedNcmClient({ proxy: proxyUrl(url.searchParams.get("proxy")) }).getSongInfo(numericId(url.searchParams.get("id"), "歌曲 ID"));
+    const song = await songSearch.lookup(
+      numericId(url.searchParams.get("id"), "歌曲 ID"),
+      proxyUrl(url.searchParams.get("proxy")),
+    );
     return json(response, 200, song);
   }
+  if (method === "GET" && url.pathname === "/api/song/search") {
+    const query = searchQuery(url.searchParams.get("q"));
+    return json(response, 200, await songSearch.run(
+      query,
+      integer(url.searchParams.get("limit") ?? 10, "limit", 1, 10),
+      proxyUrl(url.searchParams.get("proxy")),
+    ));
+  }
   if (method === "GET" && url.pathname === "/api/qq/song") {
-    return json(response, 200, await qq.lookupSong(
+    const song = await withRequestAbortSignal(request, response, (signal) => qq.lookupSong(
       numericId(url.searchParams.get("id"), "QQ 音乐歌曲 ID"),
       url.searchParams.get("proxy"),
       url.searchParams.get("allowDirect") === "1",
+      signal,
     ));
+    return json(response, 200, song);
+  }
+  if (method === "GET" && url.pathname === "/api/qq/song/search") {
+    const query = searchQuery(url.searchParams.get("q"));
+    const songs = await withRequestAbortSignal(request, response, (signal) => qq.searchSongs(
+      query,
+      integer(url.searchParams.get("limit") ?? 10, "limit", 1, 10),
+      url.searchParams.get("proxy"),
+      url.searchParams.get("allowDirect") === "1",
+      signal,
+    ));
+    return json(response, 200, {
+      platform: "qq",
+      query,
+      songs,
+    } satisfies SongSearchResponse);
   }
   if (method === "GET" && url.pathname === "/api/estimate") {
     const estimatePlatform = selection(url.searchParams.get("platform") ?? "netease", ["netease", "qq"] as const, "platform");
@@ -1568,6 +1706,15 @@ async function route(
       1,
       32,
     );
+    const estimateLanes = integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256);
+    const estimateWorkersPerLane = integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16);
+    const qqTransport = estimatePlatform === "qq"
+      ? qqMusicTransportProfile(
+        estimateMode as "song" | "likes",
+        estimateLanes,
+        serialRequestChain ? 1 : Math.min(estimateLanes * estimateWorkersPerLane, hostConcurrency),
+      )
+      : undefined;
     return json(response, 200, estimateCommentScan({
       platform: estimatePlatform,
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
@@ -1585,19 +1732,19 @@ async function route(
       minDelayMs: integer(url.searchParams.get("minDelayMs") ?? 2_500, "minDelayMs", 0, 600_000),
       jitterMs: integer(url.searchParams.get("jitterMs") ?? 800, "jitterMs", 0, 600_000),
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
-      lanes: integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256),
-      workersPerLane: integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16),
+      lanes: estimateLanes,
+      workersPerLane: estimateWorkersPerLane,
       maxWorkers: serialRequestChain ? 1 : hostConcurrency,
       proxyTransport: url.searchParams.get("proxyTransport") === "1",
       proxyTransportMaxConcurrent: integer(
-        estimatePlatform === "qq" ? DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT : url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+        estimatePlatform === "qq" ? qqTransport!.maxConcurrent : url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
         estimatePlatform === "qq" ? "QQ 音乐传输并发" : "hostConcurrency",
         1,
         32,
       ),
       proxyTransportEffectiveConcurrent: integer(
         estimatePlatform === "qq"
-          ? DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT
+          ? url.searchParams.get("proxyTransportEffectiveConcurrent") ?? qqTransport!.maxConcurrent
           : url.searchParams.get("proxyTransportEffectiveConcurrent")
           ?? url.searchParams.get("hostConcurrency")
           ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
@@ -1605,8 +1752,9 @@ async function route(
         1,
         32,
       ),
-      proxyTransportStartDelayMs: estimatePlatform === "qq" ? DEFAULT_QQ_TRANSPORT_START_DELAY_MS : undefined,
+      proxyTransportStartDelayMs: estimatePlatform === "qq" ? qqTransport!.minStartDelayMs : undefined,
       proxyTransportStartJitterMs: estimatePlatform === "qq" ? 0 : undefined,
+      checkpointSlots: qqTransport?.checkpointSlots,
       serialRequestChain,
       workersShareLanePacing,
     }));
@@ -1787,6 +1935,23 @@ function streamMatches<T>(
   heartbeat.unref();
 }
 
+async function withRequestAbortSignal<T>(
+  request: IncomingMessage,
+  response: ServerResponse,
+  operation: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController();
+  const abort = (): void => controller.abort();
+  request.once("aborted", abort);
+  response.once("close", abort);
+  try {
+    return await operation(controller.signal);
+  } finally {
+    request.off("aborted", abort);
+    response.off("close", abort);
+  }
+}
+
 async function readCookie(path: string): Promise<string | undefined> {
   if (process.env.NCM_COOKIE?.trim()) return process.env.NCM_COOKIE.trim();
   try { return (await readFile(path, "utf8")).trim() || undefined; }
@@ -1848,6 +2013,54 @@ async function probeUser(uid: string, proxy: string | undefined, cookiePath: str
   };
 }
 
+async function searchNcmSongs(
+  query: string,
+  limit: number,
+  proxy: string | undefined,
+): Promise<SongSearchResult[]> {
+  return new EnhancedNcmClient({ proxy }).searchSongs(query, limit);
+}
+
+async function lookupNcmSong(songId: string, proxy: string | undefined): Promise<SongInfo> {
+  return new EnhancedNcmClient({ proxy }).getSongInfo(songId);
+}
+
+function isNcmLookupLaneFailure(error: unknown, visited = new Set<object>()): boolean {
+  if (!error || typeof error !== "object" || visited.has(error)) return false;
+  visited.add(error);
+  const status = errorStatus(error);
+  if (status === 403 || status === 408 || status === 425 || status === 429 || (status !== undefined && status >= 500)) {
+    return true;
+  }
+  if (error instanceof TypeError) return true;
+  const candidate = error as Record<string, unknown>;
+  if (typeof candidate.code === "string" && /^(?:EAI_AGAIN|ECONN|EHOST|ENET|ETIMEDOUT)/.test(candidate.code)) return true;
+  return isNcmLookupLaneFailure(candidate.cause, visited);
+}
+
+function ncmLookupHttpError(
+  error: unknown,
+  attempts: number,
+  usedPool: boolean,
+  explicitProxy: boolean,
+  label: string,
+): HttpError {
+  if (errorStatus(error) === 429 || error instanceof CooldownRequired) {
+    return new HttpError(429, usedPool
+      ? `${label}已轮换 ${attempts} 个代理出口，但都被网易云暂时限流；不会回退到本机直连，请稍后再试。`
+      : explicitProxy
+      ? `${label}使用手动代理时被网易云暂时限流，请检查代理或稍后再试。`
+      : `${label}被网易云暂时限流；请稍后再试，或先开启代理池。`
+    );
+  }
+  return new HttpError(502, usedPool
+    ? `${label}已自动轮换 ${attempts} 个代理出口，仍未收到有效响应；不会回退到本机直连。`
+    : explicitProxy
+    ? `${label}未从手动代理收到有效上游响应，请检查代理设置。`
+    : `${label}未收到有效上游响应；当前未运行代理池，因此本次使用本机直连。`
+  );
+}
+
 function userProbeHttpError(error: unknown, attempts: number, usedPool: boolean): HttpError {
   if (errorStatus(error) === 404) {
     return new HttpError(404, "没有找到这个 UID 对应的用户资料；请确认输入的是用户主页中的纯数字 UID，且该账号资料仍可访问。");
@@ -1887,7 +2100,7 @@ function requestStartedAt(value: string | undefined): number {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
@@ -1898,6 +2111,7 @@ function busyTaskMessage(coordinator: TaskCoordinator): string {
     : "已有用户来源任务正在运行，请先停止该任务。";
 }
 function numericId(value: unknown, name: string): string { const id = String(value ?? "").trim(); if (!/^\d+$/.test(id)) throw new HttpError(400, `${name} 应为纯数字。`); return id; }
+function searchQuery(value: unknown): string { const query = String(value ?? "").trim(); if (query.length < 2 || query.length > 80) throw new HttpError(400, "q 长度应为 2 到 80 个字符。"); return query; }
 function reportJobId(value: unknown): string { const id = String(value ?? "").trim(); if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new HttpError(400, "任务 ID 格式错误。"); return id; }
 function reportTarget(value: unknown): string { const target = String(value ?? "").trim(); if (!target || target.length > 512) throw new HttpError(400, "报告目标格式错误。"); return target; }
 export function isLoopbackAddress(address: string | undefined): boolean {

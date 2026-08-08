@@ -22,6 +22,7 @@ interface ResultReportBase<Comment> {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  commentsInspected: number;
   coverageLabel: string;
   exportedAt: string;
   comments: Comment[];
@@ -88,7 +89,7 @@ export function renderResultReportHtml(report: ResultReport): string {
   </div>
   <main>
     <header class="report-header">
-      <div class="brand"><span>云评检索台</span><small>${qq ? "QQ MUSIC COMMENT FINDER" : "NCM COMMENT FINDER"}</small></div>
+      <div class="brand"><span>乐评寻踪</span><small>MUSIC COMMENT TRACE</small></div>
       <p class="eyebrow">COMMENT SEARCH REPORT</p>
       <h1>${escapeHtml(title)}</h1>
       <p class="subtitle">导出的是任务文件中截至生成时刻已经保存的全部命中结果。</p>
@@ -99,7 +100,7 @@ export function renderResultReportHtml(report: ResultReport): string {
       <div><span>目标范围</span><strong>${escapeHtml(targetLabel)}</strong></div>
       <div><span>任务状态</span><strong>${escapeHtml(statusLabel(report.status))}</strong></div>
       <div><span>覆盖进度</span><strong>${escapeHtml(report.coverageLabel)}</strong></div>
-      <div><span>已扫页面</span><strong>${formatNumber(report.pagesProcessed)}</strong></div>
+      <div><span>已读评论</span><strong>${formatNumber(report.commentsInspected)}</strong></div>
       <div><span>累计请求</span><strong>${formatNumber(report.requestsTotal)}</strong></div>
       <div><span>任务耗时</span><strong>${formatDuration(report.elapsedMs)}</strong></div>
       <div class="accent"><span>文件累计结果</span><strong>${formatNumber(report.comments.length)} 条</strong></div>
@@ -116,7 +117,7 @@ export function renderResultReportHtml(report: ResultReport): string {
       ${resultTables}
     </section>
 
-    <footer>本报告由云评检索台生成 · 评论内容及用户信息来自任务扫描时的${qq ? " QQ 音乐" : "网易云"}公开响应</footer>
+    <footer>本报告由乐评寻踪生成 · 评论内容及用户信息来自任务扫描时的${qq ? " QQ 音乐" : "网易云"}公开响应</footer>
   </main>
   <script src="/report.js"></script>
 </body>

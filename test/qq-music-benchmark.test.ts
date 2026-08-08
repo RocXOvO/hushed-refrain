@@ -54,6 +54,7 @@ test("QQ likes model reports source requests and bounded cross-song concurrency"
     sourceRequests: 2,
     checkpointIntervalMs: 400,
     checkpointPageCap: 4,
+    checkpointSlots: 8,
     averageCheckpointBatchPages: 2,
   });
 
@@ -68,6 +69,37 @@ test("QQ likes model reports source requests and bounded cross-song concurrency"
   assert.equal(result.checkpointWrites, result.pageCheckpointWrites + 4);
   assert.equal(result.checkpointBytes, result.checkpointWrites * 250_000);
   assert.equal(result.sourceDurationMs, 7_000);
+});
+
+test("QQ likes dynamic 32-slot gate removes the legacy task-wide four-slot ceiling", () => {
+  const shared = {
+    ...base,
+    mode: "likes" as const,
+    lanes: 32,
+    workersPerLane: 1,
+    maxWorkers: 32,
+    songCount: 100,
+    pagesPerSong: 10,
+    pageSize: 25,
+    checkpointIntervalMs: 400,
+    checkpointPageCap: 4,
+    averageCheckpointBatchPages: 2,
+  };
+  const legacy = modelQQMusicBenchmark({
+    ...shared,
+    gateMaxConcurrent: 4,
+    gateMinStartDelayMs: 250,
+    checkpointSlots: 4,
+  });
+  const adaptive = modelQQMusicBenchmark({
+    ...shared,
+    gateMaxConcurrent: 32,
+    gateMinStartDelayMs: 80,
+    checkpointSlots: 32,
+  });
+
+  assert.ok(adaptive.commentsPerSecond > legacy.commentsPerSecond * 2);
+  assert.equal(adaptive.maxSameSongConcurrent, 1);
 });
 
 test("QQ likes workers share each lane's pacing while overlapping slow requests", () => {

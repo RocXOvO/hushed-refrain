@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NCM_DESKTOP_SMOKE = "1"
-          $appPath = Join-Path $PWD "release\win-unpacked\云评检索台.exe"
+          $appPath = Join-Path $PWD "release\win-unpacked\乐评寻踪.exe"
           $stdoutPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stdout.log"
           $stderrPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stderr.log"
           $resultPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-result.log"

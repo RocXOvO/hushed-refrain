@@ -5,8 +5,8 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const el = {
   parallelForm: $("#parallelForm"), sourceForm: $("#sourceForm"), parallelUid: $("#parallelUid"), uid: $("#uid"),
   qqSongForm: $("#qqSongForm"), qqLikesForm: $("#qqLikesForm"), qqSongTarget: $("#qqSongTarget"), qqLikesTarget: $("#qqLikesTarget"),
-  qqSongId: $("#qqSongId"), qqSongPreview: $("#qqSongPreview"), qqSongLookup: $("#qqSongLookupButton"),
-  songId: $("#songId"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
+  qqSongId: $("#qqSongId"), qqSongQuery: $("#qqSongQuery"), qqSongResults: $("#qqSongResults"), qqSongPreview: $("#qqSongPreview"), qqSongLookup: $("#qqSongLookupButton"),
+  songId: $("#songId"), songQuery: $("#neteaseSongQuery"), songResults: $("#neteaseSongResults"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
   poolStatus: $("#poolStatus"), poolState: $("#poolStateIndicator"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
@@ -14,7 +14,7 @@ const el = {
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"), exportResults: $("#exportResultsButton"),
   logs: $("#logsBody"), logPath: $("#logPath"),
-  connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
+  connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), parameterHelpDialog: $("#parameterHelpDialog"), parameterHelpTitle: $("#parameterHelpTitle"), parameterHelpDescription: $("#parameterHelpDescription"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementCoverage: $("#settlementCoverage"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"), settlementFootnote: $("#settlementFootnote"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
@@ -25,7 +25,7 @@ const el = {
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
   activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
-  appSplash: $("#appSplash"),
+  appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
 let platform = "netease";
@@ -73,6 +73,9 @@ let activeTaskMode;
 let activeTaskViewKey;
 let startSubmissionBusy = false;
 let qqLookupBusy = false;
+const qqLookupControllers = new Set();
+let desiredPlatform = platform;
+let platformTransition;
 let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
@@ -87,12 +90,51 @@ let activeSongsSignature = "";
 const activeSongRows = new Map();
 const inspectorOverlayQuery = matchMedia("(max-width: 1120px)");
 
+const PARAMETER_HELP = {
+  "target-netease": ["用户 UID", "输入网易云音乐用户主页里的数字 UID。它不是昵称；可以使用右侧的获取教程查看具体位置。"],
+  "target-qq": ["QQ 目标用户", "可输入数字 QQ 号、个人主页链接或 EncryptUin。实际匹配会使用规范化后的完整 EncryptUin。"],
+  song: ["歌曲", "输入 2–80 个字符的歌名或歌手，然后从候选项中选择。也可直接粘贴纯数字歌曲 ID，客户端会继续兼容这条高级路径。"],
+  "workers-per-exit": ["每出口工作线程", "同一个代理出口最多可同时调度的工作数。网易云会在基础请求周期内分配多个启动时隙；QQ 的 Governor 启动节奏按并发 1 计算，增加工作线程不会缩短单出口周期，但慢请求的网络在途仍可能重叠。"],
+  "total-workers": ["总工作线程上限", "整个任务在本机可创建的工作线程硬上限。实际数量还受可用出口、每出口工作线程和主机保护限制。"],
+  "exit-limit": ["任务出口上限", "只限制当前任务最多使用多少个已验证独立出口，不会缩小或重建共享代理池。0 表示自动使用当前全部可用出口。"],
+  "request-interval": ["每出口请求间隔", "每个出口的基础请求周期，随机抖动会在此基础上增加。网易云会按每出口工作线程数在周期内分配启动时隙；QQ 始终保持每出口完整周期。数值越小越快，但触发上游限流的概率也更高。"],
+  "request-limit": ["请求上限（0不限）", "限制当次运行可以预约的逻辑评论页数。0 表示不设任务级上限；停止后仍可从检查点继续。"],
+  fresh: ["新建状态", "开启后忽略该模式的旧检查点并重新扫描。关闭时会尝试按已保存的游标或分片续跑；已持久化结果仍会去重。"],
+};
+
 const TASK_VIEWS = {
   "netease:parallel": { platform: "netease", mode: "parallel", form: el.parallelForm, taskMode: "parallel", jobBase: "/api/parallel/job", resultsBase: "/api/parallel/results", label: "单曲并行" },
   "netease:source": { platform: "netease", mode: "source", form: el.sourceForm, taskMode: "source", jobBase: "/api/job", resultsBase: "/api/results", label: "用户来源" },
   "qq:song": { platform: "qq", mode: "song", form: el.qqSongForm, taskMode: "qq", jobBase: "/api/qq/job", resultsBase: "/api/qq/results", label: "QQ 单曲顺序" },
   "qq:likes": { platform: "qq", mode: "likes", form: el.qqLikesForm, taskMode: "qq", jobBase: "/api/qq/job", resultsBase: "/api/qq/results", label: "QQ 公开喜欢歌曲" },
 };
+
+const SONG_SEARCHES = {
+  netease: {
+    platform: "netease",
+    query: el.songQuery,
+    id: el.songId,
+    results: el.songResults,
+    preview: el.songPreview,
+    button: el.songLookup,
+    searchRoute: "/api/song/search",
+  },
+  qq: {
+    platform: "qq",
+    query: el.qqSongQuery,
+    id: el.qqSongId,
+    results: el.qqSongResults,
+    preview: el.qqSongPreview,
+    button: el.qqSongLookup,
+    searchRoute: "/api/qq/song/search",
+  },
+};
+for (const search of Object.values(SONG_SEARCHES)) {
+  search.generation = 0;
+  search.songs = [];
+  search.activeIndex = -1;
+  search.selectedQuery = "";
+}
 
 function taskViewKey(platformValue = platform, modeValue = mode) { return `${platformValue}:${modeValue}`; }
 function currentView() {
@@ -120,7 +162,7 @@ function payload(form) {
 }
 
 async function startParallel() {
-  if (!el.parallelForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
+  if (!ensureSongSelection(SONG_SEARCHES.netease) || !el.parallelForm.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
   if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
     toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
     return;
@@ -184,7 +226,7 @@ async function startQQ(qqMode) {
   if (startSubmissionBusy) return;
   const viewKey = `qq:${qqMode}`;
   const form = TASK_VIEWS[viewKey].form;
-  if (!form.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
+  if ((qqMode === "song" && !ensureSongSelection(SONG_SEARCHES.qq)) || !form.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
   if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
     toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
     return;
@@ -219,27 +261,222 @@ async function startQQ(qqMode) {
   } catch (error) { toast(error.message); } finally { setBusy(false); }
 }
 
-async function lookupSong() {
-  if (!el.songId.reportValidity()) return;
-  el.songLookup.disabled = true;
-  try { const song = await api(`/api/song?id=${encodeURIComponent(el.songId.value.trim())}`); el.songPreview.textContent = `${song.name || "未命名歌曲"} · ${(song.artists || []).join(" / ")}`; el.songPreview.hidden = false; }
-  catch (error) { el.songPreview.hidden = true; toast(error.message); } finally { el.songLookup.disabled = false; }
+function songLabel(song) {
+  const artists = Array.isArray(song.artists) ? song.artists.filter(Boolean).join(" / ") : "";
+  return [song.name || "未命名歌曲", artists, song.album].filter(Boolean).join(" · ");
 }
 
-async function lookupQQSong() {
-  if (!el.qqSongId.reportValidity()) return;
-  qqLookupBusy = true;
-  el.qqSongLookup.disabled = true;
-  try {
-    const params = new URLSearchParams({ id: el.qqSongId.value.trim() });
+function clearSongResults(search) {
+  search.songs = [];
+  search.activeIndex = -1;
+  search.results.replaceChildren();
+  search.results.hidden = true;
+  search.query.setAttribute("aria-expanded", "false");
+  search.query.removeAttribute("aria-activedescendant");
+}
+
+function renderSongResults(search, songs) {
+  search.songs = songs;
+  search.activeIndex = -1;
+  search.results.replaceChildren();
+  if (songs.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "song-search-empty";
+    empty.textContent = "没有找到匹配歌曲，可尝试更完整的歌名或歌手。";
+    search.results.append(empty);
+  } else {
+    songs.forEach((song, index) => {
+      const option = document.createElement("button");
+      option.id = `${search.platform}-song-option-${search.generation}-${index}`;
+      option.className = "song-search-option";
+      option.type = "button";
+      option.setAttribute("role", "option");
+      const title = document.createElement("strong");
+      title.textContent = song.name || "未命名歌曲";
+      const detail = document.createElement("span");
+      detail.textContent = [Array.isArray(song.artists) ? song.artists.filter(Boolean).join(" / ") : "", song.album].filter(Boolean).join(" · ") || "未提供歌手信息";
+      const id = document.createElement("small");
+      id.textContent = `ID ${song.id}`;
+      option.append(title, detail, id);
+      option.addEventListener("click", () => selectSongResult(search, index));
+      search.results.append(option);
+    });
+  }
+  search.results.hidden = false;
+  search.query.setAttribute("aria-expanded", "true");
+}
+
+function selectSongResult(search, index) {
+  const song = search.songs[index];
+  if (!song) return;
+  search.query.value = song.name || String(song.id);
+  search.id.value = String(song.id);
+  search.selectedQuery = search.query.value.trim();
+  search.query.setCustomValidity("");
+  search.preview.textContent = `${songLabel(song)} · ID ${song.id}`;
+  search.preview.hidden = false;
+  clearSongResults(search);
+  syncToolbarContext();
+}
+
+function setActiveSongOption(search, index) {
+  if (search.songs.length === 0) return;
+  search.activeIndex = (index + search.songs.length) % search.songs.length;
+  const options = [...search.results.querySelectorAll(".song-search-option")];
+  options.forEach((option, optionIndex) => option.classList.toggle("is-active", optionIndex === search.activeIndex));
+  const active = options[search.activeIndex];
+  if (active) {
+    search.query.setAttribute("aria-activedescendant", active.id);
+    active.scrollIntoView({ block: "nearest" });
+  }
+}
+
+function songSearchParams(search, key, value) {
+  const params = new URLSearchParams({ [key]: value });
+  if (search.platform === "qq") {
     const proxy = el.qqSongForm.elements.proxy.value.trim();
     if (proxy) params.set("proxy", proxy);
     if (el.qqSongForm.elements.allowDirect.checked) params.set("allowDirect", "1");
-    const song = await api(`/api/qq/song?${params}`);
-    el.qqSongPreview.textContent = `${song.name || "未命名歌曲"} · ${(song.artists || []).join(" / ")}`;
-    el.qqSongPreview.hidden = false;
-  } catch (error) { el.qqSongPreview.hidden = true; toast(error.message); }
-  finally { qqLookupBusy = false; el.qqSongLookup.disabled = false; }
+  }
+  return params;
+}
+
+async function runSongSearch(search, userInitiated = false) {
+  const query = search.query.value.trim();
+  const numeric = /^\d+$/.test(query);
+  if (!numeric && (query.length < 2 || query.length > 80)) {
+    clearSongResults(search);
+    if (userInitiated) {
+      search.query.setCustomValidity("请输入 2–80 个字符的歌名或歌手，或粘贴纯数字歌曲 ID。");
+      search.query.reportValidity();
+    }
+    return;
+  }
+  search.query.setCustomValidity("");
+  search.controller?.abort();
+  const controller = new AbortController();
+  search.controller = controller;
+  const generation = ++search.generation;
+  search.button.disabled = true;
+  if (search.platform === "qq") {
+    qqLookupControllers.add(controller);
+    qqLookupBusy = true;
+    syncTaskStartAvailability();
+  }
+  try {
+    if (numeric) {
+      search.id.value = query;
+      search.selectedQuery = query;
+      const route = search.platform === "qq" ? "/api/qq/song" : "/api/song";
+      const song = await api(`${route}?${songSearchParams(search, "id", query)}`, { signal: controller.signal });
+      if (generation !== search.generation || query !== search.query.value.trim()) return;
+      search.preview.textContent = `${songLabel(song)} · ID ${song.id || query}`;
+      search.preview.hidden = false;
+      clearSongResults(search);
+      return;
+    }
+    const response = await api(`${search.searchRoute}?${songSearchParams(search, "q", query)}`, { signal: controller.signal });
+    if (generation !== search.generation || query !== search.query.value.trim()) return;
+    const songs = Array.isArray(response.songs)
+      ? response.songs.filter((song) => song && /^\d+$/.test(String(song.id))).slice(0, 10)
+      : [];
+    renderSongResults(search, songs);
+  } catch (error) {
+    if (controller.signal.aborted || generation !== search.generation) return;
+    if (numeric) {
+      search.preview.textContent = `数字 ID ${query} · 未能获取歌曲信息，仍可按 ID 启动`;
+      search.preview.hidden = false;
+    } else {
+      clearSongResults(search);
+    }
+    if (userInitiated) toast(error.message);
+  } finally {
+    if (search.controller === controller) search.controller = undefined;
+    if (generation === search.generation) search.button.disabled = false;
+    if (search.platform === "qq") {
+      qqLookupControllers.delete(controller);
+      qqLookupBusy = qqLookupControllers.size > 0;
+      syncTaskStartAvailability();
+    }
+  }
+}
+
+function handleSongQueryInput(search) {
+  clearTimeout(search.timer);
+  search.controller?.abort();
+  search.generation += 1;
+  clearSongResults(search);
+  const query = search.query.value.trim();
+  const numeric = /^\d+$/.test(query);
+  search.id.value = numeric ? query : "";
+  search.selectedQuery = numeric ? query : "";
+  search.query.setCustomValidity("");
+  search.preview.hidden = true;
+  if (numeric) {
+    search.preview.textContent = `数字 ID ${query} · 正在确认歌曲信息…`;
+    search.preview.hidden = false;
+    search.timer = setTimeout(() => void runSongSearch(search), 320);
+  } else if (query.length >= 2 && query.length <= 80) {
+    search.timer = setTimeout(() => void runSongSearch(search), 320);
+  }
+}
+
+function ensureSongSelection(search) {
+  const query = search.query.value.trim();
+  if (/^\d+$/.test(query)) {
+    search.id.value = query;
+    search.selectedQuery = query;
+  }
+  const valid = /^\d+$/.test(search.id.value) && search.selectedQuery === query;
+  search.query.setCustomValidity(valid ? "" : "请从候选列表选择歌曲，或输入纯数字歌曲 ID。");
+  if (!valid) search.query.reportValidity();
+  return valid;
+}
+
+function restoreSongSearchSelection(search) {
+  const id = search.id.value.trim();
+  if (!/^\d+$/.test(id)) return;
+  search.query.value = id;
+  search.selectedQuery = id;
+  search.preview.textContent = `已恢复歌曲 ID ${id}`;
+  search.preview.hidden = false;
+}
+
+function setupSongSearch(search) {
+  search.query.removeAttribute("minlength");
+  search.query.setAttribute("role", "combobox");
+  search.query.setAttribute("aria-haspopup", "listbox");
+  search.query.setAttribute("aria-expanded", "false");
+  search.query.addEventListener("input", () => handleSongQueryInput(search));
+  search.query.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      clearSongResults(search);
+      return;
+    }
+    if (["ArrowDown", "ArrowUp"].includes(event.key) && !search.results.hidden && search.songs.length > 0) {
+      event.preventDefault();
+      setActiveSongOption(search, search.activeIndex + (event.key === "ArrowDown" ? 1 : -1));
+      return;
+    }
+    if (event.key === "Enter" && !search.results.hidden && search.activeIndex >= 0) {
+      event.preventDefault();
+      selectSongResult(search, search.activeIndex);
+      return;
+    }
+    if (event.key === "Enter" && !/^\d+$/.test(search.query.value.trim())) {
+      event.preventDefault();
+      void runSongSearch(search, true);
+    }
+  });
+  search.button.addEventListener("click", () => void runSongSearch(search, true));
+}
+
+function openParameterHelp(key) {
+  const content = PARAMETER_HELP[key];
+  if (!content) return;
+  el.parameterHelpTitle.textContent = content[0];
+  el.parameterHelpDescription.textContent = content[1];
+  el.parameterHelpDialog.showModal();
 }
 
 async function lookupUser() {
@@ -405,7 +642,7 @@ function renderParallel(job) {
   });
   renderActiveSongs(
     active ? job.activeSongs || [] : [],
-    job.songId ? `${fmt(job.lanes || 1)} 出口 · ${fmt(job.workers || 1)} Worker${transportConcurrencyText(job)}` : "等待任务调度",
+    job.songId ? `${fmt(job.lanes || 1)} 出口 · ${fmt(job.workers || 1)} 工作线程${transportConcurrencyText(job)}` : "等待任务调度",
     job.workers,
   );
   el.stop.disabled = !active;
@@ -420,7 +657,7 @@ function renderSource(job) {
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
-  el.workLabel.textContent = "已扫页面"; el.work.textContent = fmt(job.pagesProcessed); el.speed.textContent = formatRate(job.commentsPerSecond); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
+  el.workLabel.textContent = "已读评论"; el.work.textContent = fmt(job.commentsInspected); el.speed.textContent = formatRate(job.commentsPerSecond); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
   const globalPercent = job.songs ? Math.min(100, Math.round(job.songsProcessed / job.songs * 100)) : 0;
   const topology = `${fmt(job.lanes || 1)} 个出口 · ${fmt(job.workers || 1)} 个工作线程${transportConcurrencyText(job)}`;
   renderProgress({
@@ -453,7 +690,7 @@ function renderQQ(job) {
   const configuredWorkers = job.mode === "song" ? 1 : Number(job.configuredWorkers || 0);
   const topology = job.mode === "song"
     ? `${fmt(job.configuredLanes || 1)} 个可轮转出口 · 1 条 SeqNo 链`
-    : `${fmt(job.configuredLanes || 1)} 个配置出口 · ${fmt(configuredWorkers)} 个有界 Worker`;
+    : `${fmt(job.configuredLanes || 1)} 个配置出口 · ${fmt(configuredWorkers)} 个有界工作线程`;
   el.taskTitle.textContent = !job.id
     ? job.mode === "song" ? "等待 QQ 单曲任务" : "等待 QQ 喜欢歌曲任务"
     : job.mode === "song"
@@ -474,7 +711,7 @@ function renderQQ(job) {
   });
   renderActiveSongs(
     active ? job.activeSongs || [] : [],
-    job.id ? `${topology} · 本轮已参与 ${fmt(job.participatedLanes)} Lane / ${fmt(job.participatedWorkers)} Worker · 峰值在途 ${fmt(job.peakInFlight)}` : "等待任务调度",
+    job.id ? `${topology} · 本轮已参与 ${fmt(job.participatedLanes)} 出口 / ${fmt(job.participatedWorkers)} 工作线程 · 峰值在途 ${fmt(job.peakInFlight)}` : "等待任务调度",
     configuredWorkers,
   );
   el.stop.disabled = !active;
@@ -541,7 +778,7 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
   if (signature === activeSongsSignature) return;
   activeSongsSignature = signature;
   el.activeSongCount.textContent = `${fmt(normalized.length)} 首`;
-  el.activeWorkerCount.textContent = `${fmt(activeWorkers)} / ${fmt(workerCapacity)} Worker 活跃`;
+  el.activeWorkerCount.textContent = `${fmt(activeWorkers)} / ${fmt(workerCapacity)} 工作线程活跃`;
   el.activeSongSummary.textContent = summary;
   if (normalized.length === 0) {
     activeSongRows.clear();
@@ -600,7 +837,7 @@ function updateActiveSongRow(entry, song) {
   entry.badge.classList.toggle("is-waiting", song.workers === 0);
   entry.name.textContent = song.name || "正在读取歌曲名称";
   entry.id.textContent = song.id;
-  entry.workers.textContent = `${fmt(song.workers)} Worker`;
+  entry.workers.textContent = `${fmt(song.workers)} 工作线程`;
   renderSongReadProgress(song, entry);
 }
 
@@ -1384,7 +1621,9 @@ async function refreshEstimate(reportInvalid = true) {
       && Number(job.averagePageRequestMs) >= 0
       && Number(job.averageCommentsPerPage) > 0;
     const effectiveTransport = view.platform === "qq"
-      ? 4
+      ? sameConfiguration && Number(job.proxyTransportEffectiveConcurrent) > 0
+        ? Math.min(actualWorkers, Number(job.proxyTransportEffectiveConcurrent))
+        : actualWorkers
       : proxyTransport && sameConfiguration && Number(job.proxyTransportEffectiveConcurrent) > 0
       ? Math.min(hostConcurrency, Number(job.proxyTransportEffectiveConcurrent))
       : hostConcurrency;
@@ -1422,7 +1661,7 @@ async function refreshEstimate(reportInvalid = true) {
     const scanMode = view.label;
     const transport = value.proxyTransportMaxConcurrent
       ? view.platform === "qq"
-        ? ` · QQ 固定 Gate：最多 ${fmt(value.proxyTransportEffectiveConcurrent)} 个在途，请求启动间隔至少 ${fmt(value.proxyTransportEffectiveStartDelayMs)}ms`
+        ? ` · QQ 动态聚合保护：最多 ${fmt(value.proxyTransportEffectiveConcurrent)} 个在途，请求启动间隔至少 ${fmt(value.proxyTransportEffectiveStartDelayMs)}ms`
         : ` · 主机聚合保护：配置 ${fmt(value.proxyTransportMaxConcurrent)}，当前有效 ${fmt(value.proxyTransportEffectiveConcurrent)} 并发，实际启动间隔 ${fmt(value.proxyTransportEffectiveStartDelayMs)}..${fmt(value.proxyTransportEffectiveStartDelayMs + value.proxyTransportStartJitterMs)}ms`
       : "";
     const calibration = calibrated
@@ -1431,9 +1670,9 @@ async function refreshEstimate(reportInvalid = true) {
     const topology = view.mode === "song"
       ? `${fmt(value.lanes)} 个出口轮转 · 1 条串行 SeqNo 链`
       : view.platform === "qq"
-      ? `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} Worker · ${fmt(Math.min(value.totalWorkers, hostConcurrency))} 个有界 Worker · 最多 ${fmt(value.effectiveWorkers)} 个在途`
-      : `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} Worker · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} Worker`;
-    const pacing = view.platform === "qq" ? " · Worker 共享单出口请求节奏 · 检查点页槽上限 4" : "";
+      ? `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 工作线程 · ${fmt(Math.min(value.totalWorkers, hostConcurrency))} 个有界工作线程 · 最多 ${fmt(value.effectiveWorkers)} 个在途`
+      : `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 工作线程 · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} 工作线程`;
+    const pacing = view.platform === "qq" ? ` · 工作线程共享单出口请求节奏 · 检查点在途槽 ${fmt(value.checkpointSlots)}` : "";
     el.estimateContext.textContent = `${scanMode} · ${fmt(value.partitions)} 个独立分页区间 · ${topology} · 每页上限 ${fmt(pageSize)} 条 · ${calibration}${transport}${pacing} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
   } catch (error) { if (request === estimateRequest && requestedView === taskViewKey()) toast(error.message); }
   finally { if (request === estimateRequest) el.estimateButton.disabled = false; }
@@ -1511,7 +1750,7 @@ async function checkUpdates(notifyWhenCurrent) {
 }
 
 function renderUpdate(update) {
-  el.updateReleaseName.textContent = update.releaseName || `云评检索台 v${update.latestVersion}`;
+  el.updateReleaseName.textContent = update.releaseName || `乐评寻踪 v${update.latestVersion}`;
   el.updatePublishedAt.textContent = update.publishedAt ? `发布于 ${dateOnly(update.publishedAt)}` : "已有新版本可下载";
   el.currentVersion.textContent = `v${update.currentVersion}`;
   el.latestVersion.textContent = `v${update.latestVersion}`;
@@ -1537,7 +1776,7 @@ function renderWindowsUpdate(state) {
   el.updateIndicator.hidden = !hasUpdate;
 
   if (state.latestVersion) {
-    el.updateReleaseName.textContent = state.releaseName || `云评检索台 v${state.latestVersion}`;
+    el.updateReleaseName.textContent = state.releaseName || `乐评寻踪 v${state.latestVersion}`;
     el.updatePublishedAt.textContent = state.releaseDate ? `发布于 ${dateOnly(state.releaseDate)}` : "已有新版本可安装";
     el.currentVersion.textContent = `v${state.currentVersion}`;
     el.latestVersion.textContent = `v${state.latestVersion}`;
@@ -1699,14 +1938,11 @@ async function restoreResumeTask() {
     }
     platform = descriptorPlatform;
     mode = descriptor.mode;
+    desiredPlatform = platform;
     selectedModes[platform] = mode;
-    document.body.dataset.platform = platform;
-    document.body.dataset.mode = mode;
-    el.login.hidden = platform === "qq";
-    for (const input of $$('input[name="platform"]')) input.checked = input.value === platform;
-    configureModeSwitch();
-    for (const input of $$('input[name="mode"]')) input.checked = input.value === mode;
-    syncModeVisibility();
+    applyPlatformPresentation();
+    restoreSongSearchSelection(SONG_SEARCHES.netease);
+    restoreSongSearchSelection(SONG_SEARCHES.qq);
     $("#parallelFresh").checked = false;
     $("#fresh").checked = false;
     $("#qqSongFresh").checked = false;
@@ -1768,27 +2004,152 @@ function configureModeSwitch() {
   });
 }
 
-async function switchPlatform(value) {
-  if (value === platform || !["netease", "qq"].includes(value)) return;
-  const switchVersion = ++modeSwitchVersion;
-  const previousForm = currentForm();
-  selectedModes[platform] = mode;
-  platform = value;
-  mode = selectedModes[platform];
+function applyPlatformPresentation() {
   document.body.dataset.platform = platform;
   document.body.dataset.mode = mode;
+  el.platformIdentity.textContent = platform === "qq" ? "QQ MUSIC WORKSPACE" : "NETEASE WORKSPACE";
   el.login.hidden = platform === "qq";
+  for (const input of $$('input[name="platform"]')) input.checked = input.value === platform;
   configureModeSwitch();
+  syncModeVisibility();
   syncToolbarContext();
   syncResultExportAvailability();
-  resetVisibleResults();
-  resetVisibleLogs();
-  connectResultStream();
-  await slideSwap(previousForm, currentForm(), platform === "qq" ? 1 : -1);
-  if (switchVersion !== modeSwitchVersion) {
-    syncModeVisibility();
+}
+
+function createPlatformTransition(targetPlatform, commit) {
+  const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+  if (reducedMotion.matches || document.hidden || typeof HTMLCanvasElement === "undefined") {
+    commit();
+    return { finished: Promise.resolve(true), cancel() {} };
+  }
+  const canvas = document.createElement("canvas");
+  canvas.className = "platform-transition-canvas";
+  canvas.setAttribute("aria-hidden", "true");
+  const context = canvas.getContext("2d", { alpha: true });
+  if (!context) {
+    commit();
+    return { finished: Promise.resolve(true), cancel() {} };
+  }
+  const width = Math.max(1, innerWidth);
+  const height = Math.max(1, innerHeight);
+  const dpr = Math.min(1.5, Math.max(1, devicePixelRatio || 1));
+  canvas.width = Math.round(width * dpr);
+  canvas.height = Math.round(height * dpr);
+  context.setTransform(dpr, 0, 0, dpr, 0, 0);
+  document.body.append(canvas);
+
+  const particleCount = width <= 820 ? 76 : 148;
+  const particles = Array.from({ length: particleCount }, () => ({
+    x: -width * (.08 + Math.random() * .42),
+    y: height * (.7 + Math.random() * .55),
+    z: 40 + Math.random() * 520,
+    velocity: .72 + Math.random() * .8,
+    size: 1.1 + Math.random() * 3.1,
+    alpha: .28 + Math.random() * .66,
+    drift: (Math.random() - .5) * 26,
+  }));
+  const targetColor = targetPlatform === "qq" ? [7, 140, 171] : [211, 58, 67];
+  const sourceColor = platform === "qq" ? [7, 140, 171] : [211, 58, 67];
+  const duration = 660;
+  const commitPoint = .48;
+  const startedAt = performance.now();
+  let frame;
+  let settled = false;
+  let committed = false;
+  let finishPromiseResolve;
+  const finished = new Promise((resolve) => { finishPromiseResolve = resolve; });
+
+  const cleanup = () => {
+    if (frame !== undefined) cancelAnimationFrame(frame);
+    document.removeEventListener("visibilitychange", handleVisibility);
+    reducedMotion.removeEventListener("change", handleMotionPreference);
+    canvas.width = 1;
+    canvas.height = 1;
+    canvas.remove();
+  };
+  const settle = (complete) => {
+    if (settled) return;
+    settled = true;
+    if (complete && !committed) {
+      committed = true;
+      commit();
+    }
+    cleanup();
+    finishPromiseResolve(complete);
+  };
+  const handleVisibility = () => { if (document.hidden) settle(true); };
+  const handleMotionPreference = (event) => { if (event.matches) settle(true); };
+  document.addEventListener("visibilitychange", handleVisibility);
+  reducedMotion.addEventListener("change", handleMotionPreference);
+
+  const draw = (now) => {
+    if (settled) return;
+    const progress = Math.min(1, (now - startedAt) / duration);
+    if (!committed && progress >= commitPoint) {
+      committed = true;
+      commit();
+    }
+    context.clearRect(0, 0, width, height);
+    const envelope = Math.sin(Math.PI * progress);
+    const veil = context.createLinearGradient(0, height, width, 0);
+    veil.addColorStop(0, `rgba(${sourceColor.join(",")},${.09 * envelope})`);
+    veil.addColorStop(.5, `rgba(${targetColor.join(",")},${.15 * envelope})`);
+    veil.addColorStop(1, "rgba(255,255,255,0)");
+    context.fillStyle = veil;
+    context.fillRect(0, 0, width, height);
+    for (const particle of particles) {
+      const depth = 330 / (330 + particle.z);
+      const travel = progress * particle.velocity;
+      const x = particle.x + width * 1.55 * travel + particle.drift * progress;
+      const y = particle.y - height * 1.5 * travel - particle.drift * .35 * progress;
+      const radius = Math.max(.55, particle.size * depth * 1.65);
+      const alpha = particle.alpha * envelope * (.5 + depth * .8);
+      const trail = 18 + 58 * depth;
+      const gradient = context.createLinearGradient(x - trail, y + trail, x, y);
+      gradient.addColorStop(0, `rgba(${targetColor.join(",")},0)`);
+      gradient.addColorStop(1, `rgba(${targetColor.join(",")},${alpha})`);
+      context.beginPath();
+      context.moveTo(x - trail, y + trail);
+      context.lineTo(x, y);
+      context.strokeStyle = gradient;
+      context.lineWidth = Math.max(.6, radius * .7);
+      context.stroke();
+      context.beginPath();
+      context.arc(x, y, radius, 0, Math.PI * 2);
+      context.fillStyle = `rgba(${targetColor.join(",")},${Math.min(1, alpha + .12)})`;
+      context.fill();
+    }
+    if (progress >= 1) settle(true);
+    else frame = requestAnimationFrame(draw);
+  };
+  frame = requestAnimationFrame(draw);
+  return { finished, cancel: () => settle(false) };
+}
+
+async function switchPlatform(value) {
+  if (!["netease", "qq"].includes(value)) return;
+  desiredPlatform = value;
+  const switchVersion = ++modeSwitchVersion;
+  platformTransition?.cancel();
+  platformTransition = undefined;
+  if (value === platform) {
+    applyPlatformPresentation();
     return;
   }
+  const transition = createPlatformTransition(value, () => {
+    if (switchVersion !== modeSwitchVersion || desiredPlatform !== value) return;
+    selectedModes[platform] = mode;
+    platform = value;
+    mode = selectedModes[platform];
+    applyPlatformPresentation();
+    resetVisibleResults();
+    resetVisibleLogs();
+    connectResultStream();
+  });
+  platformTransition = transition;
+  const completed = await transition.finished;
+  if (platformTransition === transition) platformTransition = undefined;
+  if (!completed || switchVersion !== modeSwitchVersion || desiredPlatform !== value || platform !== value) return;
   knownMatches = -1;
   void refresh(); void refreshResults();
   if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
@@ -1914,7 +2275,8 @@ async function setupDesktopWindowControls() {
 }
 
 function syncTaskStartAvailability() {
-  const disabled = startSubmissionBusy || Boolean(activeTaskMode) || poolChangeInFlight || poolStatus === "starting" || poolRefreshing;
+  const disabled = startSubmissionBusy || qqLookupBusy || Boolean(activeTaskMode)
+    || poolChangeInFlight || poolStatus === "starting" || poolRefreshing;
   el.parallelStart.disabled = disabled;
   el.sourceStart.disabled = disabled;
   el.qqSongStart.disabled = disabled;
@@ -1947,8 +2309,8 @@ function syncToolbarContext() {
     ? `用户来源 · ${sourceName(form.elements.source?.value)}`
     : view.label;
   el.toolbarTopology.textContent = poolRunning
-    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} Worker${mode === "song" ? " · 单链轮转" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? " · 最多 4 在途" : ""}`
-    : `1 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} Worker${mode === "song" ? " · 单链" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? " · 最多 4 在途" : ""}`;
+    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} 工作线程${mode === "song" ? " · 单链轮转" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? ` · 最多 ${fmt(actualWorkers)} 在途` : ""}`
+    : `1 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} 工作线程${mode === "song" ? " · 单链" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? ` · 最多 ${fmt(actualWorkers)} 在途` : ""}`;
 }
 function setActiveNavigation(view) {
   $$('[data-nav-view]').forEach((item) => {
@@ -2046,8 +2408,8 @@ function transportConcurrencyText(job) {
   if (!Number.isFinite(configured) || configured <= 0) return "";
   const effective = Number(job.proxyTransportEffectiveConcurrent);
   return Number.isFinite(effective) && effective > 0 && effective < configured
-    ? ` · 主机并发上限 ${fmt(configured)} · 自动降载至 ${fmt(effective)}`
-    : ` · 主机并发上限 ${fmt(configured)}`;
+    ? ` · 总工作线程上限 ${fmt(configured)} · 自动降载至 ${fmt(effective)}`
+    : ` · 总工作线程上限 ${fmt(configured)}`;
 }
 function topologyCapacityNote(job) {
   return "";
@@ -2086,8 +2448,14 @@ el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); 
 el.sourceForm.addEventListener("submit", (event) => { event.preventDefault(); void startSource(false); });
 el.qqSongForm.addEventListener("submit", (event) => { event.preventDefault(); void startQQ("song"); });
 el.qqLikesForm.addEventListener("submit", (event) => { event.preventDefault(); void startQQ("likes"); });
-el.qqSongLookup.addEventListener("click", () => void lookupQQSong());
-el.dryRun.addEventListener("click", () => void startSource(true)); el.songLookup.addEventListener("click", () => void lookupSong()); el.lookup.addEventListener("click", () => void lookupUser());
+for (const search of Object.values(SONG_SEARCHES)) setupSongSearch(search);
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target instanceof Element ? event.target : undefined;
+  for (const search of Object.values(SONG_SEARCHES)) {
+    if (!target?.closest(`[data-song-search="${search.platform}"]`)) clearSongResults(search);
+  }
+});
+el.dryRun.addEventListener("click", () => void startSource(true)); el.lookup.addEventListener("click", () => void lookupUser());
 el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEventListener("click", () => void stopJob()); el.refresh.addEventListener("click", () => void refresh());
 el.clashConfigSelectAll.addEventListener("click", toggleClashConfigs);
 el.clashConfig.addEventListener("change", () => {
@@ -2110,8 +2478,11 @@ el.estimateButton.addEventListener("click", () => void refreshEstimate());
 allEstimateInputs().forEach((input) => input.addEventListener("input", () => scheduleEstimateRefresh()));
 $$('[data-comments]').forEach((button) => button.addEventListener("click", () => { el.estimateComments.value = button.dataset.comments; void refreshEstimate(); }));
 $$('[data-open-uid-help]').forEach((button) => button.addEventListener("click", () => el.uidHelpDialog.showModal()));
+$$('[data-help-key]').forEach((button) => button.addEventListener("click", (event) => { event.preventDefault(); event.stopPropagation(); openParameterHelp(button.dataset.helpKey); }));
 $("#closeUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
 $("#gotUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
+$("#closeParameterHelpButton").addEventListener("click", () => el.parameterHelpDialog.close());
+$("#gotParameterHelpButton").addEventListener("click", () => el.parameterHelpDialog.close());
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
 $("#closeSettlementButton").addEventListener("click", () => el.settlementDialog.close());
 $("#viewSettlementLogsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("logs")) void refreshLogs(); });
@@ -2144,6 +2515,7 @@ setupAnimatedDisclosures(); void setupDesktopWindowControls();
 configureModeSwitch();
 syncModeVisibility();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));
+setInspectorCollapsed(document.body.classList.contains("inspector-collapsed"));
 syncInspectorForViewport();
 syncResultExportAvailability();
 inspectorOverlayQuery.addEventListener("change", syncInspectorForViewport);
@@ -2183,6 +2555,11 @@ addEventListener("visibilitychange", () => {
   }
 });
 addEventListener("pagehide", () => {
+  platformTransition?.cancel();
+  for (const search of Object.values(SONG_SEARCHES)) {
+    clearTimeout(search.timer);
+    search.controller?.abort();
+  }
   resultStream?.close();
   clearTimeout(resultRenderTimer);
   clearTimeout(refreshTimer);

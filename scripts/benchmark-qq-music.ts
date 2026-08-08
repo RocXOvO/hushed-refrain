@@ -2,12 +2,12 @@ import { modelQQMusicBenchmark, type QQMusicBenchmarkInput } from "../src/qq-mus
 
 const common = {
   workersPerLane: 1,
-  maxWorkers: 8,
+  maxWorkers: 32,
   songCount: 1,
   pagesPerSong: 1_000,
   minDelayMs: 3_000,
   averageJitterMs: 500,
-  gateMaxConcurrent: 4,
+  gateMaxConcurrent: 1,
   gateMinStartDelayMs: 250,
   averageRequestMs: 150,
   averageCheckpointMs: 20,
@@ -30,8 +30,49 @@ const scenarios: Array<{ name: string; input: QQMusicBenchmarkInput }> = [
       pagesPerSong: 10,
       pageSize: 25,
       sourceRequests: 2,
+      gateMaxConcurrent: 32,
+      gateMinStartDelayMs: 80,
       checkpointIntervalMs: 400,
       checkpointPageCap: 4,
+      checkpointSlots: 32,
+      averageCheckpointBatchPages: 2,
+    },
+  },
+  {
+    name: "likes-32-lanes-adaptive-gate-32",
+    input: {
+      ...common,
+      mode: "likes",
+      lanes: 32,
+      workersPerLane: 1,
+      songCount: 100,
+      pagesPerSong: 10,
+      pageSize: 25,
+      sourceRequests: 2,
+      gateMaxConcurrent: 32,
+      gateMinStartDelayMs: 80,
+      checkpointIntervalMs: 400,
+      checkpointPageCap: 4,
+      checkpointSlots: 32,
+      averageCheckpointBatchPages: 2,
+    },
+  },
+  {
+    name: "likes-32-lanes-legacy-gate-4",
+    input: {
+      ...common,
+      mode: "likes",
+      lanes: 32,
+      workersPerLane: 1,
+      songCount: 100,
+      pagesPerSong: 10,
+      pageSize: 25,
+      sourceRequests: 2,
+      gateMaxConcurrent: 4,
+      gateMinStartDelayMs: 250,
+      checkpointIntervalMs: 400,
+      checkpointPageCap: 4,
+      checkpointSlots: 4,
       averageCheckpointBatchPages: 2,
     },
   },
@@ -47,6 +88,8 @@ const pageOne = byName.get("song-4-lanes-page-1")!;
 const fourLanes = byName.get("song-4-lanes-page-25")!;
 const eightLanes = byName.get("song-8-lanes-page-25")!;
 const oneLane = byName.get("song-1-lane-page-25")!;
+const adaptiveLikes = byName.get("likes-32-lanes-adaptive-gate-32")!;
+const legacyGateLikes = byName.get("likes-32-lanes-legacy-gate-4")!;
 
 process.stdout.write(`${JSON.stringify({
   model: "qq-delay-bound-v1",
@@ -60,6 +103,9 @@ process.stdout.write(`${JSON.stringify({
     page25VsPage1AtFourLanes: fourLanes.commentsPerSecond / pageOne.commentsPerSecond,
     eightLanesVsFourLanesAtPage25: eightLanes.commentsPerSecond / fourLanes.commentsPerSecond,
     oneLaneCommentsPerSecondAtPage25: oneLane.commentsPerSecond,
+    adaptiveGate32VsLegacyFixed4: adaptiveLikes.commentsPerSecond / legacyGateLikes.commentsPerSecond,
+    adaptiveGate32CommentsPerSecond: adaptiveLikes.commentsPerSecond,
+    legacyFixed4CommentsPerSecond: legacyGateLikes.commentsPerSecond,
     likedSourceDiscovery: {
       oldLikedPageSize100Requests: 10,
       newLikedPageSize500Requests: 2,

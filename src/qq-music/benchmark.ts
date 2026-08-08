@@ -20,6 +20,7 @@ export interface QQMusicBenchmarkInput {
   averageCheckpointBytes?: number;
   checkpointIntervalMs?: number;
   checkpointPageCap?: number;
+  checkpointSlots?: number;
   averageCheckpointBatchPages?: number;
   sourceRequests?: number;
 }
@@ -84,7 +85,7 @@ export function modelQQMusicBenchmark(
       input.songCount,
       workers,
       input.gateMaxConcurrent,
-      input.checkpointPageCap ?? 4,
+      input.checkpointSlots ?? input.gateMaxConcurrent,
     ));
     startIntervalMs = Math.max(
       input.gateMinStartDelayMs,
@@ -155,6 +156,7 @@ function validateInput(input: QQMusicBenchmarkInput): void {
   if (input.averageCheckpointBytes !== undefined) nonNegative(input.averageCheckpointBytes, "averageCheckpointBytes");
   if (input.checkpointIntervalMs !== undefined) nonNegative(input.checkpointIntervalMs, "checkpointIntervalMs");
   if (input.checkpointPageCap !== undefined) positiveInteger(input.checkpointPageCap, "checkpointPageCap");
+  if (input.checkpointSlots !== undefined) positiveInteger(input.checkpointSlots, "checkpointSlots");
   if (input.averageCheckpointBatchPages !== undefined) {
     positive(input.averageCheckpointBatchPages, "averageCheckpointBatchPages");
     if (input.averageCheckpointBatchPages > (input.checkpointPageCap ?? 4)) {

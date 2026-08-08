@@ -14,6 +14,7 @@ function report(): ResultReport {
     matches: 1,
     requestsTotal: 9,
     pagesProcessed: 3,
+    commentsInspected: 2_345,
     coverageLabel: "2 / 100 首歌曲",
     exportedAt: "2026-08-07T12:01:02.000Z",
     comments: [{
@@ -43,6 +44,7 @@ function qqReport(): ResultReport {
     matches: 1,
     requestsTotal: 9,
     pagesProcessed: 3,
+    commentsInspected: 75,
     coverageLabel: "2 / 100 首公开喜欢歌曲",
     exportedAt: "2026-08-07T12:01:02.000Z",
     comments: [{
@@ -68,6 +70,7 @@ test("renders a printable Chinese report while escaping all scanned content", ()
   assert.match(html, /UID 9000000001 评论检索报告/);
   assert.match(html, /name="result-report-uid" content="9000000001"/);
   assert.match(html, /文件累计 1 · 检查点统计 1/);
+  assert.match(html, /已读评论<\/span><strong>2,345/);
   assert.match(html, /中文评论 &amp; 换行/);
   assert.match(html, /测试歌曲 &lt;危险&gt;/);
   assert.match(html, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
@@ -97,6 +100,7 @@ test("renders QQ reports with generation metadata and rebuilds only trusted QQ M
   assert.match(html, /name="result-report-target-kind" content="encryptUin"/);
   assert.match(html, /name="result-report-target" content="opaque-user_1234"/);
   assert.match(html, /公开喜欢/);
+  assert.match(html, /已读评论<\/span><strong>75/);
   assert.match(html, /opaq\*\*\*\*1234/);
   assert.match(html, /测试 QQ 歌曲 &lt;危险&gt;/);
   assert.match(html, /https:\/\/y\.qq\.com\/n\/ryqq\/songDetail\/102065756/);

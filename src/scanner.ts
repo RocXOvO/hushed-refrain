@@ -693,6 +693,9 @@ async function runHistory(
       ),
     );
 
+    state.commentOffset += page.comments.length;
+    state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
+
     const matches = page.comments.filter((comment) => comment.userId === options.uid);
     const added = await appendMatches(results, matches.map((comment) => ({
       ...comment,
@@ -1303,6 +1306,7 @@ function report(
     requestsThisRun: governor.requestsUsed,
     requestsTotal: initialRequests + governor.requestsUsed,
     pagesProcessed: state.pagesProcessed ?? 0,
+    commentsInspected: inspectedComments(state),
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
     statePath: options.statePath,
@@ -1336,6 +1340,7 @@ function pooledReport(
     lanes: lanes.length,
     workers: workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers),
     pagesProcessed: state.pagesProcessed ?? 0,
+    commentsInspected: inspectedComments(state),
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
     statePath: options.statePath,
@@ -1361,6 +1366,12 @@ function ensureSongProgress(state: ScanState): void {
     progress.commentPageNo ??= 1;
   }
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
+}
+
+function inspectedComments(state: ScanState): number {
+  if (state.strategy === "history") return state.commentOffset;
+  return state.songProgress?.reduce((total, progress) => total + progress.commentOffset, 0)
+    ?? state.commentOffset;
 }
 
 function prepareSourceWork(state: ScanState, desiredWorkItems: number, maxPages: number): SourceScanWork[] {
@@ -1564,6 +1575,7 @@ function publishCheckpointProgress(options: ScanOptions, state: ScanState): void
       matches: state.matchCount,
       requestsTotal: state.requestCount,
       pagesProcessed: state.pagesProcessed ?? 0,
+      commentsInspected: inspectedComments(state),
       coverageComplete: state.coverageComplete,
       sourceErrors: [...state.sourceErrors],
       blockedUntil: state.blockedUntil,

@@ -20,7 +20,7 @@ class FakeUpdater extends EventEmitter implements WindowsUpdaterBackend {
     this.emit("checking-for-update");
     this.emit("update-available", {
       version: "0.4.0",
-      releaseName: "云评检索台 v0.4.0",
+      releaseName: "乐评寻踪 v0.4.0",
       releaseDate: "2026-08-07T00:00:00Z",
       releaseNotes: [{ note: "新增自动更新。" }, { note: "修复下载状态。" }],
     });
@@ -28,7 +28,7 @@ class FakeUpdater extends EventEmitter implements WindowsUpdaterBackend {
 
   async downloadUpdate(): Promise<void> {
     this.emit("download-progress", { percent: 42.5, transferred: 425, total: 1000, bytesPerSecond: 200 });
-    this.emit("update-downloaded", { version: "0.4.0", releaseName: "云评检索台 v0.4.0" });
+    this.emit("update-downloaded", { version: "0.4.0", releaseName: "乐评寻踪 v0.4.0" });
   }
 
   quitAndInstall(isSilent?: boolean, isForceRunAfter?: boolean): void {
@@ -92,13 +92,13 @@ test("converts HTML release notes into readable safe text", async () => {
       releaseNotes: `<h2>更新内容</h2><ul>
         <li><strong>修复</strong>启动闪退</li>
         <li>并发 &amp; 估算同步 &#x1F680;</li>
-      </ul><p>感谢使用&nbsp;云评检索台。</p><script>alert("hidden")</script>`,
+      </ul><p>感谢使用&nbsp;乐评寻踪。</p><script>alert("hidden")</script>`,
     });
   };
   const controller = new WindowsUpdateController(updater, "0.4.0", () => {});
 
   const state = await controller.check();
 
-  assert.equal(state.releaseNotes, "更新内容\n• 修复启动闪退\n• 并发 & 估算同步 🚀\n感谢使用 云评检索台。");
+  assert.equal(state.releaseNotes, "更新内容\n• 修复启动闪退\n• 并发 & 估算同步 🚀\n感谢使用 乐评寻踪。");
   assert.doesNotMatch(state.releaseNotes ?? "", /<[^>]+>|alert\(/);
 });

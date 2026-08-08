@@ -29,6 +29,7 @@ import {
 import {
   DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT,
   DEFAULT_QQ_TRANSPORT_START_DELAY_MS,
+  qqMusicTransportProfile,
 } from "./qq-music/transport-gate";
 import { stableQQMusicTaskKey } from "./qq-music/state";
 import type {
@@ -40,6 +41,7 @@ import type {
   QQMusicScanReport,
   QQMusicSongActivity,
 } from "./qq-music/types";
+import type { SongSearchResult } from "./types";
 import { taskElapsedMs, type TaskCoordinator, type TaskLease } from "./task-coordinator";
 import { readTaskLog, TaskLogger, type TaskLogEntry } from "./task-log";
 import { workerCountForTopology } from "./worker-topology";
@@ -167,6 +169,7 @@ export interface QQReportDescriptor {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  commentsInspected: number;
   coverageLabel: string;
   exportedAt: string;
   comments: QQMusicFoundComment[];
@@ -213,6 +216,8 @@ export class QQJobManager {
   private lanes: QQCommentLane[] = [];
   private lookupAbortController?: AbortController;
   private lookupLanes: QQCommentLane[] = [];
+  private lookupVersion = 0;
+  private lookupCompletion: Promise<void> = Promise.resolve();
   private readonly subscribers = new Map<MatchSubscriber, string>();
   private readonly activeByWorker = new Map<string, { id: string; name?: string; page: number; startedAt?: string }>();
   private readonly progressBySong = new Map<string, QQMusicSongActivity>();
@@ -283,6 +288,8 @@ export class QQJobManager {
           : workerCountForTopology(this.lanes.length, config.workersPerLane, config.hostConcurrency),
         laneSelection: prepared.laneSelection,
         proxyEnabled: prepared.proxyEnabled,
+        proxyTransportMaxConcurrent: prepared.profile.maxConcurrent,
+        proxyTransportStartDelayMs: prepared.profile.minStartDelayMs,
       };
       const target = await this.resolveCanonicalTarget(config.target);
       this.throwIfStopped();
@@ -460,6 +467,7 @@ export class QQJobManager {
   }
 
   async stop(): Promise<QQJobSnapshot> {
+    this.lookupVersion += 1;
     this.lookupAbortController?.abort();
     cancelQQMusicLanes(this.lookupLanes);
     if (this.snapshotValue.status !== "running" && this.snapshotValue.status !== "stopping") return this.status();
@@ -537,6 +545,7 @@ export class QQJobManager {
       matches: snapshotAfter.matches,
       requestsTotal: snapshotAfter.requestsTotal,
       pagesProcessed: snapshotAfter.pagesProcessed,
+      commentsInspected: snapshotAfter.commentsInspected,
       coverageLabel: snapshotAfter.songs > 0
         ? `${snapshotAfter.songsProcessed.toLocaleString("zh-CN")} / ${snapshotAfter.songs.toLocaleString("zh-CN")} 首歌曲`
         : "等待歌曲来源",
@@ -545,40 +554,102 @@ export class QQJobManager {
     };
   }
 
-  async lookupSong(songIdInput: unknown, proxyInput?: unknown, allowDirectInput?: unknown) {
+  async lookupSong(
+    songIdInput: unknown,
+    proxyInput?: unknown,
+    allowDirectInput?: unknown,
+    signal?: AbortSignal,
+  ) {
     const songId = decimalId(songIdInput, "QQ 音乐歌曲 ID");
+    return this.withLookupLanes(
+      proxyInput,
+      allowDirectInput,
+      (lanes) => executeControlAcrossLanes(lanes, "qq_song_lookup", (lane) =>
+        lane.client.getSongInfo(songId, lane.transportGate.signal)
+      ),
+      signal,
+    );
+  }
+
+  async searchSongs(
+    queryInput: unknown,
+    limitInput: unknown,
+    proxyInput?: unknown,
+    allowDirectInput?: unknown,
+    signal?: AbortSignal,
+  ): Promise<SongSearchResult[]> {
+    const query = text(queryInput, "q", 2, 80);
+    const limit = integer(limitInput ?? 10, "limit", 1, 10);
+    return this.withLookupLanes(
+      proxyInput,
+      allowDirectInput,
+      (lanes) => executeControlAcrossLanes(lanes, "qq_song_search", (lane) => {
+        if (!lane.client.searchSongs) {
+          throw new QQJobManagerError(501, "当前 QQ 音乐客户端不支持歌曲搜索。");
+        }
+        return lane.client.searchSongs(query, limit, lane.transportGate.signal);
+      }),
+      signal,
+    );
+  }
+
+  private async withLookupLanes<T>(
+    proxyInput: unknown,
+    allowDirectInput: unknown,
+    operation: (lanes: QQCommentLane[]) => Promise<T>,
+    externalSignal?: AbortSignal,
+  ): Promise<T> {
+    const lookupVersion = ++this.lookupVersion;
+    const previousLookup = this.lookupCompletion;
+    this.lookupAbortController?.abort();
+    cancelQQMusicLanes(this.lookupLanes);
+    if (externalSignal) await abortRace(previousLookup, externalSignal);
+    else await previousLookup;
+    if (lookupVersion !== this.lookupVersion || externalSignal?.aborted) throw new RunCancelled();
+
     const lease = this.coordinator.acquire("qq");
     if (!lease) throw new QQJobManagerError(409, "已有其他任务运行，请先停止当前任务。");
     const controller = new AbortController();
+    let settleLookup = (): void => {};
+    const lookupCompletion = new Promise<void>((resolve) => { settleLookup = resolve; });
+    this.lookupCompletion = lookupCompletion;
     this.lookupAbortController = controller;
+    const abortFromCaller = (): void => {
+      controller.abort();
+      cancelQQMusicLanes(this.lookupLanes);
+    };
+    externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
     try {
-      const config = parseStartRequest({
+      const config: LanePreparationConfig = {
         mode: "song",
-        target: "lookup-only",
-        songId,
-        proxy: proxyInput,
-        allowDirect: allowDirectInput,
-        workersPerProxy: 1,
+        proxy: proxyUrl(proxyInput),
+        allowDirect: boolean(allowDirectInput),
+        workersPerLane: 1,
         maxProxyLanes: 0,
         hostConcurrency: 1,
-      });
+        minDelayMs: 3_000,
+        jitterMs: 1_000,
+        forbiddenCooldownMs: 900_000,
+      };
       const prepared = await this.prepareLanes(config, controller.signal);
       this.lookupLanes = prepared.lanes;
-      return await executeControlAcrossLanes(prepared.lanes, "qq_song_lookup", (lane) =>
-        lane.client.getSongInfo(songId, lane.transportGate.signal)
-      );
+      throwIfAborted(controller.signal);
+      return await operation(prepared.lanes);
     } finally {
       controller.abort();
       cancelQQMusicLanes(this.lookupLanes);
       this.lookupLanes = [];
       if (this.lookupAbortController === controller) this.lookupAbortController = undefined;
+      externalSignal?.removeEventListener("abort", abortFromCaller);
       lease.release();
+      settleLookup();
     }
   }
 
-  private async prepareLanes(config: ParsedStartRequest, signal: AbortSignal): Promise<{
+  private async prepareLanes(config: LanePreparationConfig, signal: AbortSignal): Promise<{
     lanes: QQCommentLane[];
     gate: QQMusicTransportGate;
+    profile: ReturnType<typeof qqMusicTransportProfile>;
     laneSelection?: ProxyLaneSelection;
     proxyEnabled: boolean;
   }> {
@@ -603,7 +674,17 @@ export class QQJobManager {
     );
     const entries = selected.entries;
     const endpoints = entries.length > 0 ? entries.map((entry) => entry.endpoint) : [config.proxy];
-    const gate = new QQMusicTransportGate();
+    const profile = qqMusicTransportProfile(
+      config.mode,
+      endpoints.length,
+      config.mode === "song"
+        ? 1
+        : workerCountForTopology(endpoints.length, config.workersPerLane, config.hostConcurrency),
+    );
+    const gate = new QQMusicTransportGate({
+      maxConcurrent: profile.maxConcurrent,
+      minStartDelayMs: profile.minStartDelayMs,
+    });
     const lanes = endpoints.map((endpoint, index) => ({
       name: entries[index]?.name ?? (endpoint ? "static-proxy" : "direct"),
       client: this.clientFactory(endpoint),
@@ -621,6 +702,7 @@ export class QQJobManager {
     return {
       lanes,
       gate,
+      profile,
       laneSelection: entries.length > 0 ? selected.selection : undefined,
       proxyEnabled: entries.length > 0 || Boolean(config.proxy),
     };
@@ -822,6 +904,19 @@ interface ParsedStartRequest {
   maxProxyLanes: number;
   hostConcurrency: number;
 }
+
+type LanePreparationConfig = Pick<
+  ParsedStartRequest,
+  | "mode"
+  | "minDelayMs"
+  | "jitterMs"
+  | "forbiddenCooldownMs"
+  | "proxy"
+  | "allowDirect"
+  | "workersPerLane"
+  | "maxProxyLanes"
+  | "hostConcurrency"
+>;
 
 function parseStartRequest(input: QQStartRequest): ParsedStartRequest {
   if (!input || typeof input !== "object") throw new QQJobManagerError(400, "QQ 音乐任务参数格式错误。");

@@ -9,11 +9,15 @@ import {
 } from "./qq-music/client";
 import { runQQMusicScan } from "./qq-music/scanner";
 import { stableQQMusicTaskKey } from "./qq-music/state";
-import { cancelQQMusicLanes, QQMusicTransportGate } from "./qq-music/transport-gate";
+import {
+  cancelQQMusicLanes,
+  QQMusicTransportGate,
+  qqMusicTransportProfile,
+} from "./qq-music/transport-gate";
 import type { QQCommentLane, QQMusicScanOptions } from "./qq-music/types";
 
 const help = `
-qq-music-comments - experimental checkpointed QQ Music comment finder
+qq-music-comments - 乐评寻踪·QQ 音乐评论检索 CLI
 
 Commands:
   resolve-user --user VALUE          resolve a QQ number/profile URL to EncryptUin
@@ -130,7 +134,15 @@ async function main(): Promise<void> {
     "max-comment-pages-per-song",
     0,
   );
-  const transportGate = new QQMusicTransportGate();
+  const transportProfile = qqMusicTransportProfile(
+    mode,
+    1,
+    mode === "song" ? 1 : Math.min(workersPerLane, maxWorkers),
+  );
+  const transportGate = new QQMusicTransportGate({
+    maxConcurrent: transportProfile.maxConcurrent,
+    minStartDelayMs: transportProfile.minStartDelayMs,
+  });
   const lanes: QQCommentLane[] = [{
     name: "direct",
     client,

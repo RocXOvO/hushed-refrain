@@ -10,6 +10,7 @@ import type {
   NcmClient,
   SongCandidate,
   SongInfo,
+  SongSearchResult,
   TargetLikedPlaylist,
 } from "./types";
 
@@ -34,6 +35,42 @@ export interface NcmUserProfile {
 
 export class EnhancedNcmClient implements NcmClient {
   constructor(private readonly options: EnhancedNcmClientOptions = {}) {}
+
+  async searchSongs(query: string, limit: number): Promise<SongSearchResult[]> {
+    const normalizedQuery = requireSearchQuery(query);
+    requireSearchLimit(limit);
+    const body = await invoke("cloudsearch", () =>
+      api.cloudsearch({
+        keywords: normalizedQuery,
+        type: 1,
+        limit,
+        offset: 0,
+        ...this.requestConfig(),
+      }),
+    );
+    if (!isPlainJsonObject(body.result)) throw malformedResponse("cloudsearch");
+    const result = body.result;
+    if (!Array.isArray(result.songs)) throw malformedResponse("cloudsearch");
+    return result.songs.map((raw) => {
+      if (!isPlainJsonObject(raw)) throw malformedResponse("cloudsearch");
+      const id = stringId(raw.id);
+      const name = nonEmptyText(raw.name);
+      const rawArtists = raw.ar ?? raw.artists;
+      if (!id || !name || !Array.isArray(rawArtists)) throw malformedResponse("cloudsearch");
+      const artists = rawArtists.map((artist) => nonEmptyText(object(artist).name));
+      if (artists.some((artist) => !artist)) throw malformedResponse("cloudsearch");
+      const album = object(raw.al ?? raw.album);
+      const albumName = nonEmptyText(album.name);
+      const durationMs = nonNegativeIntegerOrUndefined(raw.dt ?? raw.duration);
+      return {
+        id,
+        name,
+        artists: artists as string[],
+        ...(albumName ? { album: albumName } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+      };
+    });
+  }
 
   async getLoginProfile(cookie?: string): Promise<LoginProfile | undefined> {
     if (!cookie) return undefined;
@@ -395,6 +432,24 @@ function text(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function nonEmptyText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function requireSearchQuery(value: string): string {
+  const query = String(value ?? "").trim();
+  if (query.length < 2 || query.length > 80) {
+    throw new Error("query must contain between 2 and 80 characters.");
+  }
+  return query;
+}
+
+function requireSearchLimit(value: number): void {
+  if (!Number.isInteger(value) || value < 1 || value > 10) {
+    throw new Error("limit must be an integer between 1 and 10.");
+  }
+}
+
 function stringId(value: unknown): string | undefined {
   if (typeof value === "string" && value.length > 0) return value;
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
@@ -405,6 +460,11 @@ function numberOrUndefined(value: unknown): number | undefined {
   if (value === null || value === undefined || value === "" || typeof value === "boolean") return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function nonNegativeIntegerOrUndefined(value: unknown): number | undefined {
+  const parsed = numberOrUndefined(value);
+  return parsed !== undefined && Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function isDefined<T>(value: T | undefined): value is T {

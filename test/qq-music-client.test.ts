@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { QQMusicApiError, QQMusicClient, normalizeUserInput } from "../src/qq-music/client";
+import { QQMusicApiError, QQMusicClient, QQMusicProtocolError, normalizeUserInput } from "../src/qq-music/client";
 import { zzcSign } from "../src/qq-music/sign";
 
 test("zzcSign matches independently verified fixtures", () => {
@@ -19,6 +19,169 @@ test("normalizeUserInput accepts QQ numbers, profile URLs, and EncryptUin", () =
     { kind: "numeric-uin", value: "778899" },
   );
   assert.deepEqual(normalizeUserInput("oK-i7e4s"), { kind: "encrypt-uin", value: "oK-i7e4s" });
+});
+
+test("QQMusicClient uses the public desktop search contract and preserves large string IDs", async () => {
+  let request: { module: string; method: string; param: Record<string, unknown> } | undefined;
+  const requestedId = "900719925474099312345";
+  const client = new QQMusicClient({
+    fetch: (async (_url: string | URL, init?: RequestInit) => {
+      request = (JSON.parse(String(init?.body)) as {
+        req_0: { module: string; method: string; param: Record<string, unknown> };
+      }).req_0;
+      return cgiResponse({
+        body: {
+          song: {
+            list: [{
+              id: requestedId,
+              mid: "song-mid",
+              title: " Search Result ",
+              singer: [{ name: "Artist A" }, { name: "Artist B" }],
+              album: { name: "Album" },
+              interval: 241,
+            }],
+          },
+        },
+      });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.searchSongs("  搜索歌曲  ", 6), [{
+    id: requestedId,
+    mid: "song-mid",
+    name: "Search Result",
+    artists: ["Artist A", "Artist B"],
+    album: "Album",
+    durationMs: 241_000,
+  }]);
+  assert.equal(request?.module, "music.search.SearchCgiService");
+  assert.equal(request?.method, "DoSearchForQQMusicDesktop");
+  assert.deepEqual(request?.param, {
+    grp: 1,
+    num_per_page: 6,
+    page_num: 1,
+    query: "搜索歌曲",
+    search_type: 0,
+  });
+});
+
+test("QQMusicClient accepts empty search results but rejects malformed search protocol", async () => {
+  const empty = new QQMusicClient({
+    fetch: (async (url: string | URL) => String(url).includes("smartbox_new.fcg")
+      ? jsonResponse({ code: 0, data: { song: { itemlist: [] } } })
+      : cgiResponse({ body: { song: { list: [] } } })) as typeof fetch,
+  });
+  assert.deepEqual(await empty.searchSongs("nothing", 10), []);
+
+  for (const data of [
+    {},
+    { body: {} },
+    { body: { song: {} } },
+    { body: { song: { list: {} } } },
+    { body: { song: { list: [{ id: "7", title: "Song" }] } } },
+    { body: { song: { list: [{ id: 9_007_199_254_740_992, title: "Song", singer: [] }] } } },
+  ]) {
+    const client = new QQMusicClient({ fetch: (async () => cgiResponse(data)) as typeof fetch });
+    await assert.rejects(
+      client.searchSongs("valid query", 10),
+      (error) => error instanceof QQMusicProtocolError,
+    );
+  }
+});
+
+test("QQMusicClient falls back from a valid empty desktop search to the official smartbox", async () => {
+  const urls: string[] = [];
+  const requestedId = "900719925474099312345";
+  const client = new QQMusicClient({
+    fetch: (async (url: string | URL) => {
+      urls.push(String(url));
+      if (String(url).includes("smartbox_new.fcg")) {
+        return jsonResponse({
+          code: 0,
+          data: {
+            song: {
+              itemlist: [
+                { id: requestedId, mid: "smart-mid", name: "晴天", singer: "周杰伦" },
+                { id: "8", mid: "second-mid", name: "晴天 II", singer: "Artist" },
+              ],
+            },
+          },
+        });
+      }
+      return cgiResponse({ body: { song: { list: [] }, estimate_sum: 12 } });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.searchSongs("晴天", 1), [{
+    id: requestedId,
+    mid: "smart-mid",
+    name: "晴天",
+    artists: ["周杰伦"],
+  }]);
+  assert.equal(urls.length, 2);
+  const smartbox = new URL(urls[1]);
+  assert.equal(smartbox.hostname, "c.y.qq.com");
+  assert.equal(smartbox.searchParams.get("key"), "晴天");
+  assert.equal(smartbox.searchParams.get("format"), "json");
+});
+
+test("QQMusicClient rejects malformed smartbox fallback responses", async () => {
+  for (const fallback of [
+    {},
+    { code: 0 },
+    { code: 0, data: {} },
+    { code: 0, data: { song: {} } },
+    { code: 0, data: { song: { itemlist: {} } } },
+    { code: 0, data: { song: { itemlist: [{ id: "7", name: "Song" }] } } },
+  ]) {
+    const client = new QQMusicClient({
+      fetch: (async (url: string | URL) => String(url).includes("smartbox_new.fcg")
+        ? jsonResponse(fallback)
+        : cgiResponse({ body: { song: { list: [] } } })) as typeof fetch,
+    });
+    await assert.rejects(
+      client.searchSongs("valid query", 10),
+      (error) => error instanceof QQMusicProtocolError,
+    );
+  }
+});
+
+test("QQMusicClient forwards cancellation to the smartbox fallback request", async () => {
+  let fallbackStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { fallbackStarted = resolve; });
+  let fallbackSignal: AbortSignal | undefined;
+  const client = new QQMusicClient({
+    fetch: (async (url: string | URL, init?: RequestInit) => {
+      if (!String(url).includes("smartbox_new.fcg")) {
+        return cgiResponse({ body: { song: { list: [] } } });
+      }
+      fallbackSignal = init?.signal ?? undefined;
+      fallbackStarted();
+      return new Promise<Response>((_resolve, reject) => {
+        fallbackSignal?.addEventListener("abort", () => reject(new Error("smartbox aborted")), { once: true });
+      });
+    }) as typeof fetch,
+  });
+  const controller = new AbortController();
+  const search = client.searchSongs("valid query", 10, controller.signal);
+  await started;
+  controller.abort();
+
+  await assert.rejects(search, /smartbox aborted/);
+  assert.equal(fallbackSignal?.aborted, true);
+});
+
+test("QQMusicClient validates search bounds before issuing a request", async () => {
+  let calls = 0;
+  const client = new QQMusicClient({
+    fetch: (async () => {
+      calls += 1;
+      return cgiResponse({ body: { song: { list: [] } } });
+    }) as typeof fetch,
+  });
+  await assert.rejects(client.searchSongs("x", 10), /between 2 and 80/);
+  await assert.rejects(client.searchSongs("valid", 11), /between 1 and 10/);
+  assert.equal(calls, 0);
 });
 
 test("resolveUser maps a numeric QQ number to the opaque comment identity", async () => {

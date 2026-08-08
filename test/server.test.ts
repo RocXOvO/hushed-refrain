@@ -4,8 +4,10 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { RunCancelled } from "../src/errors";
 import {
   isLoopbackAddress,
+  NcmSongSearchRouter,
   sourceTaskPaths,
   startDashboard,
   UserProbeRouter,
@@ -18,6 +20,244 @@ import type {
   QQMusicScanOptions,
   QQMusicScanReport,
 } from "../src/qq-music/types";
+
+test("NetEase song-search router rotates verified pool exits", async () => {
+  const entries = ["lane-a", "lane-b"].map((name, index) => ({
+    name,
+    endpoint: `http://127.0.0.1:${18080 + index}`,
+    egressIp: index === 0 ? "192.0.2.10" : "198.51.100.10",
+    latencyMs: 10,
+    ncmLatencyMs: 10,
+    ncmVerified: true,
+  }));
+  const proxies: Array<string | undefined> = [];
+  const router = new NcmSongSearchRouter("unused", {
+    readPool: async () => ({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      lastCheckedAt: new Date().toISOString(),
+      source: "external",
+      active: true,
+      entries,
+    }),
+    search: async (query, _limit, proxy) => {
+      proxies.push(proxy);
+      return [{ id: "7", name: query, artists: [] }];
+    },
+  });
+
+  assert.equal((await router.run("first query", 5)).platform, "netease");
+  assert.equal((await router.run("second query", 5)).songs[0].name, "second query");
+  assert.deepEqual(proxies, entries.map((entry) => entry.endpoint));
+});
+
+test("NetEase song-search router never falls back to direct while its pool is running", async () => {
+  const entries = ["lane-a", "lane-b"].map((name, index) => ({
+    name,
+    endpoint: `http://127.0.0.1:${18080 + index}`,
+    egressIp: index === 0 ? "192.0.2.10" : "198.51.100.10",
+    latencyMs: 10,
+    ncmLatencyMs: 10,
+    ncmVerified: true,
+  }));
+  const proxies: Array<string | undefined> = [];
+  const router = new NcmSongSearchRouter("unused", {
+    readPool: async () => ({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      source: "external",
+      active: true,
+      entries,
+    }),
+    search: async (_query, _limit, proxy) => {
+      proxies.push(proxy);
+      throw new TypeError("proxy unavailable");
+    },
+  });
+
+  await assert.rejects(
+    router.run("search query", 10),
+    (error: unknown) => {
+      assert.equal((error as { status?: number }).status, 502);
+      assert.match((error as Error).message, /不会回退到本机直连/);
+      return true;
+    },
+  );
+  assert.deepEqual(proxies, entries.map((entry) => entry.endpoint));
+  assert.equal(proxies.includes(undefined), false);
+});
+
+test("NetEase numeric song lookup rotates to a healthy managed-pool exit", async () => {
+  const entries = [
+    { name: "lane-a", endpoint: "http://127.0.0.1:18080", egressIp: "192.0.2.10", latencyMs: 10, ncmLatencyMs: 10, ncmVerified: true },
+    { name: "lane-b", endpoint: "http://127.0.0.1:18081", egressIp: "198.51.100.10", latencyMs: 10, ncmLatencyMs: 10, ncmVerified: true },
+  ];
+  const proxies: Array<string | undefined> = [];
+  const router = new NcmSongSearchRouter("unused", {
+    readPool: async () => ({
+      version: 1,
+      generatedAt: new Date().toISOString(),
+      source: "external",
+      active: true,
+      entries,
+    }),
+    lookup: async (songId, proxy) => {
+      proxies.push(proxy);
+      if (proxy === entries[0].endpoint) throw new TypeError("first proxy failed");
+      return { id: songId, name: "Song", artists: ["Artist"] };
+    },
+  });
+
+  assert.deepEqual(await router.lookup("7"), { id: "7", name: "Song", artists: ["Artist"] });
+  assert.deepEqual(proxies, entries.map((entry) => entry.endpoint));
+  assert.equal(proxies.includes(undefined), false);
+});
+
+test("NetEase numeric song lookup fails closed when a running pool cannot be reverified", async () => {
+  let lookupCalls = 0;
+  const router = new NcmSongSearchRouter("unused", {
+    readPool: async () => ({
+      version: 1,
+      generatedAt: "2000-01-01T00:00:00.000Z",
+      source: "external",
+      active: true,
+      entries: [{
+        name: "stale-lane",
+        endpoint: "http://127.0.0.1:18080",
+        egressIp: "192.0.2.10",
+        latencyMs: 10,
+        ncmLatencyMs: 10,
+        ncmVerified: false,
+      }],
+    }),
+    verifyPool: async () => { throw new Error("verification failed"); },
+    lookup: async (songId) => {
+      lookupCalls += 1;
+      return { id: songId };
+    },
+  });
+
+  await assert.rejects(
+    router.lookup("7"),
+    (error: unknown) => {
+      assert.equal((error as { status?: number }).status, 409);
+      assert.match((error as Error).message, /不会回退到本机直连/);
+      return true;
+    },
+  );
+  assert.equal(lookupCalls, 0);
+});
+
+test("dashboard exposes bounded, platform-neutral song-search routes", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-song-search-"));
+  const neteaseCalls: Array<{ query: string; limit: number; proxy?: string }> = [];
+  const lookupCalls: string[] = [];
+  const client: QQMusicPlatformClient = {
+    searchSongs: async (query, limit) => [{
+      id: "900719925474099312345",
+      mid: "qq-mid",
+      name: query,
+      artists: [String(limit)],
+    }],
+    resolveUser: async (input) => ({ input, encryptUin: "canonical-user" }),
+    getSongInfo: async (songId) => ({ id: songId, name: "song" }),
+    getLikedSongsPage: async () => ({ songs: [], hasMore: false, nextOffset: 0 }),
+    getNewComments: async () => ({ comments: [], hasMore: false }),
+  };
+  const server = await startDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    runtimeRoot,
+    qqClientFactory: () => client,
+    songSearchRouter: {
+      readPool: async () => undefined,
+      search: async (query, limit, proxy) => {
+        neteaseCalls.push({ query, limit, ...(proxy ? { proxy } : {}) });
+        return [{ id: "7", name: query, artists: ["Artist"] }];
+      },
+      lookup: async (songId) => {
+        lookupCalls.push(songId);
+        return { id: songId, name: "Numeric Song", artists: ["Artist"] };
+      },
+    },
+  });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const netease = await fetch(`${base}/api/song/search?q=${encodeURIComponent("  搜索歌曲  ")}&limit=4`);
+  assert.equal(netease.status, 200);
+  assert.deepEqual(await netease.json(), {
+    platform: "netease",
+    query: "搜索歌曲",
+    songs: [{ id: "7", name: "搜索歌曲", artists: ["Artist"] }],
+  });
+  assert.deepEqual(neteaseCalls, [{ query: "搜索歌曲", limit: 4 }]);
+
+  const numericLookup = await fetch(`${base}/api/song?id=7`);
+  assert.equal(numericLookup.status, 200);
+  assert.deepEqual(await numericLookup.json(), { id: "7", name: "Numeric Song", artists: ["Artist"] });
+  assert.deepEqual(lookupCalls, ["7"]);
+
+  const qq = await fetch(`${base}/api/qq/song/search?q=${encodeURIComponent("QQ 搜索")}&limit=3&allowDirect=1`);
+  assert.equal(qq.status, 200);
+  assert.deepEqual(await qq.json(), {
+    platform: "qq",
+    query: "QQ 搜索",
+    songs: [{
+      id: "900719925474099312345",
+      mid: "qq-mid",
+      name: "QQ 搜索",
+      artists: ["3"],
+    }],
+  });
+
+  assert.equal((await fetch(`${base}/api/song/search?q=x`)).status, 400);
+  assert.equal((await fetch(`${base}/api/song/search?q=valid&limit=11`)).status, 400);
+  assert.equal((await fetch(`${base}/api/qq/song/search?q=valid&limit=1`)).status, 409);
+});
+
+test("aborting an HTTP QQ song search releases the lookup lease for the next query", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-qq-search-abort-"));
+  let firstStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const client: QQMusicPlatformClient = {
+    searchSongs: async (query, _limit, signal) => {
+      if (query !== "first query") return [{ id: "8", name: query, artists: ["Artist"] }];
+      firstStarted();
+      return new Promise((_resolve, reject) => {
+        if (signal?.aborted) return reject(new RunCancelled());
+        signal?.addEventListener("abort", () => reject(new RunCancelled()), { once: true });
+      });
+    },
+    resolveUser: async (input) => ({ input, encryptUin: "canonical-user" }),
+    getSongInfo: async (songId) => ({ id: songId, name: "song" }),
+    getLikedSongsPage: async () => ({ songs: [], hasMore: false, nextOffset: 0 }),
+    getNewComments: async () => ({ comments: [], hasMore: false }),
+  };
+  const server = await startDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    runtimeRoot,
+    qqClientFactory: () => client,
+  });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+  const controller = new AbortController();
+  const first = fetch(`${base}/api/qq/song/search?q=first%20query&allowDirect=1`, { signal: controller.signal });
+  await started;
+  controller.abort();
+  await assert.rejects(first, (error: unknown) => (error as { name?: string }).name === "AbortError");
+
+  const second = await fetch(`${base}/api/qq/song/search?q=second%20query&allowDirect=1`);
+  assert.equal(second.status, 200);
+  assert.deepEqual(await second.json(), {
+    platform: "qq",
+    query: "second query",
+    songs: [{ id: "8", name: "second query", artists: ["Artist"] }],
+  });
+});
 
 test("uses target-v3 per-source checkpoints with one canonical UID result and coverage ledger", () => {
   const record = sourceTaskPaths("/data", "42", "record");
@@ -44,8 +284,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const page = await fetch(`${base}/`);
   assert.equal(page.status, 200);
   const pageText = await page.text();
-  assert.match(pageText, /云评检索台/);
-  assert.match(pageText, /WORKSPACE UI/);
+  assert.match(pageText, /乐评寻踪/);
+  assert.match(pageText, /MUSIC COMMENT TRACE/);
+  assert.match(pageText, /NETEASE WORKSPACE/);
   assert.match(pageText, /id="primaryNavigation"/);
   assert.match(pageText, /id="taskSidebar"/);
   assert.match(pageText, /id="runtimeInspector"/);
@@ -72,15 +313,25 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="runtimeInspectorBody"/);
   assert.match(pageText, /PDF 将包含截至导出时已经保存的全部结果/);
   assert.match(pageText, /评论读取进度/);
-  assert.match(pageText, /主机并发会硬性限制总 Worker 数/);
-  assert.match(pageText, /styles\.css\?v=41/);
-  assert.match(pageText, /app\.js\?v=45/);
+  assert.match(pageText, /总工作线程上限限制任务整体调度/);
+  assert.match(pageText, /任务出口上限/);
+  assert.match(pageText, /每出口请求间隔/);
+  assert.match(pageText, /请求上限（0不限）/);
+  assert.match(pageText, /styles\.css\?v=43/);
+  assert.match(pageText, /app\.js\?v=49/);
   assert.match(pageText, /id="platformSwitch"/);
   assert.match(pageText, /id="qqSongForm"/);
   assert.match(pageText, /id="qqLikesForm"/);
   assert.match(pageText, /name="pageSize"[^>]*max="25"[^>]*value="25"/);
   assert.match(pageText, /name="likedPageSize"[^>]*max="500"[^>]*value="500"/);
-  assert.match(pageText, /QQ 音乐使用独立 Gate（最多 4 个在途、启动间隔至少 250ms）/);
+  assert.match(pageText, /QQ 音乐按实际出口和总工作线程上限设置独立聚合保护/);
+  assert.match(pageText, /id="neteaseSongQuery"/);
+  assert.match(pageText, /id="neteaseSongResults"[^>]*role="listbox"/);
+  assert.match(pageText, /id="qqSongQuery"/);
+  assert.match(pageText, /id="qqSongResults"[^>]*role="listbox"/);
+  assert.match(pageText, /id="parameterHelpDialog"/);
+  assert.match(pageText, /data-help-key="total-workers"/);
+  assert.match(pageText, /id="runtimeInspectorBody"[^>]*inert[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="settlementFootnote"/);
   assert.match(pageText, /id="settlementCoverage"/);
   assert.match(pageText, /id="speedMetric"/);
@@ -113,6 +364,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /Date\.now\(\) - lastLogsRefreshAt < 3_000/);
   assert.match(appText, /poolStatus === "starting"/);
   assert.match(appText, /syncTaskStartAvailability/);
+  assert.match(appText, /startSubmissionBusy \|\| qqLookupBusy \|\| Boolean\(activeTaskMode\)/);
   assert.match(appText, /activateNavigation/);
   assert.match(appText, /syncToolbarContext/);
   assert.match(appText, /visibleResultOrder/);
@@ -130,7 +382,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /next\?\.phase === "error"/);
   assert.match(appText, /代理池正在构建、导入或后台复测/);
   assert.match(appText, /QQ 检查点累计/);
-  assert.match(appText, /个有界 Worker · 最多/);
+  assert.match(appText, /个有界工作线程 · 最多/);
   assert.match(appText, /Math\.min\(lanes \* workers, hostConcurrency\)/);
   assert.match(appText, /baselineIds/);
   assert.match(appText, /tabSwitchVersion/);
@@ -141,7 +393,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /inspectorOverlayQuery\.addEventListener\("change"/);
   assert.match(appText, /时间覆盖/);
   assert.match(appText, /topologyCapacityNote/);
-  assert.match(appText, /Worker 活跃/);
+  assert.match(appText, /工作线程活跃/);
   assert.match(appText, /formatRate\(job\.commentsPerSecond\)/);
   assert.match(appText, /proxyTransportEffectiveConcurrent/);
   assert.match(appText, /poolRefreshing/);
@@ -156,6 +408,17 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /任务产生 3 次页面请求后自动校准/);
   assert.match(appText, /exportResultsPdf/);
   assert.match(appText, /inspectorBody\.inert/);
+  assert.match(appText, /\/api\/song\/search/);
+  assert.match(appText, /\/api\/qq\/song\/search/);
+  assert.match(appText, /new AbortController\(\)/);
+  assert.match(appText, /job\.commentsInspected/);
+  assert.match(appText, /function createPlatformTransition/);
+  assert.match(appText, /Math\.min\(1\.5/);
+  assert.match(appText, /width <= 820 \? 76 : 148/);
+  assert.match(appText, /const duration = 660/);
+  assert.match(appText, /const commitPoint = \.48/);
+  assert.match(appText, /desiredPlatform/);
+  assert.match(appText, /platformTransition\?\.cancel\(\)/);
   assert.doesNotMatch(appText, /当前生效配置（合并）/);
   assert.doesNotMatch(appText, /resultTimestamp/);
   assert.doesNotMatch(appText, /setInterval\(\(\) => void refresh\(\), 1500\)/);
@@ -184,6 +447,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);
   assert.match(styleText, /body\.inspector-collapsed/);
+  assert.match(styleText, /grid-template-columns:\s*minmax\(520px,\s*1fr\) 310px/);
+  assert.match(styleText, /grid-template-columns:\s*minmax\(520px,\s*1fr\) 54px/);
+  assert.match(styleText, /transition:\s*grid-template-columns 260ms/);
+  assert.match(styleText, /@media \(max-width:\s*1120px\)/);
+  assert.match(styleText, /body\[data-platform="qq"\]/);
+  assert.match(styleText, /\.platform-transition-canvas/);
+  assert.match(styleText, /\.parameter-help-button/);
   assert.match(styleText, /body\.inspector-collapsed \.inspector-heading > div\s*\{[^}]*position:\s*absolute/s);
   assert.match(styleText, /\.inspector-body\s*\{[^}]*transition:/s);
   assert.match(styleText, /prefers-reduced-motion:\s*reduce/);
@@ -247,10 +517,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(qqEstimate.status, 200);
   const qqEstimateValue = await qqEstimate.json() as { platform: string; effectiveWorkers: number; checkpointSlots: number; proxyTransportMaxConcurrent: number; proxyTransportStartDelayMs: number };
   assert.equal(qqEstimateValue.platform, "qq");
-  assert.equal(qqEstimateValue.effectiveWorkers, 4);
-  assert.equal(qqEstimateValue.checkpointSlots, 4);
-  assert.equal(qqEstimateValue.proxyTransportMaxConcurrent, 4);
-  assert.equal(qqEstimateValue.proxyTransportStartDelayMs, 250);
+  assert.equal(qqEstimateValue.effectiveWorkers, 8);
+  assert.equal(qqEstimateValue.checkpointSlots, 8);
+  assert.equal(qqEstimateValue.proxyTransportMaxConcurrent, 8);
+  assert.equal(qqEstimateValue.proxyTransportStartDelayMs, 125);
   const qqSongEstimate = await fetch(`${base}/api/estimate?platform=qq&mode=song&comments=100000&pageSize=25&partitions=1&minDelayMs=3000&jitterMs=1000&networkMs=400&lanes=8&workersPerLane=8&proxyTransport=1&hostConcurrency=32`);
   assert.equal(qqSongEstimate.status, 200);
   const qqSongEstimateValue = await qqSongEstimate.json() as { effectiveWorkers: number; serialRequestChain: boolean };
@@ -482,6 +752,8 @@ test("dashboard composes QQ manager routes with generation-bound results, logs, 
     body: JSON.stringify({ uid: "42", source: "record", allowDirect: true }),
   });
   assert.equal(blockedSource.status, 409);
+  const blockedSearch = await fetch(`${base}/api/qq/song/search?q=running%20scan&allowDirect=1`);
+  assert.equal(blockedSearch.status, 409);
 
   const results = await fetch(`${base}/api/qq/results?jobId=${job.id}&limit=50`);
   assert.equal(results.status, 200);
@@ -621,7 +893,7 @@ test("dashboard exposes the startup update check", async (context) => {
     updateAvailable: true,
     platform: "win32" as const,
     arch: "x64",
-    releaseName: "云评检索台 v0.2.0",
+    releaseName: "乐评寻踪 v0.2.0",
     releaseUrl: "https://example.test/releases/v0.2.0",
     assetName: "NCM-Comment-Finder-Setup-0.2.0.exe",
     downloadUrl: "https://example.test/download.exe",

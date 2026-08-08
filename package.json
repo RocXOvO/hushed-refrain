@@ -4,7 +4,7 @@
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music and QQ Music comment finder",
-  "author": "NCM Comment Finder Contributors",
+  "author": "Music Comment Trace Contributors",
   "license": "MIT",
   "bin": {
     "ncm-comments": "dist/cli.js"
@@ -43,7 +43,7 @@
   },
   "build": {
     "appId": "cn.local.ncm.commentfinder",
-    "productName": "云评检索台",
+    "productName": "乐评寻踪",
     "afterPack": "build/after-pack.cjs",
     "asar": true,
     "directories": {
@@ -94,7 +94,7 @@
       "artifactName": "NCM-Comment-Finder-${version}-${arch}.${ext}"
     },
     "dmg": {
-      "title": "云评检索台 ${version}",
+      "title": "乐评寻踪 ${version}",
       "iconSize": 112,
       "window": {
         "width": 540,
@@ -122,7 +122,7 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
-      "shortcutName": "云评检索台"
+      "shortcutName": "乐评寻踪"
     }
   }
 }

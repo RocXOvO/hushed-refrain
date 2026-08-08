@@ -2,6 +2,40 @@ import { RunCancelled } from "../errors";
 
 export const DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT = 4;
 export const DEFAULT_QQ_TRANSPORT_START_DELAY_MS = 250;
+export const MAX_QQ_TRANSPORT_CONCURRENT = 32;
+export const MIN_QQ_TRANSPORT_START_DELAY_MS = 80;
+
+export interface QQMusicTransportProfile {
+  maxConcurrent: number;
+  minStartDelayMs: number;
+  checkpointSlots: number;
+}
+
+/** Scale the aggregate guard with independently paced proxy exits. */
+export function qqMusicTransportProfile(
+  mode: "song" | "likes",
+  laneCount: number,
+  taskWorkerCapacity: number,
+): QQMusicTransportProfile {
+  positiveInteger(laneCount, "QQ laneCount");
+  const workerCap = positiveInteger(taskWorkerCapacity, "QQ taskWorkerCapacity");
+  if (mode === "song") {
+    return {
+      maxConcurrent: 1,
+      minStartDelayMs: DEFAULT_QQ_TRANSPORT_START_DELAY_MS,
+      checkpointSlots: 1,
+    };
+  }
+  const maxConcurrent = Math.min(workerCap, MAX_QQ_TRANSPORT_CONCURRENT);
+  return {
+    maxConcurrent,
+    minStartDelayMs: Math.max(
+      MIN_QQ_TRANSPORT_START_DELAY_MS,
+      Math.ceil(1_000 / Math.max(DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT, maxConcurrent)),
+    ),
+    checkpointSlots: maxConcurrent,
+  };
+}
 
 export interface QQMusicTransportGateOptions {
   maxConcurrent?: number;
@@ -133,9 +167,19 @@ export class QQMusicTransportGate {
 }
 
 export function cancelQQMusicLanes(
-  lanes: ReadonlyArray<{ governor: { cancel(): void }; transportGate: { cancel(): void } }>,
+  lanes: ReadonlyArray<{
+    governor: { cancel(): void };
+    transportGate: { cancel(): void };
+    client?: { close?(): void };
+  }>,
 ): void {
   const gates = new Set(lanes.map((lane) => lane.transportGate));
   for (const lane of lanes) lane.governor.cancel();
   for (const gate of gates) gate.cancel();
+  for (const lane of lanes) lane.client?.close?.();
+}
+
+function positiveInteger(value: number, name: string): number {
+  if (!Number.isInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer.`);
+  return value;
 }

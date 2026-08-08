@@ -30,7 +30,7 @@ test("update check returns the matching download when a newer release exists", a
     assert.ok(init?.signal);
     return new Response(JSON.stringify({
       tag_name: "v0.2.0",
-      name: "云评检索台 v0.2.0",
+      name: "乐评寻踪 v0.2.0",
       html_url: "https://example.test/releases/v0.2.0",
       body: "新增启动更新检查。",
       published_at: "2026-08-06T00:00:00Z",

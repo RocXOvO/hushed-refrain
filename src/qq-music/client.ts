@@ -1,4 +1,5 @@
 import { zzcSign } from "./sign";
+import type { SongSearchResult } from "../types";
 import type {
   QQMusicComment,
   QQMusicCommentPage,
@@ -11,6 +12,7 @@ import type {
 const MUSICU_URL = "https://u.y.qq.com/cgi-bin/musicu.fcg";
 const MUSICS_URL = "https://u.y.qq.com/cgi-bin/musics.fcg";
 const USER_PLAYLIST_URL = "https://c.y.qq.com/rsc/fcgi-bin/fcg_user_created_diss";
+const SMARTBOX_URL = "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg";
 const DEFAULT_TIMEOUT_MS = 30_000;
 
 // The current public GetNewCommentList contract rejects PageSize >= 26 with
@@ -56,6 +58,86 @@ export class QQMusicClient implements QQMusicPlatformClient {
     this.userAgent = options.userAgent
       ?? "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36";
     if (!this.fetchImpl) throw new Error("QQ Music requires a runtime with fetch support.");
+  }
+
+  close(): void {
+    const close = (this.fetchImpl as typeof fetch & { close?: () => void }).close;
+    close?.();
+  }
+
+  async searchSongs(query: string, limit: number, signal?: AbortSignal): Promise<SongSearchResult[]> {
+    const normalizedQuery = requireSearchQuery(query);
+    requireInteger(limit, "limit", 1, 10);
+    const data = requiredObject(await this.postCgi(
+      "music.search.SearchCgiService",
+      "DoSearchForQQMusicDesktop",
+      {
+        grp: 1,
+        num_per_page: limit,
+        page_num: 1,
+        query: normalizedQuery,
+        search_type: 0,
+      },
+      false,
+      signal,
+    ), "QQ Music search response data");
+    const body = requiredObject(data.body, "QQ Music search response body", data);
+    const song = requiredObject(body.song, "QQ Music search response song", data);
+    const rows = requiredArray(song.list, "QQ Music search response song list", data);
+    const songs = rows.map((row, index) => {
+      const normalized = normalizeSearchSong(row);
+      if (!normalized) {
+        throw new QQMusicProtocolError(
+          `QQ Music search response contains an invalid song at index ${index}.`,
+          data,
+        );
+      }
+      return normalized;
+    });
+    if (songs.length > 0) return songs;
+    return this.searchSongsFromSmartbox(normalizedQuery, limit, signal);
+  }
+
+  private async searchSongsFromSmartbox(
+    query: string,
+    limit: number,
+    signal?: AbortSignal,
+  ): Promise<SongSearchResult[]> {
+    const params = new URLSearchParams({
+      key: query,
+      format: "json",
+      inCharset: "utf-8",
+      outCharset: "utf-8",
+    });
+    const payload = requiredObject(await this.requestJson(
+      `${SMARTBOX_URL}?${params.toString()}`,
+      { headers: this.headers() },
+      signal,
+    ), "QQ Music smartbox response");
+    const code = protocolCode(payload.code);
+    if (code === undefined) {
+      throw new QQMusicProtocolError("QQ Music smartbox response code is missing or malformed.", payload);
+    }
+    if (code !== 0) {
+      throw new QQMusicApiError(
+        `QQ Music smartbox search failed with code ${code}.`,
+        undefined,
+        payload,
+      );
+    }
+    const data = requiredObject(payload.data, "QQ Music smartbox response data", payload);
+    const song = requiredObject(data.song, "QQ Music smartbox response song", payload);
+    const rows = requiredArray(song.itemlist, "QQ Music smartbox response song itemlist", payload);
+    return rows.slice(0, limit).map((row, index) => {
+      const normalized = normalizeSmartboxSong(row);
+      if (!normalized) {
+        throw new QQMusicProtocolError(
+          `QQ Music smartbox response contains an invalid song at index ${index}.`,
+          payload,
+        );
+      }
+      return normalized;
+    });
   }
 
   async resolveUser(input: string, signal?: AbortSignal): Promise<QQMusicUser> {
@@ -434,6 +516,51 @@ function normalizeSong(raw: unknown): QQMusicSong | undefined {
   };
 }
 
+function normalizeSearchSong(raw: unknown): SongSearchResult | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const song = raw as Record<string, unknown>;
+  const id = idText(song.id ?? song.songid ?? song.songId);
+  const name = text(song.title ?? song.name)?.trim();
+  const rawArtists = song.singer ?? song.singers;
+  if (!id || !/^\d+$/.test(id) || !name || !Array.isArray(rawArtists)) return undefined;
+  const artists = rawArtists.map((entry) => text(object(entry).name)?.trim());
+  if (artists.some((artist) => !artist)) return undefined;
+  const mid = text(song.mid ?? song.songmid ?? song.songMid);
+  const albumValue = song.album;
+  const album = typeof albumValue === "string"
+    ? text(albumValue)?.trim()
+    : text(object(albumValue).name ?? object(albumValue).title)?.trim()
+      ?? text(song.albumname)?.trim();
+  const intervalSeconds = nonNegativeIntegerOrUndefined(song.interval);
+  const durationMs = intervalSeconds === undefined
+    ? nonNegativeIntegerOrUndefined(song.durationMs)
+    : intervalSeconds * 1_000;
+  return {
+    id,
+    ...(mid ? { mid } : {}),
+    name,
+    artists: artists as string[],
+    ...(album ? { album } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
+}
+
+function normalizeSmartboxSong(raw: unknown): SongSearchResult | undefined {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+  const song = raw as Record<string, unknown>;
+  const id = idText(song.id);
+  const name = text(song.name)?.trim();
+  const singer = text(song.singer)?.trim();
+  const mid = text(song.mid);
+  if (!id || !/^\d+$/.test(id) || !name || !singer) return undefined;
+  return {
+    id,
+    ...(mid ? { mid } : {}),
+    name,
+    artists: [singer],
+  };
+}
+
 function normalizeComment(raw: unknown): QQMusicComment | undefined {
   const comment = object(raw);
   const commentId = idText(comment.CmId);
@@ -456,6 +583,14 @@ function normalizeComment(raw: unknown): QQMusicComment | undefined {
 
 function requireNumericId(value: string, name: string): void {
   if (!/^\d+$/.test(value)) throw new Error(`${name} must contain decimal digits.`);
+}
+
+function requireSearchQuery(value: string): string {
+  const query = String(value ?? "").trim();
+  if (query.length < 2 || query.length > 80) {
+    throw new Error("query must contain between 2 and 80 characters.");
+  }
+  return query;
 }
 
 function requireEncryptUin(value: string): void {
@@ -496,6 +631,18 @@ function number(value: unknown): number {
 function numberOrUndefined(value: unknown): number | undefined {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function protocolCode(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isInteger(value) ? value : undefined;
+  if (typeof value !== "string" || !/^-?\d+$/.test(value.trim())) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function nonNegativeIntegerOrUndefined(value: unknown): number | undefined {
+  const parsed = numberOrUndefined(value);
+  return parsed !== undefined && Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function booleanFlag(value: unknown): boolean {

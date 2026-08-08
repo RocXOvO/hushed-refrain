@@ -55,6 +55,53 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
   await fixture.settled();
 });
 
+test("publishes the actual dynamic QQ transport profile for likes while song stays serial", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-dynamic-gate-"));
+  const entries = Array.from({ length: 8 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    endpoint: `http://127.0.0.1:${18100 + index}`,
+    egressIp: `192.0.2.${index + 1}`,
+    latencyMs: 10,
+    ncmLatencyMs: 10,
+    ncmVerified: true,
+  }));
+  const coordinator = new TaskCoordinator();
+  let finish = (_report: QQMusicScanReport): void => {};
+  let activeOptions: QQMusicScanOptions | undefined;
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    poolReader: async () => ({
+      version: 1, generatedAt: "2000-01-01T00:00:00.000Z", source: "external", active: true, entries,
+    }),
+    poolVerifier: async () => entries,
+    clientFactory: () => fakeClient(),
+    runner: async (lanes, options) => {
+      assert.equal(lanes.length, 8);
+      activeOptions = options;
+      return new Promise<QQMusicScanReport>((resolve) => { finish = resolve; });
+    },
+  });
+
+  const likes = await manager.start({
+    mode: "likes", target: "canonical-user", workersPerProxy: 4, hostConcurrency: 32,
+  });
+  assert.equal(likes.configuredWorkers, 32);
+  assert.equal(likes.proxyTransportMaxConcurrent, 32);
+  assert.equal(likes.proxyTransportStartDelayMs, 80);
+  finish(reportFor(activeOptions!));
+  while (coordinator.isBusy()) await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const song = await manager.start({
+    mode: "song", target: "canonical-user", songId: "7", workersPerProxy: 4, hostConcurrency: 32,
+  });
+  assert.equal(song.configuredWorkers, 1);
+  assert.equal(song.proxyTransportMaxConcurrent, 1);
+  assert.equal(song.proxyTransportStartDelayMs, 250);
+  finish(reportFor(activeOptions!));
+  while (coordinator.isBusy()) await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
 test("rejects malformed QQ user targets before creating lanes or clients", async () => {
   const root = await mkdtemp(join(tmpdir(), "qq-manager-target-input-"));
   const coordinator = new TaskCoordinator();
@@ -230,6 +277,100 @@ test("cancels an in-flight song lookup and releases its global QQ lease", async 
   await started;
   await manager.stop();
   await assert.rejects(lookup, RunCancelled);
+  assert.equal(coordinator.isBusy(), false);
+});
+
+test("search lookup is generation-independent and leaves completed task results selected", async () => {
+  const fixture = await managerFixture({
+    clientFactory: () => fakeClient({
+      searchSongs: async () => [{ id: "7", name: "Search Song", artists: ["Artist"] }],
+    }),
+  });
+  const started = await fixture.manager.start({ mode: "likes", target: "canonical-user", allowDirect: true });
+  fixture.finish(reportFor(fixture.options[0]));
+  await fixture.settled();
+  const before = await fixture.manager.status();
+
+  assert.deepEqual(await fixture.manager.searchSongs("search song", 5, undefined, true), [
+    { id: "7", name: "Search Song", artists: ["Artist"] },
+  ]);
+  const after = await fixture.manager.status();
+  assert.equal(after.id, started.id);
+  assert.deepEqual(after.generation, before.generation);
+  assert.equal(after.status, before.status);
+});
+
+test("cancels an in-flight QQ song search and releases its global lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-search-cancel-"));
+  let searchStarted = (): void => {};
+  const started = new Promise<void>((resolve) => { searchStarted = resolve; });
+  const coordinator = new TaskCoordinator();
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    clientFactory: () => fakeClient({
+      searchSongs: async (_query, _limit, signal) => {
+        searchStarted();
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(new RunCancelled()), { once: true });
+        });
+      },
+    }),
+  });
+  const search = manager.searchSongs("search song", 10, undefined, true);
+  await started;
+  await manager.stop();
+  await assert.rejects(search, RunCancelled);
+  assert.equal(coordinator.isBusy(), false);
+});
+
+test("rotates failed proxy lanes for QQ song search without creating a direct client", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-search-failclosed-"));
+  const entries = ["lane-a", "lane-b"].map((name, index) => ({
+    name,
+    endpoint: `http://127.0.0.1:${18080 + index}`,
+    egressIp: `192.0.2.${10 + index}`,
+    latencyMs: 10,
+    ncmLatencyMs: 10,
+    ncmVerified: true,
+  }));
+  const endpoints: Array<string | undefined> = [];
+  const coordinator = new TaskCoordinator();
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    poolReader: async () => ({
+      version: 1, generatedAt: "2000-01-01T00:00:00.000Z", source: "external", active: true, entries,
+    }),
+    poolVerifier: async () => entries,
+    clientFactory: (endpoint) => {
+      endpoints.push(endpoint);
+      return fakeClient({
+        searchSongs: async () => { throw new QQMusicProxyError("CONNECT rejected", 407); },
+      });
+    },
+  });
+
+  await assert.rejects(manager.searchSongs("search song", 10, undefined, true), /CONNECT rejected/);
+  assert.deepEqual(endpoints, entries.map((entry) => entry.endpoint));
+  assert.equal(endpoints.includes(undefined), false);
+  assert.equal(coordinator.isBusy(), false);
+});
+
+test("QQ song search requires an explicit safe route when the managed pool is absent", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-search-no-route-"));
+  let clients = 0;
+  const coordinator = new TaskCoordinator();
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    clientFactory: () => { clients += 1; return fakeClient(); },
+  });
+  await assert.rejects(
+    manager.searchSongs("search song", 10),
+    (error) => error instanceof QQJobManagerError && error.status === 409,
+  );
+  assert.equal(clients, 0);
   assert.equal(coordinator.isBusy(), false);
 });
 
@@ -518,6 +659,7 @@ function paths(root: string) {
 
 function fakeClient(overrides: Partial<QQMusicPlatformClient> = {}): QQMusicPlatformClient {
   return {
+    searchSongs: async () => [],
     resolveUser: async (input) => ({ input, encryptUin: "canonical-user" }),
     getSongInfo: async (songId) => ({ id: songId, name: "song" }),
     getLikedSongsPage: async () => ({ songs: [], hasMore: false, nextOffset: 0 }),

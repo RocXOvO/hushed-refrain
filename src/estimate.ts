@@ -3,13 +3,11 @@ import {
   DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
   DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
 } from "./proxy-transport-gate";
+import { qqMusicTransportProfile } from "./qq-music/transport-gate";
 
 export type EstimatePlatform = "netease" | "qq";
 
 const QQ_COMMENT_PAGE_SIZE_MAX = 25;
-const QQ_TRANSPORT_MAX_CONCURRENT = 4;
-const QQ_TRANSPORT_START_DELAY_MS = 250;
-const QQ_CHECKPOINT_SLOTS = 4;
 
 export interface EstimateInput {
   platform?: EstimatePlatform;
@@ -32,6 +30,7 @@ export interface EstimateInput {
   proxyTransportStartJitterMs?: number;
   serialRequestChain?: boolean;
   workersShareLanePacing?: boolean;
+  checkpointSlots?: number;
 }
 
 export interface ScanEstimate {
@@ -78,10 +77,19 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const networkMs = nonNegativeInteger(input.networkMs ?? 400, "networkMs");
   const lanes = positiveInteger(input.lanes ?? 1, "lanes");
   const workersPerLane = positiveInteger(input.workersPerLane ?? 1, "workersPerLane");
+  const totalWorkers = lanes * workersPerLane;
+  const maxWorkers = input.maxWorkers === undefined
+    ? totalWorkers
+    : positiveInteger(input.maxWorkers, "maxWorkers");
+  const serialRequestChain = Boolean(input.serialRequestChain);
+  const workersShareLanePacing = Boolean(input.workersShareLanePacing);
+  const qqProfile = platform === "qq"
+    ? qqMusicTransportProfile(serialRequestChain ? "song" : "likes", lanes, Math.min(totalWorkers, maxWorkers))
+    : undefined;
   const proxyTransport = platform === "qq" || Boolean(input.proxyTransport);
   const proxyTransportMaxConcurrent = positiveInteger(
     input.proxyTransportMaxConcurrent
-      ?? (platform === "qq" ? QQ_TRANSPORT_MAX_CONCURRENT : DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT),
+      ?? (qqProfile?.maxConcurrent ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT),
     "proxyTransportMaxConcurrent",
   );
   const proxyTransportEffectiveConcurrent = positiveInteger(
@@ -93,7 +101,7 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   }
   const proxyTransportStartDelayMs = nonNegativeInteger(
     input.proxyTransportStartDelayMs
-      ?? (platform === "qq" ? QQ_TRANSPORT_START_DELAY_MS : DEFAULT_PROXY_TRANSPORT_START_DELAY_MS),
+      ?? (qqProfile?.minStartDelayMs ?? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS),
     "proxyTransportStartDelayMs",
   );
   const proxyTransportStartJitterMs = nonNegativeInteger(
@@ -101,26 +109,14 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
       ?? (platform === "qq" ? 0 : DEFAULT_PROXY_TRANSPORT_START_JITTER_MS),
     "proxyTransportStartJitterMs",
   );
-  if (platform === "qq") {
-    if (proxyTransportMaxConcurrent !== QQ_TRANSPORT_MAX_CONCURRENT
-      || proxyTransportEffectiveConcurrent !== QQ_TRANSPORT_MAX_CONCURRENT
-      || proxyTransportStartDelayMs !== QQ_TRANSPORT_START_DELAY_MS
-      || proxyTransportStartJitterMs !== 0) {
-      throw new Error("QQ Music estimates require the fixed 4-concurrent / 250ms transport gate.");
-    }
-  }
-  const totalWorkers = lanes * workersPerLane;
-  const maxWorkers = input.maxWorkers === undefined
-    ? totalWorkers
-    : positiveInteger(input.maxWorkers, "maxWorkers");
   const boundedWorkers = Math.min(
     totalWorkers,
     maxWorkers,
     proxyTransport ? proxyTransportEffectiveConcurrent : Number.POSITIVE_INFINITY,
   );
-  const serialRequestChain = Boolean(input.serialRequestChain);
-  const workersShareLanePacing = Boolean(input.workersShareLanePacing);
-  const checkpointSlots = platform === "qq" ? QQ_CHECKPOINT_SLOTS : Number.POSITIVE_INFINITY;
+  const checkpointSlots = platform === "qq"
+    ? positiveInteger(input.checkpointSlots ?? qqProfile!.checkpointSlots, "checkpointSlots")
+    : Number.POSITIVE_INFINITY;
   const effectiveWorkers = serialRequestChain
     ? 1
     : Math.min(boundedWorkers, checkpointSlots);
@@ -173,7 +169,7 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     workersPerLane,
     totalWorkers,
     ...(input.maxWorkers !== undefined || proxyTransport || serialRequestChain ? { effectiveWorkers } : {}),
-    ...(platform === "qq" ? { checkpointSlots: QQ_CHECKPOINT_SLOTS } : {}),
+    ...(platform === "qq" ? { checkpointSlots } : {}),
     ...(serialRequestChain ? { serialRequestChain: true } : {}),
     ...(workersShareLanePacing ? { workersShareLanePacing: true } : {}),
     ...(proxyTransport

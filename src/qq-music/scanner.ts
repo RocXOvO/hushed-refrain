@@ -19,7 +19,7 @@ import {
   QQMusicResultWriter,
 } from "./result-writer";
 import { loadQQMusicScanState, qqMusicCommentKey, saveQQMusicScanState } from "./state";
-import { cancelQQMusicLanes } from "./transport-gate";
+import { cancelQQMusicLanes, qqMusicTransportProfile } from "./transport-gate";
 import type {
   QQCommentLane,
   QQMusicCheckpointActivity,
@@ -36,7 +36,7 @@ import type {
 type StopReason = "matched" | "paused" | "cooldown" | "stopped";
 type LaneBlockReason = "paused" | "cooldown" | "stopped" | "unavailable";
 const LIKES_CHECKPOINT_INTERVAL_MS = 400;
-const LIKES_CHECKPOINT_PAGE_CAP = 4;
+const LIKES_CHECKPOINT_FLUSH_PAGE_CAP = 4;
 const MAX_CONSECUTIVE_LANE_FAILURES = 5;
 
 interface LaneRuntime {
@@ -267,7 +267,7 @@ export async function runQQMusicScan(
     const revision = ++checkpointRevision;
     dirtyPageCount += 1;
     const waiting = waitForRevision(revision);
-    if (taskSignal.aborted || dirtyPageCount >= LIKES_CHECKPOINT_PAGE_CAP) {
+    if (taskSignal.aborted || dirtyPageCount >= LIKES_CHECKPOINT_FLUSH_PAGE_CAP) {
       void startFlush().catch(() => {});
     } else {
       scheduleFlush();
@@ -305,7 +305,11 @@ export async function runQQMusicScan(
     await cleanup();
     return value;
   };
-  let availableCheckpointSlots = LIKES_CHECKPOINT_PAGE_CAP;
+  let availableCheckpointSlots = qqMusicTransportProfile(
+    options.mode,
+    lanes.length,
+    Math.min(options.maxWorkers ?? Number.POSITIVE_INFINITY, lanes.length * options.workersPerLane),
+  ).checkpointSlots;
   const checkpointSlotWaiters: Array<{
     grant: (release: () => void) => void;
     reject: (error: unknown) => void;
