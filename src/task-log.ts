@@ -1,7 +1,30 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { readJsonlTail } from "./jsonl-tail";
-import type { ScanRequestActivity, ScanSchedulerActivity } from "./types";
+import type { ScanSchedulerActivity } from "./types";
+
+/** Stable page-request shape consumed by shared diagnostics across platforms. */
+export interface PageRequestActivity {
+  phase: "start" | "success" | "failure";
+  startedAt?: string;
+  lane: string;
+  workerId?: string;
+  operation: "comment-page";
+  songId: string;
+  songName?: string;
+  page: number;
+  shardId?: number;
+  elapsedMs?: number;
+  networkElapsedMs?: number;
+  attempts?: number;
+  comments?: number;
+  effectiveComments?: number;
+  totalComments?: number;
+  hasMore?: boolean;
+  status?: number;
+  rateLimited?: boolean;
+  error?: string;
+}
 
 export type TaskLogLevel = "debug" | "info" | "warn" | "error";
 
@@ -9,7 +32,7 @@ export interface TaskLogEntry {
   timestamp: string;
   level: TaskLogLevel;
   event: string;
-  mode: "source" | "parallel";
+  mode: "source" | "parallel" | "qq";
   runId: string;
   message: string;
   details?: Record<string, unknown>;
@@ -21,7 +44,7 @@ export class TaskLogger {
 
   constructor(
     readonly path: string,
-    private readonly mode: "source" | "parallel",
+    private readonly mode: "source" | "parallel" | "qq",
     private readonly runId: string,
   ) {}
 
@@ -52,7 +75,7 @@ export class TaskLogger {
     return this.tail;
   }
 
-  request(activity: ScanRequestActivity): void {
+  request(activity: PageRequestActivity): void {
     const suffix = activity.shardId === undefined
       ? `第 ${activity.page} 页`
       : `分片 ${activity.shardId} 第 ${activity.page} 页`;
@@ -95,6 +118,6 @@ export async function readTaskLog(path: string | undefined, limit: number): Prom
   return readJsonlTail<TaskLogEntry>(path, limit);
 }
 
-function activityDetails(activity: ScanRequestActivity | ScanSchedulerActivity): Record<string, unknown> {
+function activityDetails(activity: PageRequestActivity | ScanSchedulerActivity): Record<string, unknown> {
   return Object.fromEntries(Object.entries(activity).filter(([, value]) => value !== undefined));
 }

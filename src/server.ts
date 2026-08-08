@@ -16,6 +16,16 @@ import {
 } from "./jsonl-snapshot";
 import { readJsonlTail } from "./jsonl-tail";
 import { PagePerformanceTracker, type PagePerformanceSnapshot } from "./page-performance";
+import {
+  DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT,
+  DEFAULT_QQ_TRANSPORT_START_DELAY_MS,
+} from "./qq-music/transport-gate";
+import {
+  QQJobManager,
+  QQJobManagerError,
+  type QQJobGeneration,
+  type QQJobManagerOptions,
+} from "./qq-job-manager";
 import { timeCoveragePercent } from "./progress";
 import {
   DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
@@ -48,7 +58,7 @@ import {
 import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
 import { renderResultReportHtml, type ResultReport } from "./result-report";
 import { loadState, SOURCE_CATALOG_VERSION } from "./state";
-import { taskElapsedMs, TaskCoordinator } from "./task-coordinator";
+import { taskElapsedMs, TaskCoordinator, type TaskAcquisitionBlock } from "./task-coordinator";
 import { readTaskLog, TaskLogger } from "./task-log";
 import type {
   FoundComment,
@@ -73,6 +83,8 @@ export interface DashboardOptions {
   poolRefresher?: typeof refreshProxyPool;
   poolDiscoveryIntervalMs?: number;
   poolDiscoverer?: typeof discoverClashVerge;
+  qqClientFactory?: QQJobManagerOptions["clientFactory"];
+  qqRunner?: QQJobManagerOptions["runner"];
 }
 
 interface RuntimePaths {
@@ -86,12 +98,22 @@ interface RuntimePaths {
   resumeTask: string;
 }
 
-interface ResumeTaskDescriptor {
+interface LegacyResumeTaskDescriptor {
   version: 1;
   mode: "source" | "parallel";
   updatedAt: string;
   input: Record<string, string | number | boolean>;
 }
+
+interface PlatformResumeTaskDescriptor {
+  version: 2;
+  platform: "netease" | "qq";
+  mode: "source" | "parallel" | "song" | "likes";
+  updatedAt: string;
+  input: Record<string, string | number | boolean>;
+}
+
+type ResumeTaskDescriptor = LegacyResumeTaskDescriptor | PlatformResumeTaskDescriptor;
 
 type JobStatus = "idle" | "running" | "stopping" | RunReport["status"] | "error";
 
@@ -370,6 +392,25 @@ const iconRoot = join(projectRoot, "node_modules", "lucide-static", "icons");
 const ACTIVE_SONG_PROGRESS_LIMIT = 64;
 const MAX_RESULT_REPORT_BYTES = 64 * 1024 * 1024;
 const MAX_RESULT_REPORT_RECORDS = 20_000;
+
+class UpdatePreparationGate {
+  private block?: TaskAcquisitionBlock;
+
+  constructor(private readonly coordinator: TaskCoordinator) {}
+
+  begin(): void {
+    this.block ??= this.coordinator.blockNewTasks();
+  }
+
+  cancel(): void {
+    this.block?.release();
+    this.block = undefined;
+  }
+
+  isActive(): boolean {
+    return this.block !== undefined;
+  }
+}
 
 class JobManager {
   private snapshotValue: JobSnapshot = emptySnapshot();
@@ -1356,6 +1397,12 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
   const coordinator = new TaskCoordinator();
   const jobs = new JobManager(paths, coordinator);
   const parallel = new ParallelJobManager(paths, coordinator);
+  const qq = new QQJobManager({
+    paths: { data: paths.data, pool: paths.pool, resumeTask: paths.resumeTask },
+    coordinator,
+    ...(options.qqClientFactory ? { clientFactory: options.qqClientFactory } : {}),
+    ...(options.qqRunner ? { runner: options.qqRunner } : {}),
+  });
   const pool = new PoolManager(
     paths,
     options.poolRefreshIntervalMs ?? 60_000,
@@ -1372,9 +1419,14 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
     platform: options.platform,
     arch: options.arch,
   })));
+  const updatePreparation = new UpdatePreparationGate(coordinator);
   const server = createServer(async (request, response) => {
-    try { await route(request, response, paths, jobs, parallel, pool, auth, userProbes, updateChecker); }
-    catch (error) { json(response, error instanceof HttpError ? error.status : 500, { error: message(error) }); }
+    try { await route(request, response, paths, coordinator, jobs, parallel, qq, pool, auth, userProbes, updateChecker, updatePreparation); }
+    catch (error) {
+      const status = error instanceof HttpError || error instanceof QQJobManagerError ? error.status : 500;
+      if (!response.headersSent) json(response, status, { error: message(error) });
+      else if (!response.destroyed) response.end();
+    }
   });
   await new Promise<void>((done, reject) => {
     server.once("error", reject);
@@ -1385,15 +1437,58 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
 
 async function route(
   request: IncomingMessage, response: ServerResponse, paths: RuntimePaths,
-  jobs: JobManager, parallel: ParallelJobManager, pool: PoolManager, auth: AuthManager,
+  coordinator: TaskCoordinator,
+  jobs: JobManager, parallel: ParallelJobManager, qq: QQJobManager,
+  pool: PoolManager, auth: AuthManager,
   userProbes: UserProbeRouter,
   updateChecker: () => Promise<UpdateSnapshot>,
+  updatePreparation: UpdatePreparationGate,
 ): Promise<void> {
   const method = request.method ?? "GET";
   const url = new URL(request.url ?? "/", "http://localhost");
   if (method === "GET" && url.pathname === "/api/health") return json(response, 200, { ok: true, time: new Date().toISOString() });
   if (method === "GET" && url.pathname === "/api/update") return json(response, 200, await updateChecker());
-  if (method === "GET" && url.pathname === "/api/resume") return json(response, 200, { task: await readResumeTask(paths.resumeTask) ?? null });
+  if (method === "GET" && url.pathname === "/api/tasks/active") {
+    return json(response, 200, {
+      active: coordinator.isBusy(),
+      mode: coordinator.activeMode(),
+    });
+  }
+  if (method === "POST" && url.pathname === "/api/tasks/stop") {
+    await stopActiveTask(coordinator, jobs, parallel, qq);
+    return json(response, 200, {
+      active: coordinator.isBusy(),
+      mode: coordinator.activeMode(),
+    });
+  }
+  if (method === "POST" && url.pathname === "/api/tasks/prepare-update") {
+    updatePreparation.begin();
+    try {
+      if (coordinator.activeMode() !== "pool") {
+        await stopActiveTask(coordinator, jobs, parallel, qq);
+      }
+    } catch (error) {
+      updatePreparation.cancel();
+      throw error;
+    }
+    return json(response, 200, {
+      active: coordinator.isBusy(),
+      mode: coordinator.activeMode(),
+      preparingUpdate: true,
+    });
+  }
+  if (method === "POST" && url.pathname === "/api/tasks/cancel-update") {
+    updatePreparation.cancel();
+    return json(response, 200, {
+      active: coordinator.isBusy(),
+      mode: coordinator.activeMode(),
+      preparingUpdate: false,
+    });
+  }
+  if (method === "GET" && url.pathname === "/api/resume") {
+    const descriptor = await readResumeTask(paths.resumeTask);
+    return json(response, 200, descriptor ? normalizeResumeTaskForClient(descriptor) : { task: null });
+  }
   if (method === "GET" && url.pathname === "/api/job") return json(response, 200, await jobs.status());
   if (method === "POST" && url.pathname === "/api/job") return json(response, 202, await jobs.start(await body(request)));
   if (method === "POST" && url.pathname === "/api/job/stop") return json(response, 200, await jobs.stop());
@@ -1404,19 +1499,45 @@ async function route(
   if (method === "POST" && url.pathname === "/api/parallel/job/stop") return json(response, 200, await parallel.stop());
   if (method === "GET" && url.pathname === "/api/parallel/results/stream") return streamMatches(request, response, (subscriber) => parallel.subscribeMatches(subscriber));
   if (method === "GET" && url.pathname === "/api/parallel/results") return json(response, 200, await parallel.results(limit(url)));
+  if (method === "GET" && url.pathname === "/api/qq/job") return json(response, 200, await qq.status());
+  if (method === "POST" && url.pathname === "/api/qq/job") return json(response, 202, await qq.start(await body(request)));
+  if (method === "POST" && url.pathname === "/api/qq/job/stop") return json(response, 200, await qq.stop());
+  if (method === "GET" && url.pathname === "/api/qq/results/stream") {
+    const jobId = reportJobId(url.searchParams.get("jobId"));
+    return streamMatches(request, response, (subscriber) => qq.subscribeMatches(jobId, subscriber));
+  }
+  if (method === "GET" && url.pathname === "/api/qq/results") {
+    return json(response, 200, await qq.results(reportJobId(url.searchParams.get("jobId")), limit(url)));
+  }
   if (method === "GET" && url.pathname === "/report/results") {
     if (!isLoopbackAddress(request.socket.remoteAddress)) {
       throw new HttpError(403, "结果报告仅允许从本机访问。");
     }
-    const mode = selection(url.searchParams.get("mode"), ["source", "parallel"] as const, "mode");
+    const legacyUid = url.searchParams.get("uid");
+    const platform = selection(url.searchParams.get("platform") ?? (legacyUid ? "netease" : null), ["netease", "qq"] as const, "platform");
     const jobId = reportJobId(url.searchParams.get("jobId"));
-    const uid = numericId(url.searchParams.get("uid"), "UID");
-    const report = mode === "parallel" ? await parallel.report(jobId, uid) : await jobs.report(jobId, uid);
+    const targetKind = selection(url.searchParams.get("targetKind") ?? (legacyUid ? "uid" : null), ["uid", "encryptUin"] as const, "targetKind");
+    const target = reportTarget(url.searchParams.get("target") ?? legacyUid);
+    let report: ResultReport;
+    if (platform === "qq") {
+      const mode = selection(url.searchParams.get("mode"), ["song", "likes"] as const, "mode");
+      if (targetKind !== "encryptUin") throw new HttpError(400, "QQ 音乐报告目标类型必须是 encryptUin。");
+      const generation: QQJobGeneration = { platform: "qq", mode, jobId, target: { kind: "encryptUin", value: target } };
+      report = await qq.report(generation);
+    } else {
+      const mode = selection(url.searchParams.get("mode"), ["source", "parallel"] as const, "mode");
+      if (targetKind !== "uid") throw new HttpError(400, "网易云报告目标类型必须是 uid。");
+      const uid = numericId(target, "UID");
+      report = mode === "parallel" ? await parallel.report(jobId, uid) : await jobs.report(jobId, uid);
+    }
     return html(response, renderResultReportHtml(report));
   }
   if (method === "GET" && url.pathname === "/api/logs") {
-    return json(response, 200, url.searchParams.get("mode") === "parallel"
+    const logMode = selection(url.searchParams.get("mode") ?? "source", ["source", "parallel", "qq"] as const, "mode");
+    return json(response, 200, logMode === "parallel"
       ? await parallel.logs(limit(url))
+      : logMode === "qq"
+      ? await qq.logs(reportJobId(url.searchParams.get("jobId")), limit(url))
       : await jobs.logs(limit(url)));
   }
   if (method === "GET" && url.pathname === "/api/pool") return json(response, 200, await pool.status());
@@ -1427,10 +1548,35 @@ async function route(
     const song = await new EnhancedNcmClient({ proxy: proxyUrl(url.searchParams.get("proxy")) }).getSongInfo(numericId(url.searchParams.get("id"), "歌曲 ID"));
     return json(response, 200, song);
   }
+  if (method === "GET" && url.pathname === "/api/qq/song") {
+    return json(response, 200, await qq.lookupSong(
+      numericId(url.searchParams.get("id"), "QQ 音乐歌曲 ID"),
+      url.searchParams.get("proxy"),
+      url.searchParams.get("allowDirect") === "1",
+    ));
+  }
   if (method === "GET" && url.pathname === "/api/estimate") {
+    const estimatePlatform = selection(url.searchParams.get("platform") ?? "netease", ["netease", "qq"] as const, "platform");
+    const estimateMode = estimatePlatform === "qq"
+      ? selection(url.searchParams.get("mode"), ["song", "likes"] as const, "mode")
+      : selection(url.searchParams.get("mode") ?? "source", ["source", "parallel"] as const, "mode");
+    const serialRequestChain = estimatePlatform === "qq" && estimateMode === "song";
+    const workersShareLanePacing = estimatePlatform === "qq" && estimateMode === "likes";
+    const hostConcurrency = integer(
+      url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+      "hostConcurrency",
+      1,
+      32,
+    );
     return json(response, 200, estimateCommentScan({
+      platform: estimatePlatform,
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
-      pageSize: integer(url.searchParams.get("pageSize") ?? 1_000, "pageSize", 1, 2_000),
+      pageSize: integer(
+        url.searchParams.get("pageSize") ?? (estimatePlatform === "qq" ? 25 : 1_000),
+        estimatePlatform === "qq" ? "QQ 音乐评论 pageSize" : "pageSize",
+        1,
+        estimatePlatform === "qq" ? 25 : 2_000,
+      ),
       partitions: url.searchParams.has("partitions")
         ? integer(url.searchParams.get("partitions"), "partitions", 1, 100_000)
         : undefined,
@@ -1441,27 +1587,28 @@ async function route(
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
       lanes: integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256),
       workersPerLane: integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16),
-      maxWorkers: integer(
-        url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
-        "hostConcurrency",
-        1,
-        32,
-      ),
+      maxWorkers: serialRequestChain ? 1 : hostConcurrency,
       proxyTransport: url.searchParams.get("proxyTransport") === "1",
       proxyTransportMaxConcurrent: integer(
-        url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
-        "hostConcurrency",
+        estimatePlatform === "qq" ? DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT : url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+        estimatePlatform === "qq" ? "QQ 音乐传输并发" : "hostConcurrency",
         1,
         32,
       ),
       proxyTransportEffectiveConcurrent: integer(
-        url.searchParams.get("proxyTransportEffectiveConcurrent")
+        estimatePlatform === "qq"
+          ? DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT
+          : url.searchParams.get("proxyTransportEffectiveConcurrent")
           ?? url.searchParams.get("hostConcurrency")
           ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
         "proxyTransportEffectiveConcurrent",
         1,
         32,
       ),
+      proxyTransportStartDelayMs: estimatePlatform === "qq" ? DEFAULT_QQ_TRANSPORT_START_DELAY_MS : undefined,
+      proxyTransportStartJitterMs: estimatePlatform === "qq" ? 0 : undefined,
+      serialRequestChain,
+      workersShareLanePacing,
     }));
   }
   if (method === "GET" && url.pathname === "/api/user") {
@@ -1487,6 +1634,18 @@ async function route(
   throw new HttpError(404, "Not found");
 }
 
+async function stopActiveTask(
+  coordinator: TaskCoordinator,
+  jobs: JobManager,
+  parallel: ParallelJobManager,
+  qq: QQJobManager,
+): Promise<void> {
+  const activeMode = coordinator.activeMode();
+  if (activeMode === "source") await jobs.stop();
+  else if (activeMode === "parallel") await parallel.stop();
+  else if (activeMode === "qq") await qq.stop();
+}
+
 function runtimePaths(root: string): RuntimePaths {
   const normalized = resolve(root);
   const ncm = join(normalized, ".ncm");
@@ -1507,13 +1666,31 @@ async function saveResumeTask(path: string, descriptor: ResumeTaskDescriptor): P
   await writeAtomicJson(path, descriptor);
 }
 
+export function normalizeResumeTaskForClient(
+  descriptor: ResumeTaskDescriptor,
+): { task: ResumeTaskDescriptor; adjustments?: string[] } {
+  if (descriptor.version !== 2 || descriptor.platform !== "qq") return { task: descriptor };
+  const savedPageSize = Number(descriptor.input.pageSize);
+  if (!Number.isInteger(savedPageSize) || savedPageSize <= 25) return { task: descriptor };
+  return {
+    task: { ...descriptor, input: { ...descriptor.input, pageSize: 25 } },
+    adjustments: ["qq-comment-page-size-25"],
+  };
+}
+
 async function readResumeTask(path: string): Promise<ResumeTaskDescriptor | undefined> {
   try {
     return await readAtomicJson(path, (parsed) => {
       const value = parsed as Partial<ResumeTaskDescriptor>;
+      const validLegacy = value.version === 1
+        && (value.mode === "source" || value.mode === "parallel");
+      const validPlatform = value.version === 2
+        && (value.platform === "netease" || value.platform === "qq")
+        && (value.platform === "netease"
+          ? value.mode === "source" || value.mode === "parallel"
+          : value.mode === "song" || value.mode === "likes");
       if (
-        value.version !== 1 ||
-        (value.mode !== "source" && value.mode !== "parallel") ||
+        (!validLegacy && !validPlatform) ||
         typeof value.updatedAt !== "string" ||
         !value.input ||
         typeof value.input !== "object" ||
@@ -1571,36 +1748,43 @@ function html(response: ServerResponse, value: string): void {
   response.end(value);
 }
 
-function streamMatches(
+function streamMatches<T>(
   request: IncomingMessage,
   response: ServerResponse,
-  subscribe: (subscriber: MatchSubscriber) => () => void,
+  subscribe: (subscriber: (value: T) => void) => () => void,
 ): void {
-  response.writeHead(200, {
-    "Content-Type": "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    "Connection": "keep-alive",
-    "X-Accel-Buffering": "no",
-    "X-Content-Type-Options": "nosniff",
+  const unsubscribe = subscribe((value) => {
+    if (!response.destroyed) response.write(`event: match\ndata: ${JSON.stringify(value)}\n\n`);
   });
-  response.write(": connected\n\n");
-  const unsubscribe = subscribe((comment) => {
-    if (!response.destroyed) response.write(`event: match\ndata: ${JSON.stringify(comment)}\n\n`);
-  });
-  const heartbeat = setInterval(() => {
-    if (!response.destroyed) response.write(": keep-alive\n\n");
-  }, 15_000);
-  heartbeat.unref();
+  let heartbeat: NodeJS.Timeout | undefined;
   let closed = false;
   const close = (): void => {
     if (closed) return;
     closed = true;
-    clearInterval(heartbeat);
+    if (heartbeat) clearInterval(heartbeat);
     unsubscribe();
-    if (!response.destroyed) response.end();
+    if (!response.destroyed && response.headersSent) response.end();
   };
   request.once("aborted", close);
   response.once("close", close);
+  try {
+    response.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",
+      "X-Content-Type-Options": "nosniff",
+    });
+    response.write(": connected\n\n");
+  } catch (error) {
+    close();
+    throw error;
+  }
+  if (closed) return;
+  heartbeat = setInterval(() => {
+    if (!response.destroyed) response.write(": keep-alive\n\n");
+  }, 15_000);
+  heartbeat.unref();
 }
 
 async function readCookie(path: string): Promise<string | undefined> {
@@ -1709,10 +1893,13 @@ function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
   return coordinator.activeMode() === "parallel"
     ? "已有单曲并行任务正在运行，请先停止该任务。"
+    : coordinator.activeMode() === "qq"
+    ? "已有 QQ 音乐任务正在运行，请先停止该任务。"
     : "已有用户来源任务正在运行，请先停止该任务。";
 }
 function numericId(value: unknown, name: string): string { const id = String(value ?? "").trim(); if (!/^\d+$/.test(id)) throw new HttpError(400, `${name} 应为纯数字。`); return id; }
 function reportJobId(value: unknown): string { const id = String(value ?? "").trim(); if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id)) throw new HttpError(400, "任务 ID 格式错误。"); return id; }
+function reportTarget(value: unknown): string { const target = String(value ?? "").trim(); if (!target || target.length > 512) throw new HttpError(400, "报告目标格式错误。"); return target; }
 export function isLoopbackAddress(address: string | undefined): boolean {
   if (!address) return false;
   return address === "::1" || address === "127.0.0.1" || address.startsWith("127.")

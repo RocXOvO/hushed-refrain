@@ -28,6 +28,7 @@ import {
   withPoolBuildLock,
 } from "../src/mihomo-pool";
 import type { ProxyPoolEntry, ProxyPoolFile } from "../src/mihomo-pool";
+import { RunCancelled } from "../src/errors";
 
 function entry(
   name: string,
@@ -333,6 +334,33 @@ test("rejects a changed exit when managed-process identity cannot be verified", 
     })),
     /出口 IP 已变化/,
   );
+});
+
+test("cancels queued pool verification without starting another endpoint probe", async () => {
+  const controller = new AbortController();
+  const entries = [
+    entry("a", "8.8.8.8", 20, 30),
+    entry("b", "9.9.9.9", 21, 31),
+    entry("c", "1.1.1.1", 22, 32),
+    entry("d", "208.67.222.222", 23, 33),
+  ];
+  const pool: ProxyPoolFile = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    source: "external",
+    active: true,
+    entries,
+  };
+  const probes: string[] = [];
+  await assert.rejects(
+    verifyProxyPool(pool, async (name) => {
+      probes.push(name);
+      controller.abort();
+      return entries.find((candidate) => candidate.name === name)!;
+    }, controller.signal),
+    RunCancelled,
+  );
+  assert.deepEqual(probes, ["a"]);
 });
 
 test("matches a managed Mihomo process by executable and config path", () => {

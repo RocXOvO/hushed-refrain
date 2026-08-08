@@ -56,3 +56,28 @@ test("persists structured page success and rate-limit diagnostics", async () => 
   assert.equal(entries[2].details?.status, 429);
   assert.equal(entries[3].details?.comments, 1000);
 });
+
+test("accepts QQ page activity without losing shared fields or inventing shards", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-qq-task-log-"));
+  const logger = new TaskLogger(join(directory, "logs", "qq.jsonl"), "qq", "qq-run-1");
+  logger.request({
+    phase: "success",
+    startedAt: "2026-08-08T00:00:00.000Z",
+    lane: "qq-proxy-1",
+    workerId: "worker-2",
+    operation: "comment-page",
+    songId: "102065756",
+    songName: "七里香",
+    page: 4,
+    elapsedMs: 510,
+    comments: 25,
+    hasMore: true,
+  });
+  await logger.write("info", "task_finished", "finished");
+
+  const entries = await readTaskLog(logger.path, 10);
+  assert.equal(entries[1].mode, "qq");
+  assert.equal(entries[1].details?.workerId, "worker-2");
+  assert.equal(entries[1].details?.comments, 25);
+  assert.equal("shardId" in (entries[1].details ?? {}), false);
+});

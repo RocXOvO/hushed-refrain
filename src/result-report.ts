@@ -1,7 +1,9 @@
 import type { FoundComment, SourceSelection } from "./types";
 import { neteaseCommentUrl } from "./results";
+import { qqMusicCommentUrl } from "./qq-music/result-writer";
+import type { QQMusicFoundComment } from "./qq-music/types";
 
-export type ResultReportMode = "source" | "parallel";
+export type ResultReportMode = "source" | "parallel" | "song" | "likes";
 const MAX_PRINTABLE_COMMENT_CHARS = 320;
 const FIRST_PRINT_PAGE_UNITS = 6;
 const CONTINUED_PRINT_PAGE_UNITS = 10;
@@ -11,14 +13,9 @@ interface PrintableRow {
   units: number;
 }
 
-export interface ResultReport {
-  mode: ResultReportMode;
+interface ResultReportBase<Comment> {
   jobId: string;
-  uid: string;
   status: string;
-  source?: SourceSelection;
-  songId?: string;
-  songName?: string;
   startedAt?: string;
   finishedAt?: string;
   elapsedMs: number;
@@ -27,17 +24,46 @@ export interface ResultReport {
   pagesProcessed: number;
   coverageLabel: string;
   exportedAt: string;
-  comments: FoundComment[];
+  comments: Comment[];
 }
 
+export interface NeteaseResultReport extends ResultReportBase<FoundComment> {
+  platform?: "netease";
+  mode: "source" | "parallel";
+  uid: string;
+  target?: { kind: "uid"; value: string };
+  source?: SourceSelection;
+  songId?: string;
+  songName?: string;
+}
+
+export interface QQResultReport extends ResultReportBase<QQMusicFoundComment> {
+  platform: "qq";
+  mode: "song" | "likes";
+  target: { kind: "encryptUin"; value: string };
+  targetLabel: string;
+  songId?: string;
+  songName?: string;
+}
+
+export type ResultReport = NeteaseResultReport | QQResultReport;
+
 export function renderResultReportHtml(report: ResultReport): string {
-  const title = `UID ${report.uid} 评论检索报告`;
-  const modeLabel = report.mode === "parallel" ? "单曲并行" : "用户来源";
-  const targetLabel = report.mode === "parallel"
-    ? `${report.songName || "未命名歌曲"}${report.songId ? `（${report.songId}）` : ""}`
-    : sourceLabel(report.source);
+  const qq = report.platform === "qq";
+  const title = qq ? "QQ 音乐评论检索报告" : `UID ${report.uid} 评论检索报告`;
+  const modeLabel = qq
+    ? report.mode === "song" ? "QQ 单曲" : "QQ 公开喜欢"
+    : report.mode === "parallel" ? "单曲并行" : "用户来源";
+  const targetLabel = qq
+    ? qqTargetLabel(report)
+    : report.mode === "parallel"
+      ? `${report.songName || "未命名歌曲"}${report.songId ? `（${report.songId}）` : ""}`
+      : sourceLabel(report.source);
+  const target = qq ? report.target : report.target ?? { kind: "uid" as const, value: report.uid };
   const resultTables = report.comments.length > 0
-    ? printablePages(report.comments.flatMap((comment, index) => commentRows(comment, index + 1)))
+    ? printablePages(qq
+      ? report.comments.flatMap((comment, index) => qqCommentRows(comment, index + 1))
+      : report.comments.flatMap((comment, index) => neteaseCommentRows(comment, index + 1)))
       .map((page, index) => resultTable(page.map((row) => row.html).join(""), index > 0))
       .join("")
     : resultTable('<tr class="empty"><td colspan="6">当前任务尚未命中该用户的评论</td></tr>', false);
@@ -46,8 +72,12 @@ export function renderResultReportHtml(report: ResultReport): string {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="result-report-platform" content="${qq ? "qq" : "netease"}">
+  <meta name="result-report-mode" content="${escapeHtml(report.mode)}">
   <meta name="result-report-job" content="${escapeHtml(report.jobId)}">
-  <meta name="result-report-uid" content="${escapeHtml(report.uid)}">
+  <meta name="result-report-target-kind" content="${escapeHtml(target.kind)}">
+  <meta name="result-report-target" content="${escapeHtml(target.value)}">
+  ${qq ? "" : `<meta name="result-report-uid" content="${escapeHtml(report.uid)}">`}
   <title>${escapeHtml(title)}</title>
   <style>${REPORT_STYLE}</style>
 </head>
@@ -58,7 +88,7 @@ export function renderResultReportHtml(report: ResultReport): string {
   </div>
   <main>
     <header class="report-header">
-      <div class="brand"><span>云评检索台</span><small>NCM COMMENT FINDER</small></div>
+      <div class="brand"><span>云评检索台</span><small>${qq ? "QQ MUSIC COMMENT FINDER" : "NCM COMMENT FINDER"}</small></div>
       <p class="eyebrow">COMMENT SEARCH REPORT</p>
       <h1>${escapeHtml(title)}</h1>
       <p class="subtitle">导出的是任务文件中截至生成时刻已经保存的全部命中结果。</p>
@@ -86,14 +116,14 @@ export function renderResultReportHtml(report: ResultReport): string {
       ${resultTables}
     </section>
 
-    <footer>本报告由云评检索台生成 · 评论内容及用户信息来自任务扫描时的网易云公开响应</footer>
+    <footer>本报告由云评检索台生成 · 评论内容及用户信息来自任务扫描时的${qq ? " QQ 音乐" : "网易云"}公开响应</footer>
   </main>
   <script src="/report.js"></script>
 </body>
 </html>`;
 }
 
-function commentRows(comment: FoundComment, index: number): PrintableRow[] {
+function neteaseCommentRows(comment: FoundComment, index: number): PrintableRow[] {
   const song = comment.songName || comment.resourceName || (comment.songId ? `歌曲 ${comment.songId}` : "未知歌曲");
   const songId = comment.songId ? `<small>ID ${escapeHtml(comment.songId)}</small>` : "";
   const user = comment.nickname ? `<small>${escapeHtml(comment.nickname)} · UID ${escapeHtml(comment.userId)}</small>` : `<small>UID ${escapeHtml(comment.userId)}</small>`;
@@ -120,6 +150,52 @@ function commentRows(comment: FoundComment, index: number): PrintableRow[] {
       <td class="link"></td>
     </tr>`,
   }));
+}
+
+function qqCommentRows(comment: QQMusicFoundComment, index: number): PrintableRow[] {
+  const song = comment.songName || `歌曲 ${comment.songId}`;
+  const artists = comment.artists?.filter(Boolean).join(" / ");
+  const songDetails = [artists, `ID ${comment.songId}`].filter(Boolean).join(" · ");
+  const user = comment.nickname
+    ? `<small>${escapeHtml(comment.nickname)} · QQ 音乐用户</small>`
+    : "<small>QQ 音乐用户</small>";
+  const url = trustedQQMusicCommentUrl(comment.songMid, comment.songId);
+  const link = url ? `<a href="${escapeHtml(url)}">查看</a>` : "-";
+  const [commentDate, commentClock] = formatCommentTime(comment.time).split(" ");
+  return splitPrintableComment(comment.content).map((content, part) => ({
+    units: Math.max(1, Math.ceil(content.replace(/\s/g, "").length / 120)),
+    html: part === 0
+    ? `<tr>
+      <td class="number">${formatNumber(index)}</td>
+      <td class="time"><span>${escapeHtml(commentDate)}</span>${commentClock ? `<small>${escapeHtml(commentClock)}</small>` : ""}</td>
+      <td class="song"><strong>${escapeHtml(song)}</strong><small>${escapeHtml(songDetails)}</small></td>
+      <td class="content"><p>${escapeHtml(content)}</p>${user}</td>
+      <td class="likes">${formatNumber(comment.likedCount ?? 0)}</td>
+      <td class="link">${link}</td>
+    </tr>`
+    : `<tr class="continued">
+      <td class="number">续</td>
+      <td class="time"></td>
+      <td class="song"><small>第 ${formatNumber(index)} 条续页</small></td>
+      <td class="content"><p>${escapeHtml(content)}</p></td>
+      <td class="likes"></td>
+      <td class="link"></td>
+    </tr>`,
+  }));
+}
+
+function qqTargetLabel(report: QQResultReport): string {
+  const user = `用户 ${report.targetLabel}`;
+  if (report.mode === "likes") return `${user} · 公开喜欢歌曲`;
+  const song = report.songName || "未命名歌曲";
+  return `${user} · ${song}${report.songId ? `（${report.songId}）` : ""}`;
+}
+
+function trustedQQMusicCommentUrl(songMid: string | undefined, songId: string): string | undefined {
+  const mid = songMid?.trim();
+  if (mid && /^[A-Za-z0-9]{4,64}$/.test(mid)) return qqMusicCommentUrl(mid, songId);
+  if (/^\d+$/.test(songId)) return qqMusicCommentUrl(undefined, songId);
+  return undefined;
 }
 
 function splitPrintableComment(content: string): string[] {

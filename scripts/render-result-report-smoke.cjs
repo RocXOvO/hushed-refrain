@@ -8,7 +8,7 @@ async function render() {
   await mkdir(resolve(output, ".."), { recursive: true });
   const comments = Array.from({ length: 42 }, (_, index) => ({
     commentId: String(9_000_000 + index),
-    userId: "1767856290",
+    userId: "9000000001",
     nickname: index === 0 ? "测试用户 <安全转义>" : "测试用户",
     content: index === 8
       ? `这是一条用于验证跨页排版的长评论。${"中文内容、标点与 emoji 🎵 会保持可读。".repeat(95)}`
@@ -23,7 +23,7 @@ async function render() {
   const html = renderResultReportHtml({
     mode: "source",
     jobId: "1b0f6738-eeb3-4ed5-97db-58dc5344df77",
-    uid: "1767856290",
+    uid: "9000000001",
     status: "running",
     source: "both",
     startedAt: "2026-08-07T11:58:00.000Z",

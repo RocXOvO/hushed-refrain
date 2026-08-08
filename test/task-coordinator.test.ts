@@ -16,7 +16,21 @@ test("allows only one scan task lease at a time and releases idempotently", () =
   assert.ok(parallel);
   assert.equal(coordinator.activeMode(), "parallel");
   parallel.release();
+  const qq = coordinator.acquire("qq");
+  assert.ok(qq);
+  assert.equal(coordinator.activeMode(), "qq");
+  qq.release();
   assert.equal(coordinator.isBusy(), false);
+
+  const block = coordinator.blockNewTasks();
+  assert.equal(coordinator.acceptsNewTasks(), false);
+  assert.equal(coordinator.acquire("source"), undefined);
+  block.release();
+  block.release();
+  assert.equal(coordinator.acceptsNewTasks(), true);
+  const resumed = coordinator.acquire("source");
+  assert.ok(resumed);
+  resumed.release();
 });
 
 test("freezes elapsed time at the terminal timestamp", () => {

@@ -10,9 +10,12 @@ import {
   DESKTOP_UPDATE_CHANNELS,
   DESKTOP_WINDOW_CHANNELS,
   desktopDashboardUrl,
+  desktopResultReportIdentityMatches,
+  desktopResultReportLoadError,
   desktopResultReportUrl,
   desktopWindowChrome,
   parseDesktopResultExportRequest,
+  redactDesktopResultExportText,
   resultReportFilename,
 } from "./window-shell";
 import {
@@ -110,7 +113,7 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
   try {
     const destination = await dialog.showSaveDialog(window, {
       title: "导出评论检索报告",
-      defaultPath: join(app.getPath("documents"), resultReportFilename(request.uid)),
+      defaultPath: join(app.getPath("documents"), resultReportFilename(request)),
       filters: [{ name: "PDF 文档", extensions: ["pdf"] }],
       properties: ["createDirectory", "showOverwriteConfirmation"],
     });
@@ -131,8 +134,10 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
       if (target !== reportUrl) navigationEvent.preventDefault();
     });
     await reportWindow.loadURL(reportUrl);
-    const readyReport = await reportWindow.webContents.executeJavaScript(`Promise.resolve(document.fonts?.ready).then(() => ({ jobId: document.querySelector('meta[name="result-report-job"]')?.content, uid: document.querySelector('meta[name="result-report-uid"]')?.content }))`);
-    if (readyReport?.jobId !== request.jobId || readyReport?.uid !== request.uid) {
+    const readyReport = await reportWindow.webContents.executeJavaScript(`Promise.resolve(document.fonts?.ready).then(() => ({ platform: document.querySelector('meta[name="result-report-platform"]')?.content, mode: document.querySelector('meta[name="result-report-mode"]')?.content, jobId: document.querySelector('meta[name="result-report-job"]')?.content, targetKind: document.querySelector('meta[name="result-report-target-kind"]')?.content, target: document.querySelector('meta[name="result-report-target"]')?.content, errorText: document.contentType === 'application/json' ? document.body?.innerText : undefined }))`);
+    const reportError = desktopResultReportLoadError(readyReport);
+    if (reportError) throw new Error(reportError);
+    if (!desktopResultReportIdentityMatches(readyReport, request)) {
       throw new Error("报告数据已过期，请重新点击导出。");
     }
     const pdf = await reportWindow.webContents.printToPDF({
@@ -147,8 +152,10 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
     await writeAtomicBuffer(destination.filePath, pdf);
     return { status: "saved", path: destination.filePath };
   } catch (error) {
-    writeDesktopLog("pdf-export", error);
-    throw new Error(`PDF 导出失败：${error instanceof Error ? error.message : String(error)}`);
+    const logDetail = redactDesktopResultExportText(errorText(error), request);
+    const userDetail = redactDesktopResultExportText(error instanceof Error ? error.message : String(error), request);
+    writeDesktopLog("pdf-export", logDetail);
+    throw new Error(`PDF 导出失败：${userDetail}`);
   } finally {
     resultExportInProgress = false;
     if (reportWindow && !reportWindow.isDestroyed()) reportWindow.destroy();

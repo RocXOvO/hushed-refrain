@@ -1,3 +1,5 @@
+import { RunCancelled } from "./errors";
+
 export interface LaneRecoveryRuntime {
   now: () => number;
   sleep: (milliseconds: number) => Promise<void>;
@@ -56,24 +58,35 @@ export class LaneRecovery {
     this.wakeWaiters.clear();
   }
 
-  async waitUntilReady(): Promise<void> {
+  async waitUntilReady(signal?: AbortSignal): Promise<void> {
     if (this.cancelled) return;
+    if (signal?.aborted) throw new RunCancelled();
     const waitMs = this.retryAt - this.runtime.now();
     if (waitMs <= 0) return;
     let wake = (): void => {};
+    let rejectAbort = (_error: unknown): void => {};
     let timer: ReturnType<typeof setTimeout> | undefined;
-    const cancelled = new Promise<void>((resolve) => {
+    const awakened = new Promise<void>((resolve) => {
       wake = resolve;
       this.wakeWaiters.add(wake);
+    });
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+      signal?.addEventListener("abort", onAbort, { once: true });
     });
     const sleeping = this.runtime === defaultRuntime
       ? new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); })
       : this.runtime.sleep(waitMs);
     try {
-      await Promise.race([sleeping, cancelled]);
+      await Promise.race([sleeping, awakened, aborted]);
     } finally {
       if (timer) clearTimeout(timer);
       this.wakeWaiters.delete(wake);
+      signal?.removeEventListener("abort", onAbort);
+    }
+
+    function onAbort(): void {
+      rejectAbort(new RunCancelled());
     }
   }
 }

@@ -313,8 +313,20 @@ body.inspector-collapsed .inspector-heading { position: relative; justify-conten
 body.inspector-collapsed .inspector-heading > div { position: absolute; inset: 0 auto auto 0; }
 body.inspector-collapsed .inspector .panel-toggle img { transform: rotate(180deg); }
 
-.mode-switch { margin: 17px 0; }
+.platform-switch { margin-top: 17px; }
+.mode-switch { margin: 9px 0 17px; }
 .control-form { display: grid; gap: 15px; }
+.platform-notice {
+  padding: 10px 11px;
+  display: grid;
+  gap: 3px;
+  color: var(--ink-soft);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+  border-radius: var(--radius-sm);
+}
+.platform-notice strong { font-size: .74rem; }
+.platform-notice span { color: var(--muted-strong); font-size: .67rem; line-height: 1.45; }
 .field,
 .field-group { display: grid; gap: 7px; }
 .field span,

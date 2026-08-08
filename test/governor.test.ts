@@ -6,6 +6,7 @@ import {
   RequestBudgetExhausted,
   RequestExecutionError,
   RunCancelled,
+  errorStatus,
 } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
@@ -58,6 +59,7 @@ test("shares one lane's start spacing across configured workers", async () => {
 
   assert.deepEqual(fake.sleeps, [250]);
   assert.equal(governor.requestsUsed, 2);
+  assert.equal(governor.pacingConcurrency, 4);
 });
 
 test("rejects an invalid worker concurrency", () => {
@@ -233,6 +235,55 @@ test("turns 301 into a login requirement without retrying", async () => {
   );
   assert.equal(calls, 1);
   assert.deepEqual(fake.sleeps, []);
+});
+
+test("keeps QQ status 301 out of the NetEase authentication policy", async () => {
+  const fake = fakeRuntime();
+  const upstream = { status: 301, body: { code: 301 } };
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 9,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+    platformPolicy: "qq",
+  }, fake.runtime);
+
+  await assert.rejects(
+    governor.execute("qq-profile", async () => { throw upstream; }),
+    (error: unknown) => error instanceof RequestExecutionError
+      && error.status === 301
+      && error.cause === upstream,
+  );
+  assert.deepEqual(fake.sleeps, []);
+});
+
+test("preserves nested statuses through execution errors without looping on cyclic causes", async () => {
+  const fake = fakeRuntime();
+  const upstream = { status: "407" };
+  const wrapped = new Error("proxy CONNECT failed", { cause: upstream });
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+    platformPolicy: "qq",
+  }, fake.runtime);
+
+  await assert.rejects(
+    governor.execute("qq-comment", async () => { throw wrapped; }),
+    (error: unknown) => error instanceof RequestExecutionError
+      && error.status === 407
+      && error.cause === wrapped
+      && errorStatus(error) === 407,
+  );
+
+  const first: { cause?: unknown } = {};
+  const second: { cause?: unknown } = { cause: first };
+  first.cause = second;
+  assert.equal(errorStatus(first), undefined);
+  assert.equal(errorStatus({ status: null }), undefined);
 });
 
 test("enforces the per-run request budget", async () => {

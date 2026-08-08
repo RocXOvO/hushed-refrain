@@ -1,0 +1,140 @@
+# QQ 音乐评论查询专项记忆
+
+本文件只维护当前已实现的 QQ 音乐领域事实、共享边界和安全不变量，不记录旧共享实现、浏览器验收或发布结论。QQ 代码改变身份、上游接口、分页、并发、代理、状态、结果或活动语义时，必须在同一修改阶段更新本文件并删除过时描述。
+
+QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；`v0.20.0` 源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
+
+本文件和本地测试只记录实现契约，不代表任何 commit、push、Release 或安装包已经存在；发布状态必须以 Git 与 GitHub Release 的实际记录为准。
+
+## 产品边界
+
+- QQ 音乐是独立平台适配。它不复用网易云的时间游标、时间分片、source state、target-v3 JSONL 或歌曲覆盖账本。
+- 首发任务只有 `song` 和 `likes`：指定一首 QQ 歌曲扫描，或发现公开“我喜欢”歌曲后跨歌曲扫描。
+- 首发目标输入为数字 QQ 号、QQ 音乐个人主页 URL 或 `EncryptUin`；评论作者只按完整 `EncryptUin` 精确相等匹配。
+- 首发不保存 QQ Cookie/musickey，不做扫码登录、私密喜欢列表、未经验证的公开听歌记录或同一歌曲多页并发。
+- QQ CGI 不是稳定公开 SDK。常规测试必须使用 stub 或回环服务；未经用户明确要求，不做高频实网验证。
+
+## 模块所有权
+
+- `src/qq-music/**` 拥有 QQ Client、类型、SeqNo 扫描器、状态、结果 writer、QQ TransportGate、代理 fetch 和离线 benchmark；不得依赖 Server 或 DOM。
+- `src/qq-cli.ts` 只组装 CLI 所需的 QQ 领域对象，不复制 Dashboard manager。
+- QQ domain 当前复用 `atomic-file`、Governor、LaneRecovery、`worker-topology` 与 `LaneAllocator`，但保持自己的 SeqNo 分页、状态、TransportGate 和结果 writer；不得抽象出伪统一的分页/状态 Scanner。
+
+## 身份、来源与上游接口
+
+- 数字 QQ 号或主页 URL 通过公开资料接口解析为 canonical `EncryptUin`；直接输入 `EncryptUin` 时原样使用。公开资料隐藏必须明确报来源错误，不能伪造空覆盖。
+- `EncryptUin` 是不透明作者标识，不解密、不猜测、不转换回 QQ 号。
+- 评论读取使用 `music.globalComment.CommentRead.GetNewCommentList`。评论 `pageSize` 新任务范围为 `1..25`，默认 `25`。
+- 公开喜欢歌曲使用 `music.srfDissInfo.DissInfo.CgiGetDiss` 的 offset 分页；`likedPageSize` 范围为 `1..500`，默认 `500`。它与评论页大小是两个独立参数。
+- 歌曲详情使用 QQ 歌曲详情接口，只补充 MID、名称和艺人。Client 将十进制 ID 作为字符串 `song_id` 发送并以字符串规范化响应；Scanner 始终以原 `requestedSongId` 建立 song 任务，不能被响应 ID/MID 替换，也不能经 JavaScript `Number` 转换。
+- `zzcSign` 仅是为可能需要签名的请求准备的完整性 token，不提供加密；QRC 歌词 3DES 与评论查询无关。
+
+## SeqNo 分页与完成语义
+
+```text
+page 0, cursor "" -> 本页最后 SeqNo A
+page 1, cursor A  -> 本页最后 SeqNo B
+page 2, cursor B  -> ...
+```
+
+- 输入 cursor、每条评论 SeqNo 和响应 `nextCursor` 都必须是十进制字符串。
+- `HasMore=true` 必须有非空 `nextCursor`；从第二页起，新 cursor 必须严格小于请求 cursor。
+- 下一 cursor 的唯一权威来源是本页最后一条严格规范化评论的 SeqNo。Client 校验整页每条 SeqNo 都是十进制且严格递减，并拒绝首条不老于请求 cursor、末值相等/回跳、缺字段以及业务 code/subcode 失败。
+- 同一歌曲最多一个在途评论页。并发只发生在不同歌曲之间；普通失败或 Lane 故障保留原 cursor，只有成功且协议完整的页才能推进 cursor/pageNo。
+- `song` 始终只有一条活动 SeqNo 链，但成功页可以在健康 Lane 间公平轮转。增加出口是轮转和故障切换，不代表同曲并行。
+- 只有明确的歌曲资源 HTTP `404/410` 才将该歌标记 `done + truncated`；QQ 协议、业务、结构或 cursor 错误使任务 `paused`，不得归一化为空页或完整覆盖。
+- `coverageComplete` 只在来源完整且全部歌曲自然完成、没有来源错误或任意截断时成立。终态与完整覆盖必须分开表达。
+
+## Worker、Lane 与限速
+
+- 一条 `QQCommentLane` 拥有一个 Client、一个 Lane 专属 Governor，并引用任务唯一的 `QQMusicTransportGate`。
+- 生产 Governor 的 pacing concurrency 固定为 `1`。`workersPerLane` 只增加跨歌曲候选并发，不能缩短单出口默认 `3000 ms + jitter` 的启动周期。
+- QQ Gate 固定为最多 `4` 个在途请求、实际开始间隔至少 `250 ms`；它不是网易云 AIMD `ProxyTransportGate`，不得套用网易云参数。
+- QQ likes 的实际 Worker 数使用 `workerCountForTopology(lanes, workersPerLane, hostConcurrency)`；`hostConcurrency` 沿用共享范围 `1..32`。
+- Worker ID 是本次调用内的 `worker-N`，不绑定 Lane。每页通过共享 `LaneAllocator` 公平获取 Lane，单 Lane permit 不超过 `workersPerLane`；hard cap 不能通过裁掉后半段 Lane 实现，全部选中健康出口都必须可达。
+- QQ song 无论配置如何只运行一个 Worker/SeqNo 链；likes Worker 才负责跨歌曲并发。
+- 正数 `requestBudget` 是任务级 logical comment-page 预算，不按 Lane 倍增；`0` 表示无限。身份、来源、元数据控制请求和 Governor retry attempt 必须与 logical page 分开计数。
+- 请求活动中的 configured lanes/workers、实际参与的唯一 lanes/workers、当前活动数与同时在途峰值是不同指标，不能混用。
+
+## 代理、故障切换与取消
+
+- `maxProxyLanes=0` 使用全部有序已验证出口；正数只限制本任务子集，不缩容或重建共享池。
+- 共享池现有验证只证明出口/IP 和网易云探测通过，不代表 QQ 域已验证；UI 不得把它标记为“QQ 已验证”。首发不增加强制 QQ 启动探针。
+- 每次 QQ 请求都必须独立 fail-closed。HTTP 转发和 HTTPS CONNECT 的拒绝、超时、取消或永久代理错误都不能回退本机直连。
+- 普通网络或可重试上游失败保留工作并触发 LaneRecovery；永久代理 4xx（不含限流/可重试状态）只下线当前 Lane，原 cursor 交给健康 Lane。
+- `403/429` 按 Governor 冷却语义结算并保留工作。全部 Lane 不可用时任务明确 `paused` 并保留检查点。
+- Scanner 同时接受外部任务 signal，并以共享 Gate signal 作为内部取消屏障：外部 abort 会取消全部 Lane/Governor/Gate；Gate abort 会停止队列、LaneAllocator、LaneRecovery 和槽位等待。`executeLane` 在请求前后检查 Gate，JSONL `sync()` 后、状态提交前再次检查同一任务屏障；停止后不得迟到启动请求、提交页状态或重新入队。
+- `RequestExecutionError` 必须保留 `cause`，状态分类遍历 cause 链，禁止解析错误文本。网易云 `301 -> AuthenticationRequired` 只能由平台策略启用，不能无条件作用于 QQ。
+
+## 状态、结果与耐久顺序
+
+QQ 数据位于独立命名空间：
+
+```text
+data/qq/state-<stable-task-key>.json
+data/qq/comments-<stable-task-key>.jsonl
+data/logs/qq-<job-id>.jsonl
+```
+
+- `stableQQMusicTaskKey` 是稳定路径 key 的唯一生成器：先 trim canonical EncryptUin，再对 JSON 数组 `[mode, target, mode === "song" ? requestedSongId : ""]` 做 SHA-256，取前 24 个十六进制字符。CLI 与 Manager 必须调用同一 helper，不能各自复制算法；song 必须给十进制 requestedSongId，likes 禁止携带它。
+- 状态固定标识为 `version: 1`、`kind: "qq-comment-scan"`、`commentPagination: "seqno-v1"`。
+- QQ `CmId` 跨歌曲全局唯一没有可靠证据。去重域固定为结构化 `(songId, commentId)`，内部使用经过验证的 `songId:commentId` key；状态字段是 `seenCommentKeys`，JSONL 分别保留原始 songId/commentId。
+- 单页成功后的耐久顺序固定为：规范化和匹配 -> 通过长期持有的 append `FileHandle` 串行写入新命中并 `sync()` -> 再检查取消 -> 同步提交页计数、`seenCommentKeys`、cursor/完成标记 -> 等待对应 checkpoint revision -> 释放槽位并决定是否重新入队。Writer cleanup 先等待 append tail，再关闭该 handle。
+- 取消发生在 JSONL 同步和状态提交之间时，允许 JSONL 领先状态，但禁止推进 cursor。恢复重读该页时必须补齐 checkpoint ownership，不能重复追加或重复计数。
+- writer 初始化必须流式读取已有 JSONL，隔离损坏/不完整尾行，串行追加。`onMatch`/SSE/UI/日志均为最佳努力，失败不能影响耐久写、计数或扫描。
+- Writer 将首次 append `write` 或 `sync` 故障锁存为 `QQMusicResultPersistenceError`；该实例后续 append 直接抛出同一错误，不再次写、不加入内存 key，也不发布 `onAppend`。Scanner 把它与 checkpoint 写失败视为全局持久化故障：锁存 `persistenceFailed`、结算 `paused`，取消 LaneRecovery、LaneAllocator、Governor/Gate、队列和 revision waiters；当前页不得换 Lane 或在本轮重放。
+- `sync` 失败时 JSONL 可能已经包含完整记录而状态仍未拥有它。下一次恢复重新流式加载 JSONL，以 `(songId, commentId)` 复合 key 对账并重读原页，只补齐 `seenCommentKeys`/matchCount，不重复写结果。
+- 持久化故障会立即拒绝 revision waiter，但当时已经开始的 likes 原子 checkpoint I/O 仍可能在途。Scanner `cleanup()` 在任何报告/异常返回前等待当时的 `flushLoop` settle，再关闭 writer；旧任务因此不能先返回、让恢复任务写入新状态后，又由旧 flush 越过任务生命周期覆盖该状态。
+- `song` 每个成功页立即原子保存。`likes` 评论页按 `400 ms` 或 `4` 个脏页先到者刷盘，并用 `4` 个 pre-request 槽位限制未持久页；所有终态强制 flush。
+- 首次持久化失败锁存全局 `paused`，取消请求和等待者，拒绝后续 revision，禁止保存风暴。
+- Decoder 为兼容可读取旧评论 `pageSize=1..100`；Scanner 必须在任何远程请求或 finished 早退前先把 `26..100` 单向持久化为 `25`。迁移保存失败时远程请求数必须为零。
+- Decoder 还必须验证模式/目标兼容、song 模式基数和 requestedSongId、十进制 cursor、重复歌曲/命中 key、任务计数等于歌曲求和、`pageNo == pagesProcessed`、`truncated => done` 和有效 ISO 时间；完成字段由状态推导，不盲信缓存布尔值。
+- `onCheckpoint` 若发生在原子写前只能称为 live snapshot，不能冒充 durable acknowledgement。
+
+普通 Lane 退避后的 allocator 唤醒使用 `LaneRecovery.waitUntilReady(taskSignal)`。默认运行时内部 timeout 在正常到期、`recordSuccess()` 提前唤醒、Recovery cancel 或 task abort 的所有出口都于 `finally` 清理；扫描结束不得遗留仅用于恢复通知的活跃 timer。
+
+## 活动与结果字段
+
+- 评论页 `QQMusicRequestActivity` 的 `start` 带 operation、workerId、lane、songId/名称、从 1 开始的 page 和 ISO `startedAt`；`success|failure` 沿用同一身份并补充耗时、attempts、comments/total/hasMore 或 status/rateLimited/error。回调异常不影响执行。
+- `QQMusicSongActivity`/`onSongProgress` 当前携带 songId、可选 MID/名称/艺人、pages、comments、可选 total、done 和 truncated；它在页提交、页上限截断和资源截断等状态变化后发布，回调仍是最佳努力。
+- QQ 结果至少包含 `platform:"qq"`、目标 EncryptUin、歌曲 ID、评论 ID/SeqNo、作者 EncryptUin、正文和捕获时间；MID、名称、艺人、发布时间和统计字段可选。
+- Writer 保存 songId/commentId 原始字段并可补充 QQ 歌曲链接；代理凭据、Cookie、状态和结果不得进入专项测试输出或发布资产。
+
+## QQ domain 验证路由
+
+- Client/State/Writer：`node --import tsx --test test/qq-music-client.test.ts test/qq-music-state.test.ts test/qq-music-result-writer.test.ts`，覆盖字符串歌曲 ID、整页 SeqNo、stable key、复合命中 key、write/sync/callback/close 顺序和持久化故障锁存。
+- Scanner：`node --import tsx --test test/qq-music-scanner.test.ts`，覆盖单歌 Lane 轮转、likes hard cap 且全部 Lane 可达、task logical page budget、双取消屏障、JSONL 后提交屏障、持久化失败全局暂停、恢复 timer/flush 清理、歌曲元数据生命周期、迁移/恢复和错误分类。
+- 全部 QQ 专项：`node --import tsx --test test/qq*.test.ts`；同时覆盖 CLI、JobManager、离线 benchmark、HTTP/HTTPS 代理、共享 QQ Gate 和 generation。测试数量是易变实现细节，不写入长期记忆。
+
+## 共享 JobManager、HTTP/SSE、Dashboard 与恢复
+
+### Manager 与快照
+
+- `src/qq-job-manager.ts` 是独立应用层；`src/server.ts` 只实例化 Manager 并组合路由。Manager 通过 `QQJobManagerOptions` 注入 runtime paths、`TaskCoordinator`、Client factory、runner、pool reader/verifier 和报告快照 reader，便于无实网测试。
+- `QQJobGeneration` 是 `{ platform:"qq", mode:"song"|"likes", jobId, target:{ kind:"encryptUin", value } }`；内部 generation 额外绑定 `statePath/outputPath`。目标解析成 canonical EncryptUin 后才发布新 generation；新启动预检失败时保留上一个可读结果 generation。
+- `QQJobSnapshot` 实际分组字段为：任务身份/时间（id、mode、generation、targetLabel、songId/name、started/finished/elapsed）；持久进度（songs、songsProcessed、pagesProcessed、commentsInspected、matches、requestsTotal、coverageComplete）；实时性能（commentsPerSecond 与 `PagePerformanceSnapshot`）；拓扑（configured/participated lanes/workers、peakInFlight、laneSelection、workersPerLane、hostConcurrency、QQ Gate 参数）；以及 activeSongs、logPath、note/error。
+- 活动行合并 `QQMusicRequestActivity` 的瞬时 Worker/页/开始时间和 `QQMusicSongActivity` 的稳定页数/评论数/总数/完成语义；上限 64 行，`done/truncated` 移除进度行。只有成功 `comment-page` 更新 CommentRate/PagePerformance，身份解析、来源发现和元数据不计入读取速度。
+- `TaskCoordinator` 的 `qq` lease 覆盖代理准备、目标解析、扫描和歌曲查询。`stop()` 可取消正在进行的 pool verification、resolve、lookup 和 scanner；启动期取消/冷却分别结算为 `stopped/cooldown`，所有租约均幂等释放。
+
+### HTTP、generation 与报告
+
+- QQ 路由是 `GET|POST /api/qq/job`、`POST /api/qq/job/stop`、`GET /api/qq/song`、`GET /api/qq/results?jobId=`、`GET /api/qq/results/stream?jobId=` 和 `GET /api/logs?mode=qq&jobId=`。Results/logs 在异步读取前后复核 generation；SSE 发送 `{ generation, comment }`，不发送无归属的裸评论，并在连接提前 close 时幂等清理订阅。
+- `/api/tasks/active` 与 `/api/tasks/stop` 是全局任务状态和停止操作的权威入口；后端按 `TaskCoordinator.activeMode()` 停止实际扫描 Manager。普通 stop/prepare-update 遇 `activeMode=pool` 时不绕过 pool lease，也不调用 `stopMihomoPool`；prepare 屏障继续阻止新任务并返回 active pool 供前端提示等待，用户取消后释放。Windows `installUpdate` 同步返回和异步 error 也都会释放该屏障；升级流程不以当前可见视图推断运行任务。
+- 完整报告使用固定字节截止点的 JSONL 快照，读取前后校验 platform/mode/jobId/canonical target/outputPath。导出 DTO 是 NetEase UID 与 QQ EncryptUin 的判别联合；route、Electron IPC、隐藏窗口 meta 与 fonts-ready 后校验使用同一 generation。旧网易云 `?mode=&jobId=&uid=` 报告 URL 仍归一为 `platform=netease,targetKind=uid`；QQ 报告只从验证过的 MID/十进制 songId 重建官方链接。
+
+### Dashboard 四视图
+
+- 完整 viewKey 固定为 `netease:parallel`、`netease:source`、`qq:song`、`qq:likes`。`TASK_VIEWS`、`latestJobs`、`resultGenerations`、settlement 和 REST/SSE/log/estimate 请求世代都以完整 viewKey 隔离；同一个 QQ Manager 启动新 generation 时，还会失效兄弟 QQ mode 的旧 job/generation/settlement/本地目标，避免跨模式残留。
+- QQ song/likes 分别使用独立表单；评论页默认/最大为 25，likes 来源页默认/最大为 500。song 始终显示一条 SeqNo 链；likes 展示 Manager 计算的有界 Worker 拓扑，不把 Worker 数错误截成 4，并单独标明 QQ Gate“最多 4 在途”。Worker 只增加跨歌曲调度，共享代理池未预先验证 QQ 域，请求保持 fail-closed。
+- Renderer 从 Manager generation 取 canonical target，只用 targetLabel 展示；results/logs/SSE 响应 generation 不匹配时静默丢弃。结果 key 对 QQ 使用 `songId:commentId`；QQ SSE 的路由 jobId 与事件 generation 双重绑定。
+- 前端入口固定使用缓存版本 `app.js?v=45`，发布新脚本时必须同步递增，避免客户端继续执行旧缓存。
+
+### 恢复与估算
+
+- QQ Manager 写入 resume v2：`platform:"qq" + mode:"song"|"likes"`，并保存非敏感原始参数；旧 v1 `source|parallel` 继续视为 NetEase。`/api/resume` 对旧 QQ `pageSize>25` 返回 `pageSize:25` 和 `adjustments:["qq-comment-page-size-25"]`。Dashboard 按 allowlist 回填、显示迁移提示、将所有 fresh 强制为 false，且不自动启动。
+- HTTP/恢复输入字段是 `workersPerProxy`，Manager/Scanner 内部与快照字段是 `workersPerLane`；不要把两个边界重新接反。
+- `/api/estimate` 显式要求 `platform`。QQ 使用 `pageSize<=25`、Gate 并发 4/启动间隔 250 ms/无 Gate jitter；song 传 `serialRequestChain=1`，likes 传 `workersShareLanePacing=1`，并继续受 `hostConcurrency` 和 4 个检查点页槽上限约束。估算保留 v0.19 的 partitions、实测页填充、成功率和网络耗时校准。
+
+### 完整交付门禁
+
+运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`npm run desktop:smoke:mac` 与 `git diff --check`，并对四视图做真实浏览器验收。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。

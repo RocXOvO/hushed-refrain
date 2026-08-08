@@ -205,3 +205,134 @@ test("rejects an effective transport capacity above the configured host limit", 
     proxyTransportEffectiveConcurrent: 8,
   }), /must not exceed/);
 });
+
+test("models a QQ song as one serial SeqNo chain while healthy lanes rotate", () => {
+  const fourLanes = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 1,
+    minDelayMs: 3_000,
+    jitterMs: 1_000,
+    networkMs: 400,
+    lanes: 4,
+    workersPerLane: 1,
+    maxWorkers: 32,
+    serialRequestChain: true,
+  });
+  const moreWorkersSameLanes = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 1,
+    minDelayMs: 3_000,
+    jitterMs: 1_000,
+    networkMs: 400,
+    lanes: 4,
+    workersPerLane: 8,
+    maxWorkers: 32,
+    serialRequestChain: true,
+  });
+  const eightLanes = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 1,
+    minDelayMs: 3_000,
+    jitterMs: 1_000,
+    networkMs: 400,
+    lanes: 8,
+    workersPerLane: 1,
+    maxWorkers: 32,
+    serialRequestChain: true,
+  });
+
+  assert.equal(fourLanes.expectedSeconds, 3_500);
+  assert.equal(moreWorkersSameLanes.expectedSeconds, fourLanes.expectedSeconds);
+  assert.equal(eightLanes.expectedSeconds, 1_750);
+  assert.equal(eightLanes.effectiveWorkers, 1);
+  assert.equal(eightLanes.serialRequestChain, true);
+  assert.equal(eightLanes.proxyTransportMaxConcurrent, 4);
+  assert.equal(eightLanes.proxyTransportStartDelayMs, 250);
+  assert.equal(eightLanes.proxyTransportStartJitterMs, 0);
+  assert.equal(eightLanes.checkpointSlots, 4);
+});
+
+test("keeps QQ likes pacing shared per lane while workers overlap network work", () => {
+  const pacingBoundOne = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 100,
+    minDelayMs: 3_000,
+    jitterMs: 1_000,
+    networkMs: 100,
+    lanes: 2,
+    workersPerLane: 1,
+    maxWorkers: 32,
+    workersShareLanePacing: true,
+  });
+  const pacingBoundFour = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 100,
+    minDelayMs: 3_000,
+    jitterMs: 1_000,
+    networkMs: 100,
+    lanes: 2,
+    workersPerLane: 4,
+    maxWorkers: 32,
+    workersShareLanePacing: true,
+  });
+  const networkBoundOne = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 100,
+    minDelayMs: 0,
+    jitterMs: 0,
+    networkMs: 6_000,
+    lanes: 1,
+    workersPerLane: 1,
+    maxWorkers: 32,
+    workersShareLanePacing: true,
+  });
+  const networkBoundFour = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 100,
+    minDelayMs: 0,
+    jitterMs: 0,
+    networkMs: 6_000,
+    lanes: 1,
+    workersPerLane: 8,
+    maxWorkers: 32,
+    workersShareLanePacing: true,
+  });
+
+  assert.equal(pacingBoundOne.expectedSeconds, 7_000);
+  assert.equal(pacingBoundFour.expectedSeconds, pacingBoundOne.expectedSeconds);
+  assert.equal(networkBoundOne.expectedSeconds, 24_000);
+  assert.equal(networkBoundFour.expectedSeconds, 6_000);
+  assert.equal(networkBoundFour.effectiveWorkers, 4);
+});
+
+test("rejects illegal QQ page sizes and non-frozen gate parameters", () => {
+  assert.throws(() => estimateCommentScan({
+    platform: "qq",
+    comments: 100,
+    pageSize: 26,
+    minDelayMs: 0,
+    jitterMs: 0,
+  }), /must not exceed 25/);
+  assert.throws(() => estimateCommentScan({
+    platform: "qq",
+    comments: 100,
+    pageSize: 25,
+    minDelayMs: 0,
+    jitterMs: 0,
+    proxyTransportMaxConcurrent: 8,
+  }), /fixed 4-concurrent/);
+});

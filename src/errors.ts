@@ -6,8 +6,12 @@ export class RequestBudgetExhausted extends Error {
 }
 
 export class RequestExecutionError extends Error {
-  constructor(message: string, public readonly status?: number) {
-    super(message);
+  constructor(
+    message: string,
+    public readonly status?: number,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
     this.name = "RequestExecutionError";
   }
 }
@@ -57,14 +61,27 @@ export class RunCancelled extends Error {
 }
 
 export function errorStatus(error: unknown): number | undefined {
+  return errorStatusFrom(error, new Set<object>());
+}
+
+function errorStatusFrom(error: unknown, visited: Set<object>): number | undefined {
   if (!error || typeof error !== "object") return undefined;
+  if (visited.has(error)) return undefined;
+  visited.add(error);
   const candidate = error as Record<string, unknown>;
-  const direct = Number(candidate.status);
-  if (Number.isFinite(direct)) return direct;
+  const direct = numericStatus(candidate.status);
+  if (direct !== undefined) return direct;
   const body = candidate.body;
   if (body && typeof body === "object") {
-    const code = Number((body as Record<string, unknown>).code);
-    if (Number.isFinite(code)) return code;
+    const code = numericStatus((body as Record<string, unknown>).code);
+    if (code !== undefined) return code;
   }
-  return undefined;
+  return errorStatusFrom(candidate.cause, visited);
+}
+
+function numericStatus(value: unknown): number | undefined {
+  if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+  if (typeof value !== "string" || !/^-?\d+(?:\.\d+)?$/.test(value.trim())) return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }

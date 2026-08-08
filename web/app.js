@@ -4,16 +4,18 @@ const $ = (selector) => document.querySelector(selector);
 const $$ = (selector) => [...document.querySelectorAll(selector)];
 const el = {
   parallelForm: $("#parallelForm"), sourceForm: $("#sourceForm"), parallelUid: $("#parallelUid"), uid: $("#uid"),
+  qqSongForm: $("#qqSongForm"), qqLikesForm: $("#qqLikesForm"), qqSongTarget: $("#qqSongTarget"), qqLikesTarget: $("#qqLikesTarget"),
+  qqSongId: $("#qqSongId"), qqSongPreview: $("#qqSongPreview"), qqSongLookup: $("#qqSongLookupButton"),
   songId: $("#songId"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
   poolStatus: $("#poolStatus"), poolState: $("#poolStateIndicator"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
-  parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
+  parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), qqSongStart: $("#qqSongStartButton"), qqLikesStart: $("#qqLikesStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"), exportResults: $("#exportResultsButton"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
-  settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementCoverage: $("#settlementCoverage"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"),
+  settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementCoverage: $("#settlementCoverage"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"), settlementFootnote: $("#settlementFootnote"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
   updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
@@ -26,7 +28,9 @@ const el = {
   appSplash: $("#appSplash"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
+let platform = "netease";
 let mode = "parallel";
+const selectedModes = { netease: "parallel", qq: "song" };
 let poolSource = "clash-verge";
 let poolSourceInitialized = false;
 let poolRunning = false;
@@ -50,15 +54,15 @@ let poolEntriesSignature = "";
 let renderedJobSignature = "";
 let logsSignature = "";
 let logsRefreshInFlight;
-let logsRefreshMode;
+let logsRefreshView;
 let logsRequest = 0;
 let lastLogsRefreshAt = 0;
 let resultStream;
-let resultMode = mode;
+let resultView = "netease:parallel";
 let resultRequest = 0;
-const resultJobIds = { parallel: undefined, source: undefined };
-const resultJobMeta = { parallel: undefined, source: undefined };
-const latestJobs = { parallel: undefined, source: undefined };
+const resultGenerations = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
+const latestJobs = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
+const localRequestedTargets = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, undefined]));
 let resultExportInProgress = false;
 let resultRenderTimer;
 let pendingLiveCommentId;
@@ -66,20 +70,38 @@ let resultsRenderPending = false;
 let resultsNeedRefresh = false;
 let nativeUpdateState;
 let activeTaskMode;
+let activeTaskViewKey;
 let startSubmissionBusy = false;
+let qqLookupBusy = false;
 let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
 let authRefreshTimer;
 let modeSwitchVersion = 0;
 let tabSwitchVersion = 0;
-const settlementPending = { parallel: undefined, source: undefined };
+const settlementPending = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
 const visibleResults = new Map();
 let visibleResultOrder = [];
 const disclosureAnimations = new WeakMap();
 let activeSongsSignature = "";
 const activeSongRows = new Map();
 const inspectorOverlayQuery = matchMedia("(max-width: 1120px)");
+
+const TASK_VIEWS = {
+  "netease:parallel": { platform: "netease", mode: "parallel", form: el.parallelForm, taskMode: "parallel", jobBase: "/api/parallel/job", resultsBase: "/api/parallel/results", label: "单曲并行" },
+  "netease:source": { platform: "netease", mode: "source", form: el.sourceForm, taskMode: "source", jobBase: "/api/job", resultsBase: "/api/results", label: "用户来源" },
+  "qq:song": { platform: "qq", mode: "song", form: el.qqSongForm, taskMode: "qq", jobBase: "/api/qq/job", resultsBase: "/api/qq/results", label: "QQ 单曲顺序" },
+  "qq:likes": { platform: "qq", mode: "likes", form: el.qqLikesForm, taskMode: "qq", jobBase: "/api/qq/job", resultsBase: "/api/qq/results", label: "QQ 公开喜欢歌曲" },
+};
+
+function taskViewKey(platformValue = platform, modeValue = mode) { return `${platformValue}:${modeValue}`; }
+function currentView() {
+  const view = TASK_VIEWS[taskViewKey()];
+  if (!view) throw new Error(`Unsupported task view: ${taskViewKey()}`);
+  return view;
+}
+function currentForm() { return currentView().form; }
+function taskBase(taskMode) { return taskMode === "qq" ? "/api/qq/job" : taskMode === "parallel" ? "/api/parallel/job" : "/api/job"; }
 
 async function api(path, options) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
@@ -94,7 +116,7 @@ async function api(path, options) {
 
 function payload(form) {
   const data = new FormData(form);
-  return Object.fromEntries([...data.entries()].map(([key, value]) => [key, ["uid", "songId"].includes(key) ? String(value).trim() : Number.isNaN(Number(value)) || value === "" ? value : Number(value)]));
+  return Object.fromEntries([...data.entries()].map(([key, value]) => [key, ["uid", "songId", "target", "proxy"].includes(key) ? String(value).trim() : Number.isNaN(Number(value)) || value === "" ? value : Number(value)]));
 }
 
 async function startParallel() {
@@ -104,7 +126,7 @@ async function startParallel() {
     return;
   }
   setBusy(true);
-  const requestedMode = mode;
+  const requestedView = taskViewKey();
   const requestedModeVersion = modeSwitchVersion;
   try {
     const value = payload(el.parallelForm);
@@ -112,10 +134,11 @@ async function startParallel() {
     value.maxProxyLanes = Number(el.exitLimit.value);
     value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/parallel/job", { method: "POST", body: JSON.stringify(value) });
-    syncResultJob("parallel", job.id, job.uid);
+    syncResultGeneration("netease:parallel", generationFromJob("netease:parallel", job));
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "parallel" : undefined;
-    settlementPending.parallel = job.id;
-    if (requestedMode === mode && requestedModeVersion === modeSwitchVersion) {
+    activeTaskViewKey = activeTaskMode ? "netease:parallel" : undefined;
+    settlementPending["netease:parallel"] = job.id;
+    if (requestedView === taskViewKey() && requestedModeVersion === modeSwitchVersion) {
       renderParallel(job);
       syncRuntimeTimer(job);
     } else void refresh();
@@ -131,7 +154,7 @@ async function startSource(dryRun) {
     return;
   }
   setBusy(true);
-  const requestedMode = mode;
+  const requestedView = taskViewKey();
   const requestedModeVersion = modeSwitchVersion;
   try {
     const value = payload(el.sourceForm);
@@ -141,10 +164,11 @@ async function startSource(dryRun) {
     value.maxProxyLanes = Number(el.exitLimit.value);
     value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/job", { method: "POST", body: JSON.stringify(value) });
-    syncResultJob("source", job.id, job.uid);
+    syncResultGeneration("netease:source", generationFromJob("netease:source", job));
     activeTaskMode = ["running", "stopping"].includes(job.status) ? "source" : undefined;
-    settlementPending.source = job.id;
-    if (requestedMode === mode && requestedModeVersion === modeSwitchVersion) {
+    activeTaskViewKey = activeTaskMode ? "netease:source" : undefined;
+    settlementPending["netease:source"] = job.id;
+    if (requestedView === taskViewKey() && requestedModeVersion === modeSwitchVersion) {
       renderSource(job);
       syncRuntimeTimer(job);
     } else void refresh();
@@ -156,11 +180,66 @@ async function startSource(dryRun) {
   } finally { setBusy(false); }
 }
 
+async function startQQ(qqMode) {
+  if (startSubmissionBusy) return;
+  const viewKey = `qq:${qqMode}`;
+  const form = TASK_VIEWS[viewKey].form;
+  if (!form.reportValidity() || !el.hostConcurrency.reportValidity() || !el.exitLimit.reportValidity()) return;
+  if (poolChangeInFlight || poolStatus === "starting" || poolRefreshing) {
+    toast("代理池正在验证节点，请等待状态灯变绿并显示“已就绪”后再启动");
+    return;
+  }
+  setBusy(true);
+  const requestedView = taskViewKey();
+  const requestedModeVersion = modeSwitchVersion;
+  try {
+    const value = payload(form);
+    value.mode = qqMode;
+    value.maxCommentPagesPerSong = value.maxPages;
+    delete value.maxPages;
+    value.workersPerProxy = qqMode === "song" ? 1 : Number(value.workersPerProxy || 1);
+    value.fresh = $(qqMode === "song" ? "#qqSongFresh" : "#qqLikesFresh").checked;
+    value.allowDirect = form.elements.allowDirect.checked;
+    value.maxProxyLanes = Number(el.exitLimit.value);
+    value.hostConcurrency = Number(el.hostConcurrency.value);
+    const job = await api("/api/qq/job", { method: "POST", body: JSON.stringify(value) });
+    localRequestedTargets[viewKey] = { jobId: String(job.id || ""), value: String(value.target || "") };
+    const generation = generationFromJob(viewKey, job);
+    syncResultGeneration(viewKey, generation);
+    activeTaskMode = ["running", "stopping"].includes(job.status) ? "qq" : undefined;
+    activeTaskViewKey = activeTaskMode ? viewKey : undefined;
+    settlementPending[viewKey] = job.id;
+    latestJobs[viewKey] = job;
+    if (requestedView === taskViewKey() && requestedModeVersion === modeSwitchVersion) {
+      renderQQ(job);
+      syncRuntimeTimer(job);
+    } else void refresh();
+    setTaskPanelCollapsed(true);
+    toast(qqMode === "song" ? "QQ 音乐单曲扫描已启动" : "QQ 音乐喜欢歌曲扫描已启动");
+  } catch (error) { toast(error.message); } finally { setBusy(false); }
+}
+
 async function lookupSong() {
   if (!el.songId.reportValidity()) return;
   el.songLookup.disabled = true;
   try { const song = await api(`/api/song?id=${encodeURIComponent(el.songId.value.trim())}`); el.songPreview.textContent = `${song.name || "未命名歌曲"} · ${(song.artists || []).join(" / ")}`; el.songPreview.hidden = false; }
   catch (error) { el.songPreview.hidden = true; toast(error.message); } finally { el.songLookup.disabled = false; }
+}
+
+async function lookupQQSong() {
+  if (!el.qqSongId.reportValidity()) return;
+  qqLookupBusy = true;
+  el.qqSongLookup.disabled = true;
+  try {
+    const params = new URLSearchParams({ id: el.qqSongId.value.trim() });
+    const proxy = el.qqSongForm.elements.proxy.value.trim();
+    if (proxy) params.set("proxy", proxy);
+    if (el.qqSongForm.elements.allowDirect.checked) params.set("allowDirect", "1");
+    const song = await api(`/api/qq/song?${params}`);
+    el.qqSongPreview.textContent = `${song.name || "未命名歌曲"} · ${(song.artists || []).join(" / ")}`;
+    el.qqSongPreview.hidden = false;
+  } catch (error) { el.qqSongPreview.hidden = true; toast(error.message); }
+  finally { qqLookupBusy = false; el.qqSongLookup.disabled = false; }
 }
 
 async function lookupUser() {
@@ -242,23 +321,50 @@ function refresh() {
 async function performRefresh() {
   const poolVersion = poolMutationVersion;
   try {
-    const [parallelJob, sourceJob, pool] = await Promise.all([api("/api/parallel/job"), api("/api/job"), api("/api/pool")]);
+    const [parallelJob, sourceJob, qqJob, pool] = await Promise.all([api("/api/parallel/job"), api("/api/job"), api("/api/qq/job"), api("/api/pool")]);
+    const qqViewKey = ["song", "likes"].includes(qqJob.mode) ? `qq:${qqJob.mode}` : undefined;
+    if (qqViewKey) {
+      invalidateQQSibling(qqViewKey, qqJob.id);
+      latestJobs[qqViewKey] = qqJob;
+      syncResultGeneration(qqViewKey, generationFromJob(qqViewKey, qqJob));
+    }
     activeTaskMode = ["running", "stopping"].includes(parallelJob.status)
       ? "parallel"
       : ["running", "stopping"].includes(sourceJob.status)
       ? "source"
+      : ["running", "stopping"].includes(qqJob.status)
+      ? "qq"
+      : undefined;
+    activeTaskViewKey = activeTaskMode === "parallel"
+      ? "netease:parallel"
+      : activeTaskMode === "source"
+      ? "netease:source"
+      : activeTaskMode === "qq"
+      ? qqViewKey
       : undefined;
     if (nativeUpdateState?.phase === "downloaded") {
-      setNativeUpdateAction(activeTaskMode ? "保存进度并重启" : "重启并安装");
+      setNativeUpdateAction(activeTaskMode || startSubmissionBusy || qqLookupBusy ? "保存进度并重启" : "重启并安装");
     }
-    observeTaskSettlement(parallelJob, "parallel");
-    observeTaskSettlement(sourceJob, "source");
-    const job = mode === "parallel" ? parallelJob : sourceJob;
-    mode === "parallel" ? renderParallel(job) : renderSource(job);
+    observeTaskSettlement(parallelJob, "netease:parallel");
+    observeTaskSettlement(sourceJob, "netease:source");
+    if (qqViewKey) observeTaskSettlement(qqJob, qqViewKey);
+    const currentKey = taskViewKey();
+    const job = currentKey === "netease:parallel"
+      ? parallelJob
+      : currentKey === "netease:source"
+      ? sourceJob
+      : latestJobs[currentKey] ?? emptyQQSnapshot(mode);
+    currentKey === "netease:parallel"
+      ? renderParallel(job)
+      : currentKey === "netease:source"
+      ? renderSource(job)
+      : renderQQ(job);
     const activeJob = activeTaskMode === "parallel"
       ? parallelJob
       : activeTaskMode === "source"
       ? sourceJob
+      : activeTaskMode === "qq"
+      ? qqJob
       : undefined;
     syncRuntimeTimer(activeJob ?? job);
     const globallyActive = Boolean(activeTaskMode);
@@ -279,9 +385,10 @@ async function performRefresh() {
 }
 
 function renderParallel(job) {
-  latestJobs.parallel = job;
-  syncResultJob("parallel", job.id, job.uid);
-  if (!shouldRenderJob("parallel", job)) return;
+  const viewKey = "netease:parallel";
+  latestJobs[viewKey] = job;
+  syncResultGeneration(viewKey, generationFromJob(viewKey, job));
+  if (viewKey !== taskViewKey() || !shouldRenderJob(viewKey, job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "分片进度"; el.progress.textContent = `${fmt(job.shardsComplete)} / ${fmt(job.shards)}`;
@@ -306,9 +413,10 @@ function renderParallel(job) {
 }
 
 function renderSource(job) {
-  latestJobs.source = job;
-  syncResultJob("source", job.id, job.uid);
-  if (!shouldRenderJob("source", job)) return;
+  const viewKey = "netease:source";
+  latestJobs[viewKey] = job;
+  syncResultGeneration(viewKey, generationFromJob(viewKey, job));
+  if (viewKey !== taskViewKey() || !shouldRenderJob(viewKey, job)) return;
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
@@ -331,9 +439,71 @@ function renderSource(job) {
   syncTaskStartAvailability();
 }
 
-function shouldRenderJob(jobMode, job) {
+function renderQQ(job) {
+  const viewKey = job?.mode === "likes" ? "qq:likes" : "qq:song";
+  if (job?.id) invalidateQQSibling(viewKey, job.id);
+  latestJobs[viewKey] = job;
+  syncResultGeneration(viewKey, generationFromJob(viewKey, job));
+  if (viewKey !== taskViewKey() || !shouldRenderJob(viewKey, job)) return;
+  const active = ["running", "stopping"].includes(job.status);
+  const target = job.targetLabel || "QQ 目标";
+  const songs = Math.max(0, Number(job.songs || 0));
+  const songsProcessed = Math.max(0, Number(job.songsProcessed ?? job.songsComplete ?? 0));
+  const globalPercent = songs > 0 ? Math.min(100, Math.round(songsProcessed / songs * 100)) : 0;
+  const configuredWorkers = job.mode === "song" ? 1 : Number(job.configuredWorkers || 0);
+  const topology = job.mode === "song"
+    ? `${fmt(job.configuredLanes || 1)} 个可轮转出口 · 1 条 SeqNo 链`
+    : `${fmt(job.configuredLanes || 1)} 个配置出口 · ${fmt(configuredWorkers)} 个有界 Worker`;
+  el.taskTitle.textContent = !job.id
+    ? job.mode === "song" ? "等待 QQ 单曲任务" : "等待 QQ 喜欢歌曲任务"
+    : job.mode === "song"
+    ? `${job.songName || `QQ 歌曲 ${job.songId || "-"}`} · ${target}`
+    : `${target} · 公开喜欢歌曲`;
+  el.status.textContent = statusLabels[job.status] || job.status;
+  el.progressLabel.textContent = "歌曲进度";
+  el.progress.textContent = `${fmt(songsProcessed)} / ${fmt(songs)}`;
+  el.workLabel.textContent = "已读评论";
+  el.work.textContent = fmt(job.commentsInspected);
+  el.speed.textContent = formatRate(job.commentsPerSecond);
+  el.matches.textContent = fmt(job.matches);
+  el.requests.textContent = fmt(job.requestsTotal);
+  renderProgress({
+    globalPercent,
+    globalContext: job.id ? `${fmt(songsProcessed)} / ${fmt(songs)} 首歌曲 · ${topology}` : "尚未开始",
+    note: [job.note, job.error, job.id && job.coverageComplete === false && !active ? "本次覆盖不完整，请查看日志和检查点。" : ""].filter(Boolean).join(" · "),
+  });
+  renderActiveSongs(
+    active ? job.activeSongs || [] : [],
+    job.id ? `${topology} · 本轮已参与 ${fmt(job.participatedLanes)} Lane / ${fmt(job.participatedWorkers)} Worker · 峰值在途 ${fmt(job.peakInFlight)}` : "等待任务调度",
+    configuredWorkers,
+  );
+  el.stop.disabled = !active;
+  syncTaskStartAvailability();
+}
+
+function invalidateQQSibling(viewKey, activeJobId) {
+  const sibling = viewKey === "qq:song" ? "qq:likes" : "qq:song";
+  const siblingJobId = resultGenerations[sibling]?.jobId ?? latestJobs[sibling]?.id;
+  if (!siblingJobId || siblingJobId === String(activeJobId || "")) return;
+  latestJobs[sibling] = undefined;
+  localRequestedTargets[sibling] = undefined;
+  settlementPending[sibling] = undefined;
+  syncResultGeneration(sibling, undefined);
+}
+
+function emptyQQSnapshot(qqMode) {
+  return {
+    platform: "qq", mode: qqMode, status: "idle", songs: 0, songsProcessed: 0,
+    activeSongs: [], pagesProcessed: 0, commentsInspected: 0, matches: 0,
+    requestsTotal: 0, commentsPerSecond: 0, configuredLanes: 0,
+    configuredWorkers: 0, participatedLanes: 0, participatedWorkers: 0,
+    peakInFlight: 0, coverageComplete: false,
+  };
+}
+
+function shouldRenderJob(viewKey, job) {
   const { elapsedMs: _elapsedMs, ...view } = job;
-  const signature = JSON.stringify([jobMode, view]);
+  const signature = JSON.stringify([viewKey, view]);
   if (signature === renderedJobSignature) return false;
   renderedJobSignature = signature;
   return true;
@@ -510,18 +680,18 @@ function renderRuntimeTimer() {
   }
 }
 
-function observeTaskSettlement(job, jobMode) {
+function observeTaskSettlement(job, viewKey) {
   if (!job.id) return;
   if (["running", "stopping"].includes(job.status)) {
-    settlementPending[jobMode] = job.id;
+    settlementPending[viewKey] = job.id;
     return;
   }
-  if (job.status === "idle" || settlementPending[jobMode] !== job.id) return;
-  settlementPending[jobMode] = undefined;
-  renderSettlement(job, jobMode);
+  if (job.status === "idle" || settlementPending[viewKey] !== job.id) return;
+  settlementPending[viewKey] = undefined;
+  renderSettlement(job, viewKey);
 }
 
-function renderSettlement(job, jobMode) {
+function renderSettlement(job, viewKey) {
   const titles = { complete: "检索已完成", matched: "已找到目标评论", paused: "本轮扫描已暂停", cooldown: "扫描进入冷却", "dry-run": "候选歌曲读取完成", stopped: "任务已停止", error: "任务异常结束" };
   const defaults = {
     complete: "所选范围已处理完成。",
@@ -532,28 +702,39 @@ function renderSettlement(job, jobMode) {
     stopped: "已按要求停止，当前进度可续跑。",
     error: "任务未正常完成，请查看运行日志。",
   };
-  el.settlementDialog.dataset.mode = jobMode;
+  el.settlementDialog.dataset.view = viewKey;
   el.settlementTitle.textContent = titles[job.status] || "任务已结束";
   el.settlementStatus.textContent = statusLabels[job.status] || job.status;
-  el.settlementContext.textContent = jobMode === "parallel"
+  el.settlementContext.textContent = viewKey === "netease:parallel"
     ? `${job.songName || `歌曲 ${job.songId || "-"}`} · UID ${job.uid || "-"}`
-    : `UID ${job.uid || "-"} · ${sourceName(job.source)}`;
+    : viewKey === "netease:source"
+    ? `UID ${job.uid || "-"} · ${sourceName(job.source)}`
+    : viewKey === "qq:song"
+    ? `${job.songName || `QQ 歌曲 ${job.songId || "-"}`} · ${job.targetLabel || "QQ 目标"}`
+    : `${job.targetLabel || "QQ 目标"} · 公开喜欢歌曲`;
   el.settlementElapsed.textContent = duration(Math.round(Number(job.elapsedMs || 0) / 1000));
   el.settlementMatches.textContent = fmt(job.matches);
   el.settlementPages.textContent = fmt(job.pagesProcessed);
   el.settlementRequests.textContent = fmt(job.requestsTotal);
-  el.settlementCoverage.hidden = jobMode !== "source";
-  el.settlementCoverage.textContent = jobMode === "source" ? sourceCoverageSummary(job) : "";
+  el.settlementCoverage.hidden = viewKey !== "netease:source" && job.coverageComplete !== false;
+  el.settlementCoverage.textContent = viewKey === "netease:source"
+    ? sourceCoverageSummary(job)
+    : job.coverageComplete === false ? "任务未达到完整覆盖，已保留检查点与已保存结果。" : "";
   el.settlementNote.textContent = [job.note, job.error, ...(job.sourceErrors || []), defaults[job.status]].filter(Boolean).join(" · ");
   el.settlementLogPath.textContent = job.logPath || "未生成日志文件";
+  el.settlementFootnote.textContent = viewKey.startsWith("qq:")
+    ? "命中指标按当前 QQ 检查点累计；结果页按歌曲 ID + 评论 ID 展示已经持久化的累计去重结果；耗时只统计本次任务。"
+    : "命中指标按当前检查点累计；结果页按 UID 展示 target-v3 已保存的累计去重结果；耗时只统计本次任务。";
   if (!el.settlementDialog.open) el.settlementDialog.showModal();
 }
 
 function openTaskTab(tabName) {
   setTaskPanelCollapsed(true);
   const tab = $(`.tab[data-tab="${tabName}"]`);
-  if (tab && !tab.classList.contains("active")) tab.click();
+  const alreadyActive = Boolean(tab?.classList.contains("active"));
+  if (tab && !alreadyActive) tab.click();
   panelForTab(tabName)?.scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start" });
+  return alreadyActive;
 }
 
 function renderPool(pool) {
@@ -720,23 +901,88 @@ function toggleClashConfigs() {
   syncClashSelectAllButton();
 }
 
+function generationFromJob(viewKey, job) {
+  if (!job?.id) return undefined;
+  const view = TASK_VIEWS[viewKey];
+  if (!view) return undefined;
+  if (view.platform === "netease") {
+    const uid = String(job.uid || "");
+    return /^\d+$/.test(uid)
+      ? { platform: "netease", mode: view.mode, jobId: String(job.id), target: { kind: "uid", value: uid } }
+      : undefined;
+  }
+  const raw = job.generation;
+  const targetValue = typeof raw?.target === "object"
+    ? raw.target.value
+    : raw?.canonicalTarget;
+  if (raw?.platform !== "qq" || raw.mode !== view.mode || raw.target?.kind !== "encryptUin" || String(raw.jobId || "") !== String(job.id)
+    || typeof targetValue !== "string" || !targetValue || targetValue.length > 512) return undefined;
+  return {
+    platform: "qq",
+    mode: view.mode,
+    jobId: String(job.id),
+    target: { kind: "encryptUin", value: targetValue },
+  };
+}
+
+function generationFromEnvelope(value) {
+  const raw = value?.generation;
+  if (!raw || !TASK_VIEWS[`${raw.platform}:${raw.mode}`]) return undefined;
+  const target = raw.target;
+  if (!target || typeof target.value !== "string") return undefined;
+  return {
+    platform: raw.platform,
+    mode: raw.mode,
+    jobId: String(raw.jobId || ""),
+    target: { kind: target.kind, value: target.value },
+  };
+}
+
+function sameGeneration(left, right) {
+  if (!left && !right) return true;
+  return Boolean(left && right)
+    && left.platform === right.platform
+    && left.mode === right.mode
+    && left.jobId === right.jobId
+    && left.target?.kind === right.target?.kind
+    && left.target?.value === right.target?.value;
+}
+
+function syncResultGeneration(viewKey, generation) {
+  const previous = resultGenerations[viewKey];
+  resultGenerations[viewKey] = generation;
+  syncResultExportAvailability();
+  if (sameGeneration(previous, generation) || viewKey !== taskViewKey()) return;
+  knownMatches = -1;
+  resetVisibleResults();
+  connectResultStream();
+}
+
 async function refreshResults() {
   const request = ++resultRequest;
-  const requestedMode = mode;
+  const requestedView = taskViewKey();
+  const expectedGeneration = resultGenerations[requestedView];
+  if (!expectedGeneration?.jobId) {
+    if (resultView !== requestedView) resetVisibleResults(false);
+    resultsNeedRefresh = false;
+    return;
+  }
   const baselineIds = new Set(visibleResultOrder);
   try {
-    const data = await api(`${requestedMode === "parallel" ? "/api/parallel/results" : "/api/results"}?limit=50`);
-    if (request !== resultRequest || requestedMode !== mode) return;
-    if (resultMode !== mode) resetVisibleResults(false);
-    if (data.jobId !== resultJobIds[requestedMode]) {
-      resultJobIds[requestedMode] = data.jobId;
-      resetVisibleResults(false);
-      knownMatches = -1;
-    }
+    const view = TASK_VIEWS[requestedView];
+    const params = new URLSearchParams({ limit: "50" });
+    if (view.platform === "qq") params.set("jobId", expectedGeneration.jobId);
+    const data = await api(`${view.resultsBase}?${params}`);
+    if (request !== resultRequest || requestedView !== taskViewKey()
+      || !sameGeneration(expectedGeneration, resultGenerations[requestedView])) return;
+    if (view.platform === "qq") {
+      if (!sameGeneration(expectedGeneration, generationFromEnvelope(data))) return;
+    } else if (String(data.jobId || "") !== expectedGeneration.jobId) return;
+    if (resultView !== requestedView) resetVisibleResults(false);
     const mergedResults = new Map(visibleResults);
     const snapshotOrder = [];
     data.results.forEach((item) => {
-      const id = String(item.commentId);
+      const id = resultKey(item, requestedView);
       if (!snapshotOrder.includes(id)) snapshotOrder.push(id);
       mergedResults.set(id, item);
     });
@@ -762,38 +1008,52 @@ async function refreshResults() {
     }
   }
   catch (error) {
-    if (request === resultRequest && requestedMode === mode) toast(error.message);
+    if (request === resultRequest && requestedView === taskViewKey()
+      && sameGeneration(expectedGeneration, resultGenerations[requestedView])) toast(error.message);
   }
 }
 
 function refreshLogs(force = true) {
   if (!force && Date.now() - lastLogsRefreshAt < 3_000) return Promise.resolve();
-  const requestedMode = mode;
-  if (logsRefreshInFlight && logsRefreshMode === requestedMode) return logsRefreshInFlight;
+  const requestedView = taskViewKey();
+  const expectedGeneration = resultGenerations[requestedView];
+  if (logsRefreshInFlight && logsRefreshView === requestedView) return logsRefreshInFlight;
   lastLogsRefreshAt = Date.now();
   const request = ++logsRequest;
-  const pending = performLogsRefresh(request, requestedMode).finally(() => {
+  const pending = performLogsRefresh(request, requestedView, expectedGeneration).finally(() => {
     if (logsRefreshInFlight === pending) {
       logsRefreshInFlight = undefined;
-      logsRefreshMode = undefined;
+      logsRefreshView = undefined;
     }
   });
   logsRefreshInFlight = pending;
-  logsRefreshMode = requestedMode;
+  logsRefreshView = requestedView;
   return pending;
 }
 
-async function performLogsRefresh(request, requestedMode) {
+async function performLogsRefresh(request, requestedView, expectedGeneration) {
   try {
-    const data = await api(`/api/logs?mode=${encodeURIComponent(requestedMode)}&limit=200`);
-    if (request !== logsRequest || requestedMode !== mode) return;
-    const signature = JSON.stringify([requestedMode, data.path, data.entries]);
+    const view = TASK_VIEWS[requestedView];
+    const params = new URLSearchParams({ mode: view.taskMode, limit: "200" });
+    if (view.platform === "qq") {
+      if (!expectedGeneration?.jobId) {
+        if (request === logsRequest && requestedView === taskViewKey()) resetVisibleLogs();
+        return;
+      }
+      params.set("jobId", expectedGeneration.jobId);
+    }
+    const data = await api(`/api/logs?${params}`);
+    if (request !== logsRequest || requestedView !== taskViewKey()
+      || !sameGeneration(expectedGeneration, resultGenerations[requestedView])) return;
+    if (view.platform === "qq" && !sameGeneration(expectedGeneration, generationFromEnvelope(data))) return;
+    const signature = JSON.stringify([requestedView, expectedGeneration?.jobId, data.path, data.entries]);
     if (signature === logsSignature) return;
     logsSignature = signature;
     el.logPath.textContent = data.path || "任务启动后将在本地生成结构化日志。";
     el.logs.replaceChildren(...(data.entries.length ? data.entries.map(logRow) : [emptyLogRow()]));
   } catch (error) {
-    if (request === logsRequest && requestedMode === mode) toast(`读取日志失败：${error.message}`);
+    if (request === logsRequest && requestedView === taskViewKey()
+      && sameGeneration(expectedGeneration, resultGenerations[requestedView])) toast(`读取日志失败：${error.message}`);
   }
 }
 
@@ -823,15 +1083,25 @@ function emptyLogRow() {
 
 function connectResultStream() {
   resultStream?.close();
-  const streamMode = mode;
-  const path = streamMode === "parallel" ? "/api/parallel/results/stream" : "/api/results/stream";
+  resultStream = undefined;
+  const streamView = taskViewKey();
+  const view = TASK_VIEWS[streamView];
+  const expectedGeneration = resultGenerations[streamView];
+  if (!expectedGeneration?.jobId) return;
+  const params = new URLSearchParams();
+  if (view.platform === "qq") params.set("jobId", expectedGeneration.jobId);
+  const path = `${view.resultsBase}/stream${params.size ? `?${params}` : ""}`;
   const stream = new EventSource(path);
   stream.addEventListener("match", (event) => {
-    if (mode !== streamMode || resultStream !== stream) return;
+    if (taskViewKey() !== streamView || resultStream !== stream
+      || !sameGeneration(expectedGeneration, resultGenerations[streamView])) return;
     try {
-      const item = JSON.parse(event.data);
-      if (resultMode !== mode) resetVisibleResults();
-      const id = String(item.commentId);
+      const parsed = JSON.parse(event.data);
+      const item = view.platform === "qq" ? parsed.comment : parsed;
+      if (view.platform === "qq" && !sameGeneration(expectedGeneration, generationFromEnvelope(parsed))) return;
+      if (!item) return;
+      if (resultView !== streamView) resetVisibleResults();
+      const id = resultKey(item, streamView);
       const isNew = !visibleResults.has(id);
       visibleResults.set(id, item);
       if (isNew) visibleResultOrder.unshift(id);
@@ -846,7 +1116,7 @@ function connectResultStream() {
 
 function resetVisibleResults(invalidateRequest = true) {
   if (invalidateRequest) resultRequest += 1;
-  resultMode = mode;
+  resultView = taskViewKey();
   visibleResults.clear();
   visibleResultOrder = [];
   pendingLiveCommentId = undefined;
@@ -857,38 +1127,36 @@ function resetVisibleResults(invalidateRequest = true) {
   renderResults();
 }
 
-function syncResultJob(jobMode, jobId, uid) {
-  resultJobMeta[jobMode] = jobId && uid ? { jobId: String(jobId), uid: String(uid) } : undefined;
-  syncResultExportAvailability();
-  if (resultJobIds[jobMode] === jobId) return;
-  resultJobIds[jobMode] = jobId;
-  if (jobMode !== mode) return;
-  knownMatches = -1;
-  resetVisibleResults();
-}
-
 function syncResultExportAvailability() {
-  const current = resultJobMeta[mode];
-  el.exportResults.disabled = resultExportInProgress || !current?.jobId || !/^\d+$/.test(current.uid);
+  const current = resultGenerations[taskViewKey()];
+  el.exportResults.disabled = resultExportInProgress || !validExportGeneration(current);
 }
 
 async function exportCurrentResults() {
-  const exportMode = mode;
-  const current = resultJobMeta[exportMode];
-  if (!current?.jobId || !/^\d+$/.test(current.uid) || resultExportInProgress) return;
+  const exportView = taskViewKey();
+  const current = resultGenerations[exportView];
+  if (!validExportGeneration(current) || resultExportInProgress) return;
+  const request = {
+    platform: current.platform,
+    mode: current.mode,
+    jobId: current.jobId,
+    target: { ...current.target },
+  };
   resultExportInProgress = true;
   syncResultExportAvailability();
   el.exportResults.setAttribute("aria-busy", "true");
   el.exportResults.querySelector("span").textContent = "正在生成…";
   try {
     if (typeof window.ncmDesktop?.exportResultsPdf === "function") {
-      const result = await window.ncmDesktop.exportResultsPdf({ mode: exportMode, jobId: current.jobId, uid: current.uid });
+      const result = await window.ncmDesktop.exportResultsPdf(request);
       if (result?.status === "saved") toast(`PDF 已导出：${shortPath(result.path)}`);
     } else {
       const report = new URL("/report/results", location.origin);
-      report.searchParams.set("mode", exportMode);
-      report.searchParams.set("jobId", current.jobId);
-      report.searchParams.set("uid", current.uid);
+      report.searchParams.set("platform", request.platform);
+      report.searchParams.set("mode", request.mode);
+      report.searchParams.set("jobId", request.jobId);
+      report.searchParams.set("targetKind", request.target.kind);
+      report.searchParams.set("target", request.target.value);
       const opened = window.open(report.toString(), "_blank", "noopener");
       if (!opened) throw new Error("浏览器阻止了报告窗口，请允许弹出窗口后重试。");
       toast("报告已打开，请选择“打印 / 保存 PDF”。");
@@ -903,6 +1171,21 @@ async function exportCurrentResults() {
   }
 }
 
+function validExportGeneration(generation) {
+  if (!generation?.jobId || !generation.target) return false;
+  if (generation.platform === "netease") {
+    return ["source", "parallel"].includes(generation.mode)
+      && generation.target.kind === "uid"
+      && /^\d+$/.test(generation.target.value);
+  }
+  return generation.platform === "qq"
+    && ["song", "likes"].includes(generation.mode)
+    && generation.target.kind === "encryptUin"
+    && typeof generation.target.value === "string"
+    && generation.target.value.length > 0
+    && generation.target.value.length <= 512;
+}
+
 function resetVisibleLogs() {
   logsRequest += 1;
   logsSignature = "";
@@ -915,7 +1198,7 @@ function renderResults(liveCommentId) {
   if (visibleResults.size > 100) {
     pruneVisibleResults(100);
   }
-  el.results.replaceChildren(...(items.length ? items.map((item) => resultRow(item, String(item.commentId) === liveCommentId)) : [emptyRow()]));
+  el.results.replaceChildren(...(items.length ? items.map((item) => resultRow(item, resultKey(item, resultView) === liveCommentId)) : [emptyRow()]));
 }
 
 function scheduleResultsRender() {
@@ -944,10 +1227,14 @@ function pruneVisibleResults(limit) {
 
 function resultRow(item, live) {
   const row = document.createElement("tr");
-  row.dataset.commentId = String(item.commentId);
+  const isQQ = item.platform === "qq" || resultView.startsWith("qq:");
+  row.dataset.commentId = resultKey(item, resultView);
   if (live) row.classList.add("result-live");
-  appendTextCell(row, item.time ? date(item.time) : "-");
-  appendTextCell(row, `${item.nickname || "-"} · ${item.userId}`);
+  const timestamp = isQQ && Number(item.time) > 0 && Number(item.time) < 1_000_000_000_000
+    ? Number(item.time) * 1_000
+    : item.time;
+  appendTextCell(row, timestamp ? date(timestamp) : "-");
+  appendTextCell(row, `${item.nickname || "-"} · ${isQQ ? item.authorEncryptUin || "QQ 身份" : item.userId}`);
   const songCell = document.createElement("td");
   const songName = document.createElement("span");
   songName.className = "result-song-name";
@@ -960,8 +1247,8 @@ function resultRow(item, live) {
     link.href = target;
     link.target = "_blank";
     link.rel = "noopener noreferrer";
-    link.title = `在网易云音乐打开评论 ${item.commentId}`;
-    link.textContent = "打开评论";
+    link.title = isQQ ? "在 QQ 音乐打开歌曲" : `在网易云音乐打开评论 ${item.commentId}`;
+    link.textContent = isQQ ? "打开歌曲" : "打开评论";
     songCell.append(link);
   }
   row.append(songCell);
@@ -977,14 +1264,26 @@ function appendTextCell(row, value) {
 }
 
 function commentTarget(item) {
+  if (item.platform === "qq" || resultView.startsWith("qq:")) {
+    const resource = String(item.songMid || item.songId || "");
+    const valid = item.songMid ? /^[A-Za-z0-9]+$/.test(resource) : /^\d+$/.test(resource);
+    return valid ? `https://y.qq.com/n/ryqq/songDetail/${encodeURIComponent(resource)}` : undefined;
+  }
   const songId = String(item.songId || "");
   const commentId = String(item.commentId || "");
   if (!/^\d+$/.test(songId) || !/^\d+$/.test(commentId)) return undefined;
   return `https://music.163.com/#/song?id=${encodeURIComponent(songId)}&commentId=${encodeURIComponent(commentId)}`;
 }
 
+function resultKey(item, viewKey = taskViewKey()) {
+  const commentId = String(item.commentId || "");
+  return viewKey.startsWith("qq:") || item.platform === "qq"
+    ? `${String(item.songId || "")}:${commentId}`
+    : commentId;
+}
+
 function estimateForm() {
-  return mode === "parallel" ? el.parallelForm : el.sourceForm;
+  return currentForm();
 }
 
 function estimateInputs() {
@@ -995,7 +1294,7 @@ function estimateInputs() {
     el.exitLimit,
     form.elements.minDelayMs,
     form.elements.jitterMs,
-    form.elements.workersPerProxy,
+    ...(form.elements.workersPerProxy ? [form.elements.workersPerProxy] : []),
     form.elements.pageSize,
   ];
 }
@@ -1014,6 +1313,16 @@ function allEstimateInputs() {
     el.sourceForm.elements.workersPerProxy,
     el.sourceForm.elements.pageSize,
     el.sourceForm.elements.proxy,
+    el.qqSongForm.elements.minDelayMs,
+    el.qqSongForm.elements.jitterMs,
+    el.qqSongForm.elements.pageSize,
+    el.qqSongForm.elements.proxy,
+    el.qqLikesForm.elements.minDelayMs,
+    el.qqLikesForm.elements.jitterMs,
+    el.qqLikesForm.elements.workersPerProxy,
+    el.qqLikesForm.elements.pageSize,
+    el.qqLikesForm.elements.likedPageSize,
+    el.qqLikesForm.elements.proxy,
   ];
 }
 
@@ -1027,50 +1336,67 @@ async function refreshEstimate(reportInvalid = true) {
   const invalid = estimateInputs().find((input) => !input.checkValidity() || input.value === "");
   if (invalid) { if (reportInvalid) invalid.reportValidity(); return; }
   const request = ++estimateRequest;
+  const requestedView = taskViewKey();
   el.estimateButton.disabled = true;
   try {
+    const view = TASK_VIEWS[requestedView];
     const form = estimateForm();
     const minDelayMs = Number(form.elements.minDelayMs.value);
     const jitterMs = Number(form.elements.jitterMs.value);
-    const workersPerLane = Number(form.elements.workersPerProxy.value);
+    const workersPerLane = view.mode === "song" ? 1 : Number(form.elements.workersPerProxy.value);
     const pageSize = Number(form.elements.pageSize.value);
-    const proxyTransport = mode === "parallel" || poolRunning || Boolean(form.elements.proxy?.value.trim());
+    const proxyTransport = view.platform === "qq" || view.mode === "parallel" || poolRunning || Boolean(form.elements.proxy?.value.trim());
     const lanes = selectedTaskLaneCount(workersPerLane);
     const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
-    const actualWorkers = Math.min(lanes * workersPerLane, hostConcurrency);
-    const job = latestJobs[mode];
-    const formUid = String((mode === "parallel" ? el.parallelUid : el.uid).value || "").trim();
-    const requestedParallelShards = mode === "parallel"
+    const actualWorkers = view.mode === "song" ? 1 : Math.min(lanes * workersPerLane, hostConcurrency);
+    const job = latestJobs[requestedView];
+    const formTarget = view.platform === "qq"
+      ? String((view.mode === "song" ? el.qqSongTarget : el.qqLikesTarget).value || "").trim()
+      : String((view.mode === "parallel" ? el.parallelUid : el.uid).value || "").trim();
+    const requestedParallelShards = view.mode === "parallel"
       ? Math.max(1, Number(form.elements.shards?.value || 1))
       : undefined;
-    const sameTarget = Boolean(job?.id) && String(job.uid || "") === formUid && (
-      mode !== "parallel" || String(job.songId || "") === String(form.elements.songId?.value || "").trim()
-    );
+    const localQQTarget = localRequestedTargets[requestedView]?.jobId === String(job?.id || "")
+      ? localRequestedTargets[requestedView].value
+      : resultGenerations[requestedView]?.target?.value;
+    const sameTarget = Boolean(job?.id) && (view.platform === "qq"
+      ? String(localQQTarget || "") === formTarget
+        && (view.mode !== "song" || String(job.songId || "") === String(form.elements.songId?.value || "").trim())
+      : String(job.uid || "") === formTarget
+        && (view.mode !== "parallel" || String(job.songId || "") === String(form.elements.songId?.value || "").trim()));
     const sameConfiguration = sameTarget
       && Number(job.pageSize) === pageSize
       && Number(job.minDelayMs) === minDelayMs
       && Number(job.jitterMs) === jitterMs
       && Number(job.workersPerLane) === workersPerLane
       && Number(job.hostConcurrency) === hostConcurrency
-      && Number(job.lanes) === lanes
-      && (mode === "parallel"
+      && Number(view.platform === "qq" ? job.configuredLanes : job.lanes) === lanes
+      && (view.mode === "parallel"
         ? Number(job.configuredShardCount) === requestedParallelShards
-        : String(job.source || "") === String(form.elements.source?.value || ""));
+        : view.mode === "source"
+        ? String(job.source || "") === String(form.elements.source?.value || "")
+        : view.mode === "likes"
+        ? Number(job.likedPageSize) === Number(form.elements.likedPageSize.value)
+        : true);
     const calibrated = sameConfiguration
       && Number(job.pageRequestSamples) >= 3
       && Number(job.successfulPageRequests) > 0
       && Number(job.averagePageRequestMs) >= 0
       && Number(job.averageCommentsPerPage) > 0;
-    const effectiveTransport = proxyTransport && sameConfiguration && Number(job.proxyTransportEffectiveConcurrent) > 0
+    const effectiveTransport = view.platform === "qq"
+      ? 4
+      : proxyTransport && sameConfiguration && Number(job.proxyTransportEffectiveConcurrent) > 0
       ? Math.min(hostConcurrency, Number(job.proxyTransportEffectiveConcurrent))
       : hostConcurrency;
-    const configuredPartitions = mode === "parallel"
+    const configuredPartitions = view.mode === "parallel"
       ? requestedParallelShards
-      : Math.max(1, sameTarget ? Number(job.songs || 1) : 1);
-    const partitions = mode === "parallel"
+      : view.mode === "song" ? 1 : Math.max(1, sameTarget ? Number(job.songs || 1) : 1);
+    const partitions = view.mode === "parallel"
       ? Math.max(1, Math.min(configuredPartitions, actualWorkers, effectiveTransport))
       : configuredPartitions;
     const params = new URLSearchParams({
+      platform: view.platform,
+      mode: view.mode,
       comments: el.estimateComments.value,
       pageSize: String(pageSize),
       partitions: String(partitions),
@@ -1088,20 +1414,28 @@ async function refreshEstimate(reportInvalid = true) {
       params.set("requestSuccessRatio", String(job.pageRequestSuccessRatio || 1));
     }
     const value = await api(`/api/estimate?${params}`);
-    if (request !== estimateRequest) return;
+    if (request !== estimateRequest || requestedView !== taskViewKey()) return;
     el.estimatePages.textContent = fmt(value.estimatedRequests);
     el.estimateOptimistic.textContent = duration(value.optimisticSeconds);
     el.estimateExpected.textContent = duration(value.expectedSeconds);
     el.estimateConservative.textContent = duration(value.conservativeSeconds);
-    const scanMode = mode === "parallel" ? "单曲并行" : "用户来源";
+    const scanMode = view.label;
     const transport = value.proxyTransportMaxConcurrent
-      ? ` · 主机聚合保护：配置 ${fmt(value.proxyTransportMaxConcurrent)}，当前有效 ${fmt(value.proxyTransportEffectiveConcurrent)} 并发，实际启动间隔 ${fmt(value.proxyTransportEffectiveStartDelayMs)}..${fmt(value.proxyTransportEffectiveStartDelayMs + value.proxyTransportStartJitterMs)}ms`
+      ? view.platform === "qq"
+        ? ` · QQ 固定 Gate：最多 ${fmt(value.proxyTransportEffectiveConcurrent)} 个在途，请求启动间隔至少 ${fmt(value.proxyTransportEffectiveStartDelayMs)}ms`
+        : ` · 主机聚合保护：配置 ${fmt(value.proxyTransportMaxConcurrent)}，当前有效 ${fmt(value.proxyTransportEffectiveConcurrent)} 并发，实际启动间隔 ${fmt(value.proxyTransportEffectiveStartDelayMs)}..${fmt(value.proxyTransportEffectiveStartDelayMs + value.proxyTransportStartJitterMs)}ms`
       : "";
     const calibration = calibrated
       ? `实况校准 ${fmt(job.pageRequestSamples)} 页 / ${fmt(job.pageRequestAttempts)} 次远端尝试：平均 ${fmt(job.averageCommentsPerPage)} 条/页、${fmt(job.averagePageRequestMs)}ms、成功率 ${(Number(job.pageRequestSuccessRatio || 0) * 100).toFixed(1)}%`
       : `理论模型：节点轻量探测约 ${fmt(poolNetworkMs)}ms；任务产生 3 次页面请求后自动校准`;
-    el.estimateContext.textContent = `${scanMode} · ${fmt(value.partitions)} 个独立分页区间 · ${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 并发 · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} Worker · 每页上限 ${fmt(pageSize)} 条 · ${calibration}${transport} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
-  } catch (error) { if (request === estimateRequest) toast(error.message); }
+    const topology = view.mode === "song"
+      ? `${fmt(value.lanes)} 个出口轮转 · 1 条串行 SeqNo 链`
+      : view.platform === "qq"
+      ? `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} Worker · ${fmt(Math.min(value.totalWorkers, hostConcurrency))} 个有界 Worker · 最多 ${fmt(value.effectiveWorkers)} 个在途`
+      : `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} Worker · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} Worker`;
+    const pacing = view.platform === "qq" ? " · Worker 共享单出口请求节奏 · 检查点页槽上限 4" : "";
+    el.estimateContext.textContent = `${scanMode} · ${fmt(value.partitions)} 个独立分页区间 · ${topology} · 每页上限 ${fmt(pageSize)} 条 · ${calibration}${transport}${pacing} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
+  } catch (error) { if (request === estimateRequest && requestedView === taskViewKey()) toast(error.message); }
   finally { if (request === estimateRequest) el.estimateButton.disabled = false; }
 }
 
@@ -1110,10 +1444,12 @@ function emptyRow() { const row = document.createElement("tr"); row.className = 
 
 async function stopJob() {
   try {
-    const targetMode = activeTaskMode || mode;
-    const job = await api(targetMode === "parallel" ? "/api/parallel/job/stop" : "/api/job/stop", { method: "POST", body: "{}" });
-    targetMode === "parallel" ? renderParallel(job) : renderSource(job);
-    if (targetMode !== mode) toast(`已停止${targetMode === "parallel" ? "单曲并行" : "用户来源"}任务`);
+    const targetViewKey = activeTaskViewKey || taskViewKey();
+    const view = TASK_VIEWS[targetViewKey];
+    const targetMode = activeTaskMode || view.taskMode;
+    const job = await api(`${taskBase(targetMode)}/stop`, { method: "POST", body: "{}" });
+    targetMode === "parallel" ? renderParallel(job) : targetMode === "source" ? renderSource(job) : renderQQ(job);
+    if (targetViewKey !== taskViewKey()) toast(`已停止${view.label}任务`);
     void refresh();
   } catch (error) { toast(error.message); }
 }
@@ -1225,7 +1561,7 @@ function renderWindowsUpdate(state) {
   } else if (state.phase === "downloaded") {
     el.updateAsset.textContent = "安装包下载并校验完成。重启客户端后将静默安装并自动打开新版。";
     renderUpdateProgress(state);
-    setNativeUpdateAction(activeTaskMode ? "保存进度并重启" : "重启并安装");
+    setNativeUpdateAction(activeTaskMode || startSubmissionBusy || qqLookupBusy ? "保存进度并重启" : "重启并安装");
     if (!el.updateDialog.open) el.updateDialog.showModal();
   } else if (state.phase === "error") {
     el.updateAsset.textContent = `更新失败：${state.error || "未知错误"}`;
@@ -1271,27 +1607,38 @@ async function activateUpdate(event) {
     } else if (nativeUpdateState.phase === "downloaded") {
       await prepareTaskForUpdate();
       setNativeUpdateAction("正在重启…", true);
-      await window.ncmDesktop.installUpdate();
+      const installState = await window.ncmDesktop.installUpdate();
+      if (installState?.phase === "error") {
+        throw new Error(installState.error || "安装程序未能启动。");
+      }
     } else {
       renderWindowsUpdate(await window.ncmDesktop.checkForUpdates());
     }
   } catch (error) {
+    if (nativeUpdateState?.phase === "downloaded") await cancelUpdatePreparation();
     if (nativeUpdateState) renderWindowsUpdate(nativeUpdateState);
     toast(`更新失败：${error.message}`);
   }
 }
 
+async function cancelUpdatePreparation() {
+  await api("/api/tasks/cancel-update", { method: "POST", body: "{}" }).catch(() => undefined);
+}
+
 async function prepareTaskForUpdate() {
-  const taskMode = activeTaskMode;
-  if (!taskMode) return;
+  if (startSubmissionBusy || qqLookupBusy) {
+    throw new Error("任务或歌曲查询正在启动，请等待启动完成后再安装更新。");
+  }
   setNativeUpdateAction("正在保存扫描进度…", true);
-  const base = taskMode === "parallel" ? "/api/parallel/job" : "/api/job";
-  await api(`${base}/stop`, { method: "POST", body: "{}" });
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
-    const job = await api(base);
-    if (!["running", "stopping"].includes(job.status)) {
+    const state = await api("/api/tasks/prepare-update", { method: "POST", body: "{}" });
+    if (state.active && state.mode === "pool") {
+      throw new Error("代理池正在构建、导入或后台复测，请等待代理池操作完成后再安装更新。");
+    }
+    if (!state.active) {
       activeTaskMode = undefined;
+      activeTaskViewKey = undefined;
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -1305,17 +1652,30 @@ async function setupDesktopUpdates() {
   const state = await desktop.getUpdateState();
   if (!state?.supported) return;
   renderWindowsUpdate(state);
-  desktop.onUpdateState((next) => renderWindowsUpdate(next));
+  desktop.onUpdateState((next) => {
+    renderWindowsUpdate(next);
+    if (next?.phase === "error") void cancelUpdatePreparation();
+  });
 }
 
 async function restoreResumeTask() {
   try {
-    const descriptor = (await api("/api/resume")).task;
-    if (!descriptor || !["parallel", "source"].includes(descriptor.mode)) return false;
-    const form = descriptor.mode === "parallel" ? el.parallelForm : el.sourceForm;
+    const restored = await api("/api/resume");
+    const descriptor = restored.task;
+    if (!descriptor) return false;
+    const descriptorPlatform = descriptor.platform === "qq" ? "qq" : "netease";
+    if (descriptorPlatform === "netease" && !["parallel", "source"].includes(descriptor.mode)) return false;
+    if (descriptorPlatform === "qq" && !["song", "likes"].includes(descriptor.mode)) return false;
+    const descriptorView = TASK_VIEWS[`${descriptorPlatform}:${descriptor.mode}`];
+    if (!descriptorView) return false;
+    const form = descriptorView.form;
     const allowed = descriptor.mode === "parallel"
       ? new Set(["uid", "songId", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxProxyLanes", "hostConcurrency"])
-      : new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"]);
+      : descriptor.mode === "source"
+      ? new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"])
+      : descriptor.mode === "song"
+      ? new Set(["target", "songId", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "allowDirect", "maxProxyLanes", "hostConcurrency"])
+      : new Set(["target", "pageSize", "likedPageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"]);
     for (const [savedName, value] of Object.entries(descriptor.input || {})) {
       if (!allowed.has(savedName)) continue;
       if (savedName === "maxProxyLanes") {
@@ -1337,35 +1697,44 @@ async function restoreResumeTask() {
         control.value = String(value);
       }
     }
+    platform = descriptorPlatform;
     mode = descriptor.mode;
+    selectedModes[platform] = mode;
+    document.body.dataset.platform = platform;
     document.body.dataset.mode = mode;
+    el.login.hidden = platform === "qq";
+    for (const input of $$('input[name="platform"]')) input.checked = input.value === platform;
+    configureModeSwitch();
     for (const input of $$('input[name="mode"]')) input.checked = input.value === mode;
-    el.parallelForm.hidden = mode !== "parallel";
-    el.parallelForm.setAttribute("aria-hidden", String(mode !== "parallel"));
-    el.sourceForm.hidden = mode !== "source";
-    el.sourceForm.setAttribute("aria-hidden", String(mode !== "source"));
+    syncModeVisibility();
     $("#parallelFresh").checked = false;
     $("#fresh").checked = false;
+    $("#qqSongFresh").checked = false;
+    $("#qqLikesFresh").checked = false;
     const source = el.sourceForm.elements.namedItem("source")?.value;
     $("#recordScopeField").hidden = source === "likes";
-    return true;
+    const adjustments = Array.isArray(restored.adjustments) ? restored.adjustments : [];
+    return adjustments.includes("qq-comment-page-size-25")
+      ? "已恢复 QQ 音乐任务参数；旧版评论分页已安全调整为 25，检查点游标保持不变。"
+      : true;
   } catch {
     return false;
   }
 }
 
 async function switchMode(value) {
-  if (value === mode) return;
+  if (value === mode || !TASK_VIEWS[`${platform}:${value}`]) return;
   const switchVersion = ++modeSwitchVersion;
-  const previous = mode;
+  const previousForm = currentForm();
   mode = value;
+  selectedModes[platform] = mode;
   document.body.dataset.mode = mode;
   syncToolbarContext();
   syncResultExportAvailability();
   resetVisibleResults();
   resetVisibleLogs();
   connectResultStream();
-  await slideSwap(previous === "parallel" ? el.parallelForm : el.sourceForm, mode === "parallel" ? el.parallelForm : el.sourceForm, mode === "source" ? 1 : -1);
+  await slideSwap(previousForm, currentForm(), ["source", "likes"].includes(mode) ? 1 : -1);
   if (switchVersion !== modeSwitchVersion) {
     syncModeVisibility();
     return;
@@ -1376,11 +1745,62 @@ async function switchMode(value) {
   if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
 }
 function syncModeVisibility() {
-  const parallel = mode === "parallel";
-  el.parallelForm.hidden = !parallel;
-  el.parallelForm.setAttribute("aria-hidden", String(!parallel));
-  el.sourceForm.hidden = parallel;
-  el.sourceForm.setAttribute("aria-hidden", String(parallel));
+  const active = currentForm();
+  for (const form of [el.parallelForm, el.sourceForm, el.qqSongForm, el.qqLikesForm]) {
+    const hidden = form !== active;
+    form.hidden = hidden;
+    form.setAttribute("aria-hidden", String(hidden));
+  }
+}
+
+function configureModeSwitch() {
+  const definitions = platform === "qq"
+    ? [{ value: "song", label: "单曲顺序", icon: "/icons/music-2.svg" }, { value: "likes", label: "公开喜欢", icon: "/icons/heart.svg" }]
+    : [{ value: "parallel", label: "单曲并行", icon: "/icons/gauge.svg" }, { value: "source", label: "用户来源", icon: "/icons/list-music.svg" }];
+  $$("#modeSwitch label").forEach((label, index) => {
+    const definition = definitions[index];
+    const input = label.querySelector('input[name="mode"]');
+    const image = label.querySelector("img");
+    input.value = definition.value;
+    input.checked = definition.value === mode;
+    image.src = definition.icon;
+    image.nextSibling.textContent = definition.label;
+  });
+}
+
+async function switchPlatform(value) {
+  if (value === platform || !["netease", "qq"].includes(value)) return;
+  const switchVersion = ++modeSwitchVersion;
+  const previousForm = currentForm();
+  selectedModes[platform] = mode;
+  platform = value;
+  mode = selectedModes[platform];
+  document.body.dataset.platform = platform;
+  document.body.dataset.mode = mode;
+  el.login.hidden = platform === "qq";
+  configureModeSwitch();
+  syncToolbarContext();
+  syncResultExportAvailability();
+  resetVisibleResults();
+  resetVisibleLogs();
+  connectResultStream();
+  await slideSwap(previousForm, currentForm(), platform === "qq" ? 1 : -1);
+  if (switchVersion !== modeSwitchVersion) {
+    syncModeVisibility();
+    return;
+  }
+  knownMatches = -1;
+  void refresh(); void refreshResults();
+  if ($('.tab.active')?.dataset.tab === "estimate") void refreshEstimate(false);
+  if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
+}
+
+async function switchToView(viewKey) {
+  const view = TASK_VIEWS[viewKey];
+  if (!view) return;
+  selectedModes[view.platform] = view.mode;
+  if (view.platform !== platform) await switchPlatform(view.platform);
+  else if (view.mode !== mode) await switchMode(view.mode);
 }
 async function switchPoolSource(value) {
   if (value === poolSource) return;
@@ -1497,6 +1917,8 @@ function syncTaskStartAvailability() {
   const disabled = startSubmissionBusy || Boolean(activeTaskMode) || poolChangeInFlight || poolStatus === "starting" || poolRefreshing;
   el.parallelStart.disabled = disabled;
   el.sourceStart.disabled = disabled;
+  el.qqSongStart.disabled = disabled;
+  el.qqLikesStart.disabled = disabled;
   el.dryRun.disabled = disabled;
   el.toolbarStart.disabled = disabled;
   el.hostConcurrency.disabled = disabled;
@@ -1508,18 +1930,25 @@ function selectedTaskLaneCount(workersPerLane) {
   return Math.min(poolLaneCount, requested > 0 ? requested : poolLaneCount);
 }
 function syncToolbarContext() {
-  const form = mode === "parallel" ? el.parallelForm : el.sourceForm;
-  const uid = mode === "parallel" ? el.parallelUid.value.trim() : el.uid.value.trim();
+  const view = currentView();
+  const form = view.form;
+  const target = platform === "qq"
+    ? (mode === "song" ? el.qqSongTarget : el.qqLikesTarget).value.trim()
+    : (mode === "parallel" ? el.parallelUid : el.uid).value.trim();
   const workers = Number(form.elements.workersPerProxy?.value || 1);
   const lanes = selectedTaskLaneCount(workers);
   const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
-  const actualWorkers = Math.min(lanes * workers, hostConcurrency);
+  const actualWorkers = mode === "song" ? 1 : Math.min(lanes * workers, hostConcurrency);
   const laneMode = Number(el.exitLimit.value || 0) > 0 ? "手动" : "自动";
-  el.toolbarUid.textContent = uid ? `UID ${uid}` : "UID 待填写";
-  el.toolbarMode.textContent = mode === "parallel" ? "单曲并行" : `用户来源 · ${sourceName(form.elements.source?.value)}`;
+  el.toolbarUid.textContent = target ? (platform === "qq" ? `QQ ${target}` : `UID ${target}`) : platform === "qq" ? "QQ 目标待填写" : "UID 待填写";
+  el.toolbarMode.textContent = mode === "parallel"
+    ? "单曲并行"
+    : mode === "source"
+    ? `用户来源 · ${sourceName(form.elements.source?.value)}`
+    : view.label;
   el.toolbarTopology.textContent = poolRunning
-    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · 实际 ${fmt(actualWorkers)} Worker · 每出口≤${fmt(workers)}`
-    : `1 出口 · 实际 ${fmt(actualWorkers)} Worker · 每出口≤${fmt(workers)}`;
+    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} Worker${mode === "song" ? " · 单链轮转" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? " · 最多 4 在途" : ""}`
+    : `1 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} Worker${mode === "song" ? " · 单链" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? " · 最多 4 在途" : ""}`;
 }
 function setActiveNavigation(view) {
   $$('[data-nav-view]').forEach((item) => {
@@ -1543,7 +1972,7 @@ async function activateNavigation(view) {
       el.taskSidebar.scrollTo({ top: 0, behavior: "auto" });
       return;
     }
-    const details = (mode === "parallel" ? el.parallelForm : el.sourceForm).querySelector("details.advanced");
+    const details = currentForm().querySelector("details.advanced");
     if (details && details.dataset.expanded !== "true") await animateDisclosure(details, true);
     if (details) el.taskSidebar.scrollTo({ top: Math.max(0, details.offsetTop - 12), behavior: "auto" });
     return;
@@ -1599,6 +2028,8 @@ function setBusy(value) {
   el.toolbarStart.querySelector("span").textContent = value ? "启动中…" : "启动";
   el.parallelStart.querySelector("span").textContent = value ? "正在启动…" : "开始并行扫描";
   el.sourceStart.querySelector("span").textContent = value ? "正在启动…" : "开始扫描";
+  el.qqSongStart.querySelector("span").textContent = value ? "正在启动…" : "开始顺序扫描";
+  el.qqLikesStart.querySelector("span").textContent = value ? "正在启动…" : "扫描公开喜欢歌曲";
   el.toolbarStart.setAttribute("aria-busy", String(value));
   syncTaskStartAvailability();
 }
@@ -1647,12 +2078,15 @@ async function boot() {
   connectResultStream();
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
   dismissSplash();
-  if (restored) toast("已恢复上次任务参数；保持“新建状态”关闭即可从检查点继续。");
+  if (restored) toast(typeof restored === "string" ? restored : "已恢复上次任务参数；保持“新建状态”关闭即可从检查点继续。");
   void checkUpdates(false);
 }
 
 el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); void startParallel(); });
 el.sourceForm.addEventListener("submit", (event) => { event.preventDefault(); void startSource(false); });
+el.qqSongForm.addEventListener("submit", (event) => { event.preventDefault(); void startQQ("song"); });
+el.qqLikesForm.addEventListener("submit", (event) => { event.preventDefault(); void startQQ("likes"); });
+el.qqSongLookup.addEventListener("click", () => void lookupQQSong());
 el.dryRun.addEventListener("click", () => void startSource(true)); el.songLookup.addEventListener("click", () => void lookupSong()); el.lookup.addEventListener("click", () => void lookupUser());
 el.poolToggle.addEventListener("click", () => void togglePool()); el.stop.addEventListener("click", () => void stopJob()); el.refresh.addEventListener("click", () => void refresh());
 el.clashConfigSelectAll.addEventListener("click", toggleClashConfigs);
@@ -1660,7 +2094,7 @@ el.clashConfig.addEventListener("change", () => {
   clashConfigSelection = new Set(selectedClashConfigPaths());
   syncClashSelectAllButton();
 });
-el.toolbarStart.addEventListener("click", () => (mode === "parallel" ? el.parallelForm : el.sourceForm).requestSubmit());
+el.toolbarStart.addEventListener("click", () => currentForm().requestSubmit());
 el.taskPanelOpen.addEventListener("click", () => {
   if (!document.body.classList.contains("task-panel-collapsed")) setTaskPanelCollapsed(true);
   else void activateNavigation("search");
@@ -1669,7 +2103,7 @@ el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(true));
 el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
 el.exportResults.addEventListener("click", () => void exportCurrentResults());
 $$('[data-nav-view]').forEach((item) => item.addEventListener("click", () => void activateNavigation(item.dataset.navView)));
-$$('#parallelForm input, #sourceForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
+$$('#parallelForm input, #sourceForm input, #qqSongForm input, #qqLikesForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
 el.exitLimit.addEventListener("input", syncToolbarContext);
 el.hostConcurrency.addEventListener("input", syncToolbarContext);
 el.estimateButton.addEventListener("click", () => void refreshEstimate());
@@ -1680,13 +2114,14 @@ $("#closeUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close(
 $("#gotUidHelpButton").addEventListener("click", () => el.uidHelpDialog.close());
 el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").addEventListener("click", () => el.qrDialog.close());
 $("#closeSettlementButton").addEventListener("click", () => el.settlementDialog.close());
-$("#viewSettlementLogsButton").addEventListener("click", () => { el.settlementDialog.close(); openTaskTab("logs"); void refreshLogs(); });
-$("#viewSettlementResultsButton").addEventListener("click", () => { el.settlementDialog.close(); openTaskTab("results"); });
+$("#viewSettlementLogsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("logs")) void refreshLogs(); });
+$("#viewSettlementResultsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("results")) void refreshResults(); });
 el.updateButton.addEventListener("click", () => void checkUpdates(true));
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
 $("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
 el.updateDownload.addEventListener("click", (event) => void activateUpdate(event));
 $$('input[name="mode"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchMode(input.value); }));
+$$('input[name="platform"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPlatform(input.value); }));
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
 $$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
 $$('.tab').forEach((tab) => {
@@ -1706,6 +2141,8 @@ $$('.tab').forEach((tab) => {
   });
 });
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
+configureModeSwitch();
+syncModeVisibility();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));
 syncInspectorForViewport();
 syncResultExportAvailability();

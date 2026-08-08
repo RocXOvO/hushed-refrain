@@ -18,6 +18,7 @@ import {
 } from "./clash-profile-merge";
 import { ProxyTransportGate } from "./proxy-transport-gate";
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
+import { RunCancelled } from "./errors";
 
 const execFileAsync = promisify(execFile);
 const POOL_RECHECK_CONCURRENCY = 4;
@@ -446,16 +447,31 @@ async function importExternalProxyPoolUnlocked(
 
 export async function verifyProxyPool(
   pool: ProxyPoolFile,
-  verifier: (name: string, endpoint: string) => Promise<ProxyPoolEntry> = verifyProxyEndpoint,
+  verifier: (name: string, endpoint: string, signal?: AbortSignal) => Promise<ProxyPoolEntry> = verifyProxyEndpoint,
+  signal?: AbortSignal,
 ): Promise<ProxyPoolEntry[]> {
+  throwIfPoolVerificationAborted(signal);
   const processIdentityVerified = proxyPoolRunning(pool);
   if (!processIdentityVerified && !proxyPoolStatusRunning(pool)) {
     throw new Error("The proxy pool is not active.");
   }
   const verificationGate = poolVerificationGate();
-  const checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) =>
-    verificationGate.run(() => verifier(entry.name, entry.endpoint))
-  );
+  const cancelGate = (): void => verificationGate.cancel();
+  signal?.addEventListener("abort", cancelGate, { once: true });
+  let checked: ProxyPoolEntry[];
+  try {
+    checked = await mapLimit(pool.entries, Math.min(POOL_RECHECK_CONCURRENCY, pool.entries.length), (entry) => {
+      throwIfPoolVerificationAborted(signal);
+      return verificationGate.run(async () => {
+        throwIfPoolVerificationAborted(signal);
+        const verified = await verifier(entry.name, entry.endpoint, signal);
+        throwIfPoolVerificationAborted(signal);
+        return verified;
+      });
+    });
+  } finally {
+    signal?.removeEventListener("abort", cancelGate);
+  }
   assertStableFallbackExits(pool, checked, processIdentityVerified);
   const distinct = selectFastestDistinct(checked, pool.entries.length);
   if (distinct.length !== pool.entries.length) {
@@ -602,7 +618,8 @@ function expandIpv6(ip: string): string[] {
 
 export { mergeProxyDefinitions } from "./clash-profile-merge";
 
-function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string> {
+function fetchEgressIp(proxyEndpoint: string, timeoutMs: number, signal?: AbortSignal): Promise<string> {
+  throwIfPoolVerificationAborted(signal);
   const proxy = new URL(proxyEndpoint);
   return new Promise((resolveIp, reject) => {
     const transport = proxy.protocol === "https:" ? https : http;
@@ -640,6 +657,9 @@ function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string
       });
     });
     request.setTimeout(timeoutMs, () => request.destroy(new Error("IP check timed out.")));
+    const abortRequest = (): void => { request.destroy(new RunCancelled()); };
+    signal?.addEventListener("abort", abortRequest, { once: true });
+    request.once("close", () => signal?.removeEventListener("abort", abortRequest));
     request.on("error", reject);
     request.end();
   });
@@ -648,13 +668,17 @@ function fetchEgressIp(proxyEndpoint: string, timeoutMs: number): Promise<string
 async function verifyProxyEndpoint(
   name: string,
   endpoint: string,
+  signal?: AbortSignal,
 ): Promise<ProxyPoolEntry> {
+  throwIfPoolVerificationAborted(signal);
   const startedAt = Date.now();
-  const egressIp = await fetchEgressIp(endpoint, 12_000);
+  const egressIp = await fetchEgressIp(endpoint, 12_000, signal);
+  throwIfPoolVerificationAborted(signal);
   const latencyMs = Date.now() - startedAt;
   const ncmStartedAt = Date.now();
   const page = await new EnhancedNcmClient({ proxy: endpoint })
     .getSongCommentsByCursor("186016", 20, 2, String(Date.now()));
+  throwIfPoolVerificationAborted(signal);
   if (page.comments.length === 0) {
     throw new Error(`Proxy ${endpoint} returned no comments.`);
   }
@@ -666,6 +690,10 @@ async function verifyProxyEndpoint(
     ncmLatencyMs: Date.now() - ncmStartedAt,
     ncmVerified: true,
   };
+}
+
+function throwIfPoolVerificationAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new RunCancelled();
 }
 
 function waitForPort(port: number, deadline: number): Promise<void> {

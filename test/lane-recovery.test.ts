@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { RunCancelled } from "../src/errors";
 import { LaneRecovery, type LaneRecoveryRuntime } from "../src/lane-recovery";
 
 test("temporarily backs off a failed lane and fully restores it after success", async () => {
@@ -54,4 +55,45 @@ test("a concurrent success wakes workers waiting on an obsolete backoff", async 
   await wait;
   assert.equal(ready, true);
   resolveSleep();
+});
+
+test("an AbortSignal cancels a recovery wait without cancelling the reusable lane", async () => {
+  let resolveSleep!: () => void;
+  const recovery = new LaneRecovery(30_000, 30_000, {
+    now: () => 1_000,
+    sleep: () => new Promise<void>((resolve) => { resolveSleep = resolve; }),
+  });
+  recovery.recordFailure();
+  const controller = new AbortController();
+  const waiting = recovery.waitUntilReady(controller.signal);
+  controller.abort();
+
+  await assert.rejects(waiting, RunCancelled);
+  assert.equal(recovery.ready, false);
+  recovery.recordSuccess();
+  assert.equal(recovery.ready, true);
+  resolveSleep();
+});
+
+test("a pre-aborted signal never starts a recovery timer", async () => {
+  let sleeps = 0;
+  const recovery = new LaneRecovery(30_000, 30_000, {
+    now: () => 1_000,
+    sleep: async () => { sleeps += 1; },
+  });
+  recovery.recordFailure();
+  const controller = new AbortController();
+  controller.abort();
+
+  await assert.rejects(recovery.waitUntilReady(controller.signal), RunCancelled);
+  assert.equal(sleeps, 0);
+});
+
+test("aborting a default-runtime wait clears its long timer", async () => {
+  const recovery = new LaneRecovery(60_000, 60_000);
+  recovery.recordFailure();
+  const controller = new AbortController();
+  const waiting = recovery.waitUntilReady(controller.signal);
+  controller.abort();
+  await assert.rejects(waiting, RunCancelled);
 });

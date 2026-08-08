@@ -1,9 +1,9 @@
 {
   "name": "ncm-comment-finder",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "private": true,
   "main": "dist/electron-main.js",
-  "description": "Checkpointed NetEase Cloud Music comment finder",
+  "description": "Checkpointed NetEase Cloud Music and QQ Music comment finder",
   "author": "NCM Comment Finder Contributors",
   "license": "MIT",
   "bin": {
@@ -18,6 +18,7 @@
     "desktop": "npm run build && electron .",
     "desktop:smoke": "npm run build && set NCM_DESKTOP_SMOKE=1&& electron .",
     "desktop:smoke:mac": "npm run build && NCM_DESKTOP_SMOKE=1 electron .",
+    "bench:qq": "tsx scripts/benchmark-qq-music.ts",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:mac": "npm run build && node scripts/build-mac.cjs arm64",
     "dist:mac:all": "npm run build && node scripts/build-mac.cjs arm64 x64"

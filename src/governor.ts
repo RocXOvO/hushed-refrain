@@ -16,6 +16,8 @@ export interface GovernorOptions {
   requestBudget: number;
   retryBaseMs?: number;
   retryCapMs?: number;
+  /** Controls platform-specific interpretation of otherwise transport-like statuses. */
+  platformPolicy?: "netease" | "qq";
 }
 
 interface GovernorRuntime {
@@ -54,6 +56,11 @@ export class RequestGovernor {
     return this.used;
   }
 
+  /** Number of callers allowed to divide this lane's configured start interval. */
+  get pacingConcurrency(): number {
+    return this.concurrency;
+  }
+
   cancel(): void {
     const error = new RunCancelled();
     this.terminalError = error;
@@ -85,7 +92,9 @@ export class RequestGovernor {
         if (error instanceof RunCancelled) throw error;
         if (error instanceof AuthenticationRequired) throw error;
         const status = errorStatus(error);
-        if (status === 301) throw new AuthenticationRequired();
+        if (status === 301 && (this.options.platformPolicy ?? "netease") === "netease") {
+          throw new AuthenticationRequired();
+        }
         if (status === 403 || status === 429) {
           const cooldown = new CooldownRequired(status, this.options.forbiddenCooldownMs);
           if (latchCooldown) {
@@ -100,6 +109,7 @@ export class RequestGovernor {
           throw new RequestExecutionError(
             `${label} failed${status ? ` (${status})` : ""}: ${detail}`,
             status,
+            { cause: error },
           );
         }
 

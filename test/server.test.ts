@@ -13,6 +13,11 @@ import {
   type UserProbe,
 } from "../src/server";
 import type { ProxyPoolFile } from "../src/mihomo-pool";
+import type {
+  QQMusicPlatformClient,
+  QQMusicScanOptions,
+  QQMusicScanReport,
+} from "../src/qq-music/types";
 
 test("uses target-v3 per-source checkpoints with one canonical UID result and coverage ledger", () => {
   const record = sourceTaskPaths("/data", "42", "record");
@@ -68,8 +73,15 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /PDF 将包含截至导出时已经保存的全部结果/);
   assert.match(pageText, /评论读取进度/);
   assert.match(pageText, /主机并发会硬性限制总 Worker 数/);
-  assert.match(pageText, /styles\.css\?v=40/);
-  assert.match(pageText, /app\.js\?v=39/);
+  assert.match(pageText, /styles\.css\?v=41/);
+  assert.match(pageText, /app\.js\?v=45/);
+  assert.match(pageText, /id="platformSwitch"/);
+  assert.match(pageText, /id="qqSongForm"/);
+  assert.match(pageText, /id="qqLikesForm"/);
+  assert.match(pageText, /name="pageSize"[^>]*max="25"[^>]*value="25"/);
+  assert.match(pageText, /name="likedPageSize"[^>]*max="500"[^>]*value="500"/);
+  assert.match(pageText, /QQ 音乐使用独立 Gate（最多 4 个在途、启动间隔至少 250ms）/);
+  assert.match(pageText, /id="settlementFootnote"/);
   assert.match(pageText, /id="settlementCoverage"/);
   assert.match(pageText, /id="speedMetric"/);
   assert.match(pageText, /id="poolStateIndicator"[^>]*role="status"[^>]*aria-live="polite"/);
@@ -92,7 +104,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /renderRuntimeTimer/);
   assert.match(appText, /proxyTransportMaxConcurrent/);
   assert.match(appText, /observeTaskSettlement/);
-  assert.match(appText, /\/api\/logs\?mode=/);
+  assert.match(appText, /new URLSearchParams\(\{ mode: view\.taskMode/);
   assert.match(appText, /prepareTaskForUpdate/);
   assert.match(appText, /\/api\/resume/);
   assert.match(appText, /保存进度并重启/);
@@ -104,7 +116,22 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /activateNavigation/);
   assert.match(appText, /syncToolbarContext/);
   assert.match(appText, /visibleResultOrder/);
-  assert.match(appText, /resultJobIds/);
+  assert.match(appText, /resultGenerations/);
+  assert.match(appText, /"qq:song"/);
+  assert.match(appText, /"qq:likes"/);
+  assert.match(appText, /job\.configuredLanes/);
+  assert.doesNotMatch(appText, /job\.requestedTarget/);
+  assert.doesNotMatch(appText, /job\.displayTarget/);
+  assert.match(appText, /job\.targetLabel/);
+  assert.match(appText, /taskBase\(taskMode\)/);
+  assert.match(appText, /\/api\/tasks\/prepare-update/);
+  assert.match(appText, /\/api\/tasks\/cancel-update/);
+  assert.match(appText, /installState\?\.phase === "error"/);
+  assert.match(appText, /next\?\.phase === "error"/);
+  assert.match(appText, /代理池正在构建、导入或后台复测/);
+  assert.match(appText, /QQ 检查点累计/);
+  assert.match(appText, /个有界 Worker · 最多/);
+  assert.match(appText, /Math\.min\(lanes \* workers, hostConcurrency\)/);
   assert.match(appText, /baselineIds/);
   assert.match(appText, /tabSwitchVersion/);
   assert.match(appText, /renderActiveSongs/);
@@ -143,6 +170,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
 
   const invalidReport = await fetch(`${base}/report/results?mode=source&jobId=not-a-uuid`);
   assert.equal(invalidReport.status, 400);
+  const legacyNeteaseReport = await fetch(`${base}/report/results?mode=source&jobId=00000000-0000-4000-8000-000000000000&uid=42`);
+  assert.equal(legacyNeteaseReport.status, 409);
 
   const styles = await fetch(`${base}/styles.css`);
   assert.equal(styles.status, 200);
@@ -175,6 +204,15 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(results.status, 200);
   assert.deepEqual(await results.json(), { results: [] });
 
+  const qqIdle = await fetch(`${base}/api/qq/job`);
+  assert.equal(qqIdle.status, 200);
+  const qqIdleValue = await qqIdle.json() as { platform: string; status: string };
+  assert.equal(qqIdleValue.platform, "qq");
+  assert.equal(qqIdleValue.status, "idle");
+
+  const missingQQGeneration = await fetch(`${base}/api/qq/results?limit=50`);
+  assert.equal(missingQQGeneration.status, 400);
+
   const estimate = await fetch(`${base}/api/estimate?comments=500000`);
   assert.equal(estimate.status, 200);
   const value = await estimate.json() as { pages: number; expectedSeconds: number };
@@ -204,6 +242,23 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const customProtectedValue = await customProtectedEstimate.json() as { effectiveWorkers: number; proxyTransportMaxConcurrent: number };
   assert.equal(customProtectedValue.effectiveWorkers, 4);
   assert.equal(customProtectedValue.proxyTransportMaxConcurrent, 4);
+
+  const qqEstimate = await fetch(`${base}/api/estimate?platform=qq&mode=likes&comments=100000&pageSize=25&partitions=10&minDelayMs=3000&jitterMs=1000&networkMs=400&lanes=8&workersPerLane=2&proxyTransport=1&hostConcurrency=8`);
+  assert.equal(qqEstimate.status, 200);
+  const qqEstimateValue = await qqEstimate.json() as { platform: string; effectiveWorkers: number; checkpointSlots: number; proxyTransportMaxConcurrent: number; proxyTransportStartDelayMs: number };
+  assert.equal(qqEstimateValue.platform, "qq");
+  assert.equal(qqEstimateValue.effectiveWorkers, 4);
+  assert.equal(qqEstimateValue.checkpointSlots, 4);
+  assert.equal(qqEstimateValue.proxyTransportMaxConcurrent, 4);
+  assert.equal(qqEstimateValue.proxyTransportStartDelayMs, 250);
+  const qqSongEstimate = await fetch(`${base}/api/estimate?platform=qq&mode=song&comments=100000&pageSize=25&partitions=1&minDelayMs=3000&jitterMs=1000&networkMs=400&lanes=8&workersPerLane=8&proxyTransport=1&hostConcurrency=32`);
+  assert.equal(qqSongEstimate.status, 200);
+  const qqSongEstimateValue = await qqSongEstimate.json() as { effectiveWorkers: number; serialRequestChain: boolean };
+  assert.equal(qqSongEstimateValue.effectiveWorkers, 1);
+  assert.equal(qqSongEstimateValue.serialRequestChain, true);
+  assert.equal((await fetch(`${base}/api/estimate?platform=qq&comments=100&pageSize=25`)).status, 400);
+  const invalidQQPageSize = await fetch(`${base}/api/estimate?platform=qq&mode=song&comments=100&pageSize=26&minDelayMs=3000&jitterMs=1000`);
+  assert.equal(invalidQQPageSize.status, 400);
 
   const calibratedEstimate = await fetch(`${base}/api/estimate?comments=60000&pageSize=1000&partitions=100&observedCommentsPerPage=600&requestSuccessRatio=0.8&networkMs=550&lanes=8&workersPerLane=2&proxyTransport=1&hostConcurrency=8&proxyTransportEffectiveConcurrent=4&minDelayMs=0&jitterMs=0`);
   assert.equal(calibratedEstimate.status, 200);
@@ -362,6 +417,146 @@ test("dashboard restores the last task descriptor from the persistent runtime ro
   const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
   assert.equal(response.status, 200);
   assert.deepEqual(await response.json(), { task: descriptor });
+});
+
+test("dashboard normalizes a legacy QQ page size without changing its resume generation", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-qq-resume-"));
+  const dataDirectory = join(runtimeRoot, "data");
+  await mkdir(dataDirectory, { recursive: true });
+  const descriptor = {
+    version: 2,
+    platform: "qq",
+    mode: "likes",
+    updatedAt: "2026-08-08T00:00:00.000Z",
+    input: { target: "canonical-user", pageSize: 100, likedPageSize: 500, workersPerProxy: 2 },
+  };
+  await writeFile(join(dataDirectory, "resume-task.json"), JSON.stringify(descriptor));
+  const server = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+
+  const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
+  assert.equal(response.status, 200);
+  const value = await response.json() as { task: typeof descriptor; adjustments: string[] };
+  assert.equal(value.task.input.pageSize, 25);
+  assert.equal(value.task.input.target, descriptor.input.target);
+  assert.deepEqual(value.adjustments, ["qq-comment-page-size-25"]);
+});
+
+test("dashboard composes QQ manager routes with generation-bound results, logs, reports, and global exclusion", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-qq-routes-"));
+  let scanOptions: QQMusicScanOptions | undefined;
+  let finishScan = (_report: QQMusicScanReport): void => {};
+  const scan = new Promise<QQMusicScanReport>((resolve) => { finishScan = resolve; });
+  const client: QQMusicPlatformClient = {
+    resolveUser: async (input) => ({ input, encryptUin: "canonical-user" }),
+    getSongInfo: async (songId) => ({ id: songId, name: "测试歌曲" }),
+    getLikedSongsPage: async () => ({ songs: [], hasMore: false, nextOffset: 0 }),
+    getNewComments: async () => ({ comments: [], hasMore: false }),
+  };
+  const server = await startDashboard({
+    host: "127.0.0.1",
+    port: 0,
+    runtimeRoot,
+    qqClientFactory: () => client,
+    qqRunner: async (_lanes, options) => { scanOptions = options; return scan; },
+  });
+  context.after(() => new Promise<void>((done) => server.close(() => done())));
+  const address = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${address.port}`;
+
+  const started = await fetch(`${base}/api/qq/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "song", target: "123456789", songId: "7", pageSize: 25, allowDirect: true }),
+  });
+  assert.equal(started.status, 202);
+  const job = await started.json() as { id: string; generation: { target: { value: string }; mode: string } };
+  assert.equal(job.generation.target.value, "canonical-user");
+  assert.equal(job.generation.mode, "song");
+  assert.equal(scanOptions?.pageSize, 25);
+
+  const blockedSource = await fetch(`${base}/api/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ uid: "42", source: "record", allowDirect: true }),
+  });
+  assert.equal(blockedSource.status, 409);
+
+  const results = await fetch(`${base}/api/qq/results?jobId=${job.id}&limit=50`);
+  assert.equal(results.status, 200);
+  const resultsValue = await results.json() as { generation: { jobId: string }; results: unknown[] };
+  assert.equal(resultsValue.generation.jobId, job.id);
+  assert.deepEqual(resultsValue.results, []);
+
+  const logs = await fetch(`${base}/api/logs?mode=qq&jobId=${job.id}&limit=50`);
+  assert.equal(logs.status, 200);
+  assert.equal((await logs.json() as { generation: { jobId: string } }).generation.jobId, job.id);
+
+  const streamResponse = await fetch(`${base}/api/qq/results/stream?jobId=${job.id}`);
+  assert.equal(streamResponse.status, 200);
+  scanOptions?.onMatch?.({
+    platform: "qq", targetEncryptUin: "canonical-user", songId: "7",
+    commentId: "comment-1", seqNo: "10", authorEncryptUin: "author-1",
+    content: "hello", capturedAt: "2026-08-08T00:00:00.000Z",
+  });
+  const streamReader = streamResponse.body!.getReader();
+  const decoder = new TextDecoder();
+  let streamText = "";
+  for (let index = 0; index < 3 && !streamText.includes("event: match"); index += 1) {
+    const chunk = await streamReader.read();
+    streamText += decoder.decode(chunk.value, { stream: !chunk.done });
+  }
+  await streamReader.cancel();
+  assert.match(streamText, /event: match/);
+  assert.match(streamText, /"generation":\{"platform":"qq","mode":"song","jobId":/);
+  assert.match(streamText, /"comment":\{"platform":"qq"/);
+
+  const staleStream = await fetch(`${base}/api/qq/results/stream?jobId=00000000-0000-4000-8000-000000000000`);
+  assert.equal(staleStream.status, 409);
+
+  const reportQuery = new URLSearchParams({
+    platform: "qq", mode: "song", jobId: job.id,
+    targetKind: "encryptUin", target: "canonical-user",
+  });
+  const report = await fetch(`${base}/report/results?${reportQuery}`);
+  assert.equal(report.status, 200);
+  const reportHtml = await report.text();
+  assert.match(reportHtml, /name="result-report-platform" content="qq"/);
+  assert.match(reportHtml, /name="result-report-target" content="canonical-user"/);
+  reportQuery.set("target", "wrong-generation");
+  assert.equal((await fetch(`${base}/report/results?${reportQuery}`)).status, 409);
+
+  assert.equal((await fetch(`${base}/api/estimate?platform=qq&mode=song&comments=100&pageSize=26`)).status, 400);
+  const stopping = await fetch(`${base}/api/tasks/stop`, { method: "POST", body: "{}" });
+  assert.equal(stopping.status, 200);
+  assert.equal((await stopping.json() as { active: boolean; mode: string }).mode, "qq");
+  finishScan({
+    status: "stopped", mode: "song", targetEncryptUin: "canonical-user",
+    songs: 1, songsComplete: 0, lanes: 1, workers: 1, pagesProcessed: 0,
+    commentsInspected: 0, matches: 0, requestsThisRun: 0, requestsTotal: 0,
+    coverageComplete: false, elapsedMs: 1,
+    statePath: scanOptions!.statePath, outputPath: scanOptions!.outputPath,
+  });
+  for (let index = 0; index < 20; index += 1) {
+    const active = await fetch(`${base}/api/tasks/active`).then((response) => response.json()) as { active: boolean };
+    if (!active.active) break;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal((await fetch(`${base}/api/tasks/active`).then((response) => response.json()) as { active: boolean }).active, false);
+
+  const prepared = await fetch(`${base}/api/tasks/prepare-update`, { method: "POST", body: "{}" });
+  assert.equal(prepared.status, 200);
+  assert.deepEqual(await prepared.json(), { active: false, preparingUpdate: true });
+  const blockedDuringUpdate = await fetch(`${base}/api/qq/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "song", target: "123456789", songId: "7", pageSize: 25, allowDirect: true }),
+  });
+  assert.equal(blockedDuringUpdate.status, 409);
+  const cancelledUpdate = await fetch(`${base}/api/tasks/cancel-update`, { method: "POST", body: "{}" });
+  assert.equal(cancelledUpdate.status, 200);
+  assert.deepEqual(await cancelledUpdate.json(), { active: false, preparingUpdate: false });
 });
 
 test("dashboard restores a valid legacy temp descriptor after an interrupted Windows rename", async (context) => {
@@ -625,6 +820,20 @@ test("dashboard periodically refreshes active proxy latency", async (context) =>
   const firstPool = await first.json() as { refreshing: boolean };
   assert.equal(firstPool.refreshing, true);
   assert.equal(refreshCalls, 1);
+  const updateStop = await fetch(`${base}/api/tasks/stop`, { method: "POST", body: "{}" });
+  assert.equal(updateStop.status, 200);
+  assert.deepEqual(await updateStop.json(), { active: true, mode: "pool" });
+  const updatePrepare = await fetch(`${base}/api/tasks/prepare-update`, { method: "POST", body: "{}" });
+  assert.equal(updatePrepare.status, 200);
+  assert.deepEqual(await updatePrepare.json(), { active: true, mode: "pool", preparingUpdate: true });
+  assert.equal((JSON.parse(await readFile(poolPath, "utf8")) as ProxyPoolFile).active, true);
+  const blockedDuringPoolUpdate = await fetch(`${base}/api/qq/job`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "song", target: "123456789", songId: "7", allowDirect: true }),
+  });
+  assert.equal(blockedDuringPoolUpdate.status, 409);
+  await fetch(`${base}/api/tasks/cancel-update`, { method: "POST", body: "{}" });
 
   releaseRefresh();
   await new Promise((done) => setTimeout(done, 10));

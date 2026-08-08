@@ -4,7 +4,15 @@ import {
   DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
 } from "./proxy-transport-gate";
 
+export type EstimatePlatform = "netease" | "qq";
+
+const QQ_COMMENT_PAGE_SIZE_MAX = 25;
+const QQ_TRANSPORT_MAX_CONCURRENT = 4;
+const QQ_TRANSPORT_START_DELAY_MS = 250;
+const QQ_CHECKPOINT_SLOTS = 4;
+
 export interface EstimateInput {
+  platform?: EstimatePlatform;
   comments: number;
   pageSize: number;
   partitions?: number;
@@ -22,9 +30,12 @@ export interface EstimateInput {
   proxyTransportStartDelayMs?: number;
   proxyTransportEffectiveStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
+  serialRequestChain?: boolean;
+  workersShareLanePacing?: boolean;
 }
 
 export interface ScanEstimate {
+  platform?: EstimatePlatform;
   comments: number;
   pages: number;
   estimatedRequests: number;
@@ -43,11 +54,18 @@ export interface ScanEstimate {
   proxyTransportEffectiveConcurrent?: number;
   proxyTransportStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
+  checkpointSlots?: number;
+  serialRequestChain?: boolean;
+  workersShareLanePacing?: boolean;
 }
 
 export function estimateCommentScan(input: EstimateInput): ScanEstimate {
+  const platform = input.platform ?? "netease";
   const comments = nonNegativeInteger(input.comments, "comments");
   const pageSize = positiveInteger(input.pageSize, "pageSize");
+  if (platform === "qq" && pageSize > QQ_COMMENT_PAGE_SIZE_MAX) {
+    throw new Error(`QQ Music pageSize must not exceed ${QQ_COMMENT_PAGE_SIZE_MAX}.`);
+  }
   const partitions = positiveInteger(input.partitions ?? 1, "partitions");
   const commentsPerPage = input.observedCommentsPerPage === undefined
     ? pageSize
@@ -60,9 +78,10 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const networkMs = nonNegativeInteger(input.networkMs ?? 400, "networkMs");
   const lanes = positiveInteger(input.lanes ?? 1, "lanes");
   const workersPerLane = positiveInteger(input.workersPerLane ?? 1, "workersPerLane");
-  const proxyTransport = Boolean(input.proxyTransport);
+  const proxyTransport = platform === "qq" || Boolean(input.proxyTransport);
   const proxyTransportMaxConcurrent = positiveInteger(
-    input.proxyTransportMaxConcurrent ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
+    input.proxyTransportMaxConcurrent
+      ?? (platform === "qq" ? QQ_TRANSPORT_MAX_CONCURRENT : DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT),
     "proxyTransportMaxConcurrent",
   );
   const proxyTransportEffectiveConcurrent = positiveInteger(
@@ -73,22 +92,41 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     throw new Error("proxyTransportEffectiveConcurrent must not exceed proxyTransportMaxConcurrent.");
   }
   const proxyTransportStartDelayMs = nonNegativeInteger(
-    input.proxyTransportStartDelayMs ?? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
+    input.proxyTransportStartDelayMs
+      ?? (platform === "qq" ? QQ_TRANSPORT_START_DELAY_MS : DEFAULT_PROXY_TRANSPORT_START_DELAY_MS),
     "proxyTransportStartDelayMs",
   );
   const proxyTransportStartJitterMs = nonNegativeInteger(
-    input.proxyTransportStartJitterMs ?? DEFAULT_PROXY_TRANSPORT_START_JITTER_MS,
+    input.proxyTransportStartJitterMs
+      ?? (platform === "qq" ? 0 : DEFAULT_PROXY_TRANSPORT_START_JITTER_MS),
     "proxyTransportStartJitterMs",
   );
+  if (platform === "qq") {
+    if (proxyTransportMaxConcurrent !== QQ_TRANSPORT_MAX_CONCURRENT
+      || proxyTransportEffectiveConcurrent !== QQ_TRANSPORT_MAX_CONCURRENT
+      || proxyTransportStartDelayMs !== QQ_TRANSPORT_START_DELAY_MS
+      || proxyTransportStartJitterMs !== 0) {
+      throw new Error("QQ Music estimates require the fixed 4-concurrent / 250ms transport gate.");
+    }
+  }
   const totalWorkers = lanes * workersPerLane;
   const maxWorkers = input.maxWorkers === undefined
     ? totalWorkers
     : positiveInteger(input.maxWorkers, "maxWorkers");
-  const effectiveWorkers = Math.min(
+  const boundedWorkers = Math.min(
     totalWorkers,
     maxWorkers,
     proxyTransport ? proxyTransportEffectiveConcurrent : Number.POSITIVE_INFINITY,
   );
+  const serialRequestChain = Boolean(input.serialRequestChain);
+  const workersShareLanePacing = Boolean(input.workersShareLanePacing);
+  const checkpointSlots = platform === "qq" ? QQ_CHECKPOINT_SLOTS : Number.POSITIVE_INFINITY;
+  const effectiveWorkers = serialRequestChain
+    ? 1
+    : Math.min(boundedWorkers, checkpointSlots);
+  const pacingWorkersPerLane = serialRequestChain || workersShareLanePacing
+    ? 1
+    : workersPerLane;
   const pages = pageCount(
     comments,
     pageSize,
@@ -104,8 +142,7 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
 
   const duration = (spacingMs: number, transportJitterFactor: number): number => {
     if (estimatedRequests === 0) return 0;
-    const perLaneCycleMs = Math.max(spacingMs, networkMs) / workersPerLane;
-    const laneTopologyCycleMs = perLaneCycleMs / lanes;
+    const laneTopologyCycleMs = spacingMs / pacingWorkersPerLane / lanes;
     const workerCycleMs = networkMs / effectiveWorkers;
     const transportCycleMs = proxyTransport
       ? Math.max(
@@ -120,6 +157,7 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const conservativeSeconds = duration(minDelayMs + jitterMs, 1);
 
   return {
+    ...(input.platform !== undefined ? { platform } : {}),
     comments,
     pages,
     estimatedRequests,
@@ -134,7 +172,10 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     lanes,
     workersPerLane,
     totalWorkers,
-    ...(input.maxWorkers !== undefined || proxyTransport ? { effectiveWorkers } : {}),
+    ...(input.maxWorkers !== undefined || proxyTransport || serialRequestChain ? { effectiveWorkers } : {}),
+    ...(platform === "qq" ? { checkpointSlots: QQ_CHECKPOINT_SLOTS } : {}),
+    ...(serialRequestChain ? { serialRequestChain: true } : {}),
+    ...(workersShareLanePacing ? { workersShareLanePacing: true } : {}),
     ...(proxyTransport
       ? {
         proxyTransportMaxConcurrent,
