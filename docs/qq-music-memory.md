@@ -137,11 +137,12 @@ data/logs/qq-<job-id>.jsonl
 ### Dashboard 双平台工作区
 
 - 顶栏全局 tabs 在网易云与 QQ 两个隔离工作区间切换，不兼作扫描模式。网易云固定拥有 `parallel/source`，QQ 固定拥有 `song/likes`，并各自记忆 mode 与输出 tab；非活动 workbench 同时 `hidden` 和 `inert`。完整 viewKey 仍为 `netease:parallel`、`netease:source`、`qq:song`、`qq:likes`，jobs、generations、settlement 和 REST/SSE/log/estimate 请求均按完整 key 隔离。
+- 平台切换只改变 workbench 内容、主题、模式和请求归属，不改变共享外壳几何。网易云与 QQ 桌面端共用紧凑图标 rail、导航项尺寸和任务抽屉锚点；QQ 不展开 rail 或常驻显示导航文字。横向或纵向缩放不得让顶栏、平台 tabs、窗口按钮、rail、任务栏、drawer 和 inspector 相互碰撞；overlay 模式中的 drawer 与 inspector 互斥，宽表格与长面板在自身容器内滚动。
 - 平台切换同时推进 platform/mode 版本，旧 mode 动画和启动响应只能提交到原 owner/view；mode 改变会立即绘制目标 view 的缓存/空快照。离开平台或从 `parallel/song` 切到兄弟 mode 会取消对应歌曲 lookup，但不取消正式扫描；QQ lookup 的 busy 栅栏不在取消时预先释放，而在请求真正结算的异步 `finally` 中移除 controller。完成的平台过渡若回报 `committed=false` 或激活平台不符，上层会同步应用目标平台、展示、快照与 SSE；重选当前平台也会重绘并刷新。Renderer 只接受匹配 generation；QQ 结果 key 为 `songId:commentId`，SSE 由 route jobId 与事件 generation 双重绑定。
 - QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 展示有界 Worker 与同容量动态总 Gate。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。
 - `web/platform-wave.js` 用一次性 WebGL2 浪峰在 760 ms 内从左下扫向右上，46% 时提交工作区，主内容轻微上浮/倾斜并复位。使用 `low-power`，资源上限为 72 段、桌面 68/窄屏 36 粒子、DPR `1..1.25`，无抗锯齿/深度缓冲。context 获取、shader/program/buffer、setup/draw/commit/cleanup 均有异常兜底；局部资源释放后在初始化失败和正常清理路径显式调用 `WEBGL_lose_context`，promise 必定结算。提交前取消不改平台；提交后取消保留新平台，两者均释放 GPU。reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都走即时/安全完成路径。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=46`、`platform-wave.js?v=3`、`app.js?v=57`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=48`、`platform-wave.js?v=3`、`app.js?v=58`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
@@ -151,4 +152,4 @@ data/logs/qq-<job-id>.jsonl
 
 ### 完整交付门禁
 
-运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`npm run desktop:smoke:mac` 与 `git diff --check`。浏览器需验收双平台/四 viewKey、mode 目标快照立即切换、重选当前平台、QQ lookup 的 busy 仅由异步 `finally` 释放、平台/模式/启动竞态隔离、旧请求/SSE 抑制、`committed=false` 上层恢复、波浪提交前/后取消、`low-power` 与显式 context 释放、各异常降级、运行中 reduced-motion、矮屏 EncryptUin 弹窗、1121→1120/820 断点、Windows 900 px 登录按钮可访问名称、无横向溢出和 0 console error。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。
+运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`npm run desktop:smoke:mac` 与 `git diff --check`。浏览器需验收双平台/四 viewKey、mode 目标快照立即切换、重选当前平台、QQ lookup 的 busy 仅由异步 `finally` 释放、平台/模式/启动竞态隔离、旧请求/SSE 抑制、`committed=false` 上层恢复、波浪提交前/后取消、`low-power` 与显式 context 释放、各异常降级、运行中 reduced-motion、双平台 rail/导航项等宽、横纵双轴缩放、overlay 面板互斥及内部滚动、矮屏 EncryptUin 弹窗、1281→1280 与 821→820 断点、Windows 900 px 登录按钮可访问名称、无横向溢出和 0 console error。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。

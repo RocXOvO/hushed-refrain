@@ -98,7 +98,7 @@ let visibleResultOrder = [];
 const disclosureAnimations = new WeakMap();
 let activeSongsSignature = "";
 const activeSongRows = new Map();
-const inspectorOverlayQuery = matchMedia("(max-width: 1120px)");
+const inspectorOverlayQuery = matchMedia("(max-width: 1280px)");
 
 const PARAMETER_HELP = {
   "target-netease": ["用户 UID", "输入网易云音乐用户主页里的数字 UID。它不是昵称；可以使用右侧的获取教程查看具体位置。"],
@@ -2619,6 +2619,9 @@ async function activateNavigation(view) {
   openTaskTab(view);
 }
 function setTaskPanelCollapsed(collapsed) {
+  if (!collapsed && inspectorOverlayQuery.matches && !document.body.classList.contains("inspector-collapsed")) {
+    setInspectorCollapsed(true);
+  }
   document.body.classList.toggle("task-panel-collapsed", collapsed);
   el.taskPanelToggle.setAttribute("aria-label", "收起任务面板");
   el.taskPanelToggle.title = "收起任务面板";
@@ -2636,6 +2639,9 @@ function setTaskPanelCollapsed(collapsed) {
   }
 }
 function setInspectorCollapsed(collapsed) {
+  if (!collapsed && inspectorOverlayQuery.matches && !document.body.classList.contains("task-panel-collapsed")) {
+    setTaskPanelCollapsed(true);
+  }
   if (collapsed && el.inspectorBody.contains(document.activeElement)) {
     el.inspectorToggle.focus({ preventScroll: true });
   }
