@@ -3,7 +3,7 @@
 ## 目标
 
 - 网易云音乐与 QQ 音乐拥有明确不同的视觉语言，但共用一套任务状态、结果、日志、代理池和更新逻辑。
-- 平台切换使用覆盖 GUI 表面的规则点阵曲面；左下到右上的浪脊局部托举点阵，经过后平滑回落，页面业务 DOM 始终不位移。
+- 平台切换使用“双域声谱折幕（Spectral Fold Handoff）”：一层不透明声谱幕完整遮蔽视口后交接目标平台，业务 DOM 始终不参与动画。
 - 用户以“歌名 / 歌手”搜索并选择歌曲，内部仍以平台歌曲 ID 作为扫描主键。
 - 统一面向用户的参数名称和进度口径，保留现有 API/检查点字段以兼容旧版。
 
@@ -15,15 +15,13 @@
 
 QQ 视觉层重置强调色、平台识别区、表单面板、指标和选中态；网易云保持现有中性工作台。两者都使用低开销的颜色、边框、阴影和不透明背景，不引入长时间模糊或玻璃效果。
 
-### 点阵曲面过渡
+### 双域声谱折幕
 
-- 使用一个临时全屏、指针穿透且 `aria-hidden` 的 WebGL2 Canvas。点阵是确定性的二维规则网格，不截取业务 DOM、不依赖随机粒子，也不引入常驻场景。
-- 网格按约 30 CSS px 间距生成：列数限制为 19–58，行数限制为 14–36，因此逻辑点数最多 2088；DPR 仅决定清晰度并限制在 1–1.25，不增加逻辑点数。
-- 单个顶点着色器按每个点到移动浪脊的有符号距离计算高斯托举与短暂衰减尾波。浪脊附近的点向上投影、放大和提亮，前后区域连续回到规则平面；整帧只有一个静态 grid buffer、一个 program 和一次 `POINTS` draw call。
-- 页面业务 DOM 不写 `transform` 或 `will-change`，主工作区的布局坐标和滚动位置在动画期间保持不变；可视弯曲完全由点阵自身表达，避免整页上浮、旋转或抖动。
-- 动画为一次性约 760ms，46% 进度时提交新平台。提交前取消保留源平台，提交后取消保留目标平台；快速连点由应用层代际保证最后一次选择收敛。
-- 使用 `low-power` WebGL2，关闭抗锯齿和深度缓冲，每帧不分配数组、不回读像素。完成、取消、初始化/绘制异常、页面隐藏、动态开启减少动效及 context loss 都必须结算 Promise，并清除 RAF、监听器、buffer、program、context 与 Canvas。
-- `prefers-reduced-motion: reduce`、初始页面不可见或 WebGL2 不可用时立即提交，不让动画阻断表单、停止按钮或键盘焦点。
+- `PlatformWaveTransition.create({ sourcePlatform, targetPlatform, direction, sourceAnchor, targetAnchor, commit })` 返回 `{ finished, cancel }`。内部状态固定为 `idle → preparing → covering → covered/commit → revealing → settled`；`commit()` 是唯一允许修改 platform/mode、`hidden`/`inert`、结果/SSE 和 ARIA 的入口，只调用一次并显式返回布尔值。
+- 一次过渡约 680 ms：0–90 ms 是源平台细载波起音，90–326 ms 由源侧扫入深色哑光声谱幕，约 326 ms/48% 时全视口必须完整且不透明并提交 DOM，326–590 ms 以目标色揭幕，590–680 ms 由两条目标色细载波向目标 Tab 收束。网易云使用石墨黑/暖灰/红，QQ 使用深青黑/青绿/薄荷；不使用紫色渐变、随机粒子、模糊玻璃、泛光云、弹跳或长尾。
+- Canvas 是唯一动画元素；不对 `platform-surface`、`main-pane`、任务栏、指标、表格、导航或 Inspector 写入 `transform`/`opacity`/`filter`/`will-change`，不读取或截图业务 DOM，不生成 DOM 纹理，UID、EncryptUin 和评论不得进入 GPU。`platform-switching` 期间只暂停 `.platform-surface` 工作区自身的 CSS animation/transition，不禁用 `pointer-events`；此时新触发的 WAAPI 界面动效直接收敛，工作区外新出现的弹窗或 Toast 也禁用入场动画，因此 Canvas 是唯一继续变化的视觉元素。平台 Tab 仍可用于反向切换，停止按钮始终优先可用。两平台的 main-pane padding、intro 外框、command bar、metric 和输出 Tab 共享几何必须一致，切换前后关键矩形误差不超过 0.5 CSS px；应用层捕获 document、drawer、`#runtimeInspector`、Inspector 内容、主导航、`#globalPlatformSwitch`、输出 Tab 与各 `.table-wrap` 的滚动坐标，提交后立即恢复一次，并在当前平台代际的结果行异步回填后再次恢复，避免空表临时压缩把非零位置永久钳制为 0。Layout Shift 为 0。
+- WebGL2 使用 `gl_VertexID` 全屏三角形：1 program、1 VAO、0 VBO/纹理/FBO，每帧仅一次 `drawArrays(TRIANGLES, 0, 3)`。Fragment shader 基于方向轴和 signed distance，经 `fwidth` 抗锯齿绘制不透明幕、4–6 条确定性声谱等高线、主交接线和 Tab 载波。使用 `low-power`，关闭 antialias/depth/stencil/preserveDrawingBuffer，开启 premultiplied alpha；DPR 不超过 1.25，颜色缓冲不超过 1,600,000 像素。RAF 中不创建数组/对象/字符串也不查询布局；resize 沿用原 `startedAt`。
+- 提交前取消保留源平台，提交后取消保留目标平台；快速 N→Q→N 只收敛到最后选择。应用层在全不透明幕内捕获首次提交异常并同栈重试一次；若约 326 ms 的 `commit()` 仍返回 `false` 或抛错，过渡立即结算且不继续揭幕，只有当前应用代际可同步收敛。初始或运行中 reduced-motion、页面隐藏、WebGL2/context/shader/program/VAO/append/resize/draw 失败、首次 RAF 申请失败或 context loss 都立即提交并单次结算 Promise；清理 RAF、resize/visibility/media/context-loss 监听、VAO、program、context、Canvas、`platform-switching` 和 `aria-busy`。`pagehide` 清理，`pageshow` 若 desired platform 与当前不同则无动画收敛，并通过提交返回值保证当前 generation 的 SSE 只连接一次。取消平台或其他界面动画时，正在过渡的 `<details>` 依 `data-expanded` 同步 `open`/`aria-expanded` 并清理动画状态。
 
 ## 歌曲搜索
 
@@ -49,7 +47,7 @@ QQ 视觉层重置强调色、平台识别区、表单面板、指标和选中�
 
 ## 验收不变量
 
-- 点阵 Canvas 在动画后从 DOM 移除，不留 `requestAnimationFrame`、事件监听器或显存资源；静态测试同时证明网格无随机坐标、业务 DOM 不被变换。
+- 声谱 Canvas 在动画结束后一帧内从 DOM 移除，不留 `requestAnimationFrame`、事件监听器或显存资源；测试同时证明提交点全屏 alpha=1、每帧仅一次全屏三角形 draw、无随机数/额外 GPU 资源/业务 DOM 动画写入。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。
 - 搜索的旧响应不能覆盖新查询；平台、查询和选中 ID 必须同代。

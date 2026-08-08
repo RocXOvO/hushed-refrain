@@ -6,264 +6,371 @@ import vm from "node:vm";
 
 const waveSource = readFileSync(join(process.cwd(), "web", "platform-wave.js"), "utf8");
 
-test("platform wave honors reduced motion without allocating WebGL resources", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl, { reducedMotion: true });
-  vm.runInNewContext(waveSource, runtime.context);
+test("spectral fold honors reduced motion without requesting WebGL", async () => {
+  const runtime = waveRuntime(fakeGl(), { reducedMotion: true });
+  load(runtime);
   let commits = 0;
 
-  const transition = runtime.context.PlatformWaveTransition.create({
+  const outcome = await runtime.context.PlatformWaveTransition.create({
     sourcePlatform: "netease",
     targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { commits += 1; },
-  });
-  const outcome = await transition.finished;
+    direction: 1,
+    commit: () => { commits += 1; return true; },
+  }).finished;
 
   assert.equal(commits, 1);
   assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "none" });
-  assert.equal(gl.createdPrograms, 0);
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
+  assert.equal(runtime.contextRequests.length, 0);
+  assertClean(runtime);
 });
 
-test("platform wave falls back to an immediate commit and releases partial WebGL setup", async () => {
-  const gl = fakeGl({ failBufferAt: 1 });
-  const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { commits += 1; },
-  });
-  const outcome = await transition.finished;
-
-  assert.equal(commits, 1);
-  assert.deepEqual(plain(outcome), {
-    committed: true,
-    completed: true,
-    renderer: "none",
-  });
-  assert.equal(gl.deletedPrograms.length, 1);
-  assert.equal(gl.lostContexts, 1);
-  assert.equal(runtime.canvas.removed, true);
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
-});
-
-test("platform wave cleans up and settles when the animated commit throws", async () => {
+test("spectral fold uses the frozen WebGL2 context and one fullscreen triangle", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
+  load(runtime);
+  const transition = createTransition(runtime);
 
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { throw new Error("synthetic commit failure"); },
-  });
-  assert.equal(runtime.bodyClasses.has("platform-switching"), true);
-  assert.ok(runtime.frame);
-  runtime.frame?.(0);
-  runtime.frame?.(1_000);
-  const outcome = await transition.finished;
-
-  assert.equal(outcome.committed, false);
-  assert.equal(outcome.completed, true);
-  assert.equal(outcome.renderer, "webgl2");
-  assert.match(String(outcome.commitError), /synthetic commit failure/);
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
-  assert.equal(runtime.bodyAttributes.has("aria-busy"), false);
-  assert.equal(runtime.canvas.removed, true);
-  assert.equal(gl.deletedPrograms.length, 1);
-  assert.equal(gl.deletedBuffers.length, 1);
-  assert.equal(gl.lostContexts, 1);
-});
-
-test("platform wave cancellation before commit settles without changing platform", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { commits += 1; },
-  });
-
-  transition.cancel();
-  const outcome = await transition.finished;
-
-  assert.equal(commits, 0);
-  assert.deepEqual(plain(outcome), { committed: false, completed: false, renderer: "webgl2" });
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
-  assert.equal(runtime.canvas.removed, true);
-  assert.equal(gl.lostContexts, 1);
-});
-
-test("platform wave cancellation after commit preserves the committed platform and releases GPU state", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { commits += 1; },
-  });
-
-  runtime.frame?.(0);
-  runtime.frame?.(400);
-  transition.cancel();
-  const outcome = await transition.finished;
-
-  assert.equal(commits, 1);
-  assert.deepEqual(plain(outcome), { committed: true, completed: false, renderer: "webgl2" });
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
-  assert.equal(runtime.canvas.removed, true);
-  assert.equal(gl.lostContexts, 1);
-});
-
-test("platform wave settles and commits after a runtime draw failure", async () => {
-  const gl = fakeGl({ failDrawAt: 1 });
-  const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { commits += 1; },
-  });
-
-  runtime.frame?.(10);
-  const outcome = await transition.finished;
-
-  assert.equal(commits, 1);
-  assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
-  assert.equal(gl.lostContexts, 1);
-});
-
-test("platform wave renders a deterministic full-viewport point matrix without moving the GUI", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl, { innerWidth: 1_200, innerHeight: 800 });
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-  const motionLayer = { style: { transform: "stable", willChange: "auto" } };
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [motionLayer],
-    commit: () => { commits += 1; },
-  });
-
-  assert.equal(gl.uploads.length, 1);
-  const points = gl.uploads[0];
-  assert.ok(points instanceof Float32Array);
-  assert.equal(points.length, 41 * 28 * 2);
-  assert.equal(points.length % 2, 0);
-  assert.equal(points[1], points[3]);
-  assert.notEqual(points[0], points[2]);
-  assert.equal(points[0], points[41 * 2]);
-  assert.notEqual(points[1], points[41 * 2 + 1]);
+  assert.deepEqual(runtime.contextRequests, [{
+    name: "webgl2",
+    options: {
+      alpha: true,
+      antialias: false,
+      depth: false,
+      stencil: false,
+      preserveDrawingBuffer: false,
+      premultipliedAlpha: true,
+      powerPreference: "low-power",
+    },
+  }]);
+  runtime.runFrame(0);
+  assert.deepEqual(gl.drawCalls, [{ mode: gl.TRIANGLES, first: 0, count: 3 }]);
+  assert.equal(gl.createdPrograms, 1);
+  assert.equal(gl.createdVertexArrays, 1);
+  assert.equal(gl.forbiddenCalls.length, 0);
+  assert.match(gl.shaderSources.join("\n"), /gl_VertexID/);
+  assert.match(gl.shaderSources.join("\n"), /fwidth/);
   assert.equal(waveSource.includes("Math.random"), false);
-  assert.equal(waveSource.includes("style.transform"), false);
-  assert.deepEqual(motionLayer.style, { transform: "stable", willChange: "auto" });
+  assert.equal(/\.style\.(?:transform|opacity|filter|willChange)\s*=/.test(waveSource), false);
 
-  runtime.frame?.(2_000);
-  assert.equal(gl.drawCalls.length, 1);
-  assert.deepEqual(gl.drawCalls[0], { mode: gl.POINTS, first: 0, count: 41 * 28 });
-  const firstProgress = gl.uniformScalars.find((entry) => entry.name === "u_progress");
-  assert.equal(firstProgress?.value, 0);
-
-  runtime.frame?.(2_380);
-  assert.equal(commits, 1);
   transition.cancel();
   await transition.finished;
   assert.equal(gl.deletedPrograms.length, 1);
-  assert.equal(gl.deletedBuffers.length, 1);
+  assert.equal(gl.deletedVertexArrays.length, 1);
+  assertClean(runtime);
 });
 
-test("platform wave keeps a bounded but visible matrix on a narrow tall viewport", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl, { innerWidth: 390, innerHeight: 844 });
-  vm.runInNewContext(waveSource, runtime.context);
-  const transition = runtime.context.PlatformWaveTransition.create({ commit() {} });
-
-  const points = gl.uploads[0];
-  assert.equal(points.length, 19 * 30 * 2);
-  assert.ok(points.length / 2 >= 500);
-  assert.ok(points.length / 2 <= 58 * 36);
-  transition.cancel();
-  await transition.finished;
-});
-
-test("platform wave immediately settles when reduced motion becomes active", async () => {
+test("spectral fold commits once at the 326ms fully opaque handoff", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
+  load(runtime);
   let commits = 0;
-  const transition = runtime.context.PlatformWaveTransition.create({ commit: () => { commits += 1; } });
-
-  runtime.triggerMotion(true);
-  const outcome = await transition.finished;
-
-  assert.equal(commits, 1);
-  assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
-  assert.equal(runtime.windowListeners.size, 0);
-  assert.equal(runtime.documentListeners.size, 0);
-  assert.equal(runtime.motionListeners.size, 0);
-  assert.equal(runtime.canvas.removed, true);
-});
-
-test("platform wave immediately settles when the document becomes hidden", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-  const transition = runtime.context.PlatformWaveTransition.create({ commit: () => { commits += 1; } });
-
-  runtime.context.document.hidden = true;
-  runtime.triggerDocument("visibilitychange");
-  const outcome = await transition.finished;
-
-  assert.equal(commits, 1);
-  assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
-  assert.equal(runtime.windowListeners.size, 0);
-  assert.equal(runtime.documentListeners.size, 0);
-  assert.equal(runtime.canvas.removed, true);
-});
-
-test("platform wave context loss commits once and clears DOM state", async () => {
-  const gl = fakeGl();
-  const runtime = waveRuntime(gl);
-  vm.runInNewContext(waveSource, runtime.context);
-  let commits = 0;
-  const transition = runtime.context.PlatformWaveTransition.create({
-    sourcePlatform: "netease",
-    targetPlatform: "qq",
-    motionLayers: [],
-    commit: () => { commits += 1; },
+  const transition = createTransition(runtime, {
+    commit: () => { gl.events.push("commit"); commits += 1; return true; },
   });
 
-  runtime.triggerCanvas("webglcontextlost");
+  runtime.runFrame(1_000);
+  runtime.runFrame(1_325);
+  assert.equal(commits, 0);
+  runtime.runFrame(1_326);
+  assert.equal(commits, 1);
+  assert.deepEqual(gl.events.filter((event) => event === "draw" || event === "commit").slice(-2), ["draw", "commit"]);
+  runtime.runFrame(1_500);
+  runtime.runFrame(1_680);
   const outcome = await transition.finished;
 
   assert.equal(commits, 1);
   assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
-  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
-  assert.equal(runtime.canvas.removed, true);
-  assert.equal(gl.lostContexts, 0);
+  assert.ok(gl.uniformScalars.some(({ name, value }) => name === "u_elapsedMs" && value === 326));
+  assert.match(gl.shaderSources.join("\n"), /elapsedMs\s*>=\s*COVER_END/);
+  assert.match(gl.shaderSources.join("\n"), /alpha\s*=\s*1\.0/);
+  assertClean(runtime);
 });
+
+test("spectral fold cancel before commit preserves source and after commit preserves target", async () => {
+  {
+    const runtime = waveRuntime(fakeGl());
+    load(runtime);
+    let commits = 0;
+    const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+    runtime.runFrame(0);
+    runtime.runFrame(325);
+    transition.cancel();
+    assert.deepEqual(plain(await transition.finished), {
+      committed: false,
+      completed: false,
+      renderer: "webgl2",
+    });
+    assert.equal(commits, 0);
+    assertClean(runtime);
+  }
+
+  {
+    const runtime = waveRuntime(fakeGl());
+    load(runtime);
+    let commits = 0;
+    const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+    runtime.runFrame(0);
+    runtime.runFrame(326);
+    transition.cancel();
+    assert.deepEqual(plain(await transition.finished), {
+      committed: true,
+      completed: false,
+      renderer: "webgl2",
+    });
+    assert.equal(commits, 1);
+    assertClean(runtime);
+  }
+});
+
+test("spectral fold preserves commit false and commit errors without hanging", async () => {
+  {
+    const runtime = waveRuntime(fakeGl());
+    load(runtime);
+    let commits = 0;
+    const transition = createTransition(runtime, { commit: () => { commits += 1; return false; } });
+    runtime.runFrame(0);
+    runtime.runFrame(326);
+    assert.deepEqual(plain(await transition.finished), {
+      committed: false,
+      completed: true,
+      renderer: "webgl2",
+    });
+    assert.equal(commits, 1);
+    assertClean(runtime);
+  }
+
+  {
+    const runtime = waveRuntime(fakeGl());
+    load(runtime);
+    const transition = createTransition(runtime, {
+      commit: () => { throw new Error("synthetic commit failure"); },
+    });
+    runtime.runFrame(0);
+    runtime.runFrame(680);
+    const outcome = await transition.finished;
+    assert.equal(outcome.committed, false);
+    assert.equal(outcome.completed, true);
+    assert.equal(outcome.renderer, "webgl2");
+    assert.match(String(outcome.commitError), /synthetic commit failure/);
+    assertClean(runtime);
+  }
+});
+
+test("spectral fold immediately commits and releases every partial setup failure", async (t) => {
+  const cases: Array<[string, GlFailure | RuntimeFailure]> = [
+    ["getContext throw", { runtime: "getContext" }],
+    ["getContext null", { runtime: "nullContext" }],
+    ["shader allocation", { gl: "shader" }],
+    ["shader compile", { gl: "compile" }],
+    ["program allocation", { gl: "program" }],
+    ["program link", { gl: "link" }],
+    ["VAO allocation", { gl: "vao" }],
+    ["append", { runtime: "append" }],
+    ["initial resize", { gl: "viewport" }],
+  ];
+  for (const [name, failure] of cases) {
+    await t.test(name, async () => {
+      const gl = fakeGl("gl" in failure ? failure.gl : undefined);
+      const runtime = waveRuntime(gl, "runtime" in failure ? { failRuntime: failure.runtime } : {});
+      load(runtime);
+      let commits = 0;
+      const outcome = await createTransition(runtime, {
+        commit: () => { commits += 1; return true; },
+      }).finished;
+      assert.equal(commits, 1);
+      assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "none" });
+      assertClean(runtime);
+    });
+  }
+});
+
+test("spectral fold converts draw and resize exceptions into an immediate committed settlement", async (t) => {
+  for (const failure of ["draw", "viewport"] as const) {
+    await t.test(failure, async () => {
+      const gl = fakeGl(failure === "draw" ? "draw" : undefined);
+      const runtime = waveRuntime(gl);
+      load(runtime);
+      let commits = 0;
+      const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+      if (failure === "draw") runtime.runFrame(0);
+      else {
+        gl.failViewport = true;
+        runtime.triggerWindow("resize");
+      }
+      assert.deepEqual(plain(await transition.finished), {
+        committed: true,
+        completed: true,
+        renderer: "webgl2",
+      });
+      assert.equal(commits, 1);
+      assertClean(runtime);
+    });
+  }
+});
+
+test("spectral fold releases a fully initialized renderer when the first RAF request throws", async () => {
+  const gl = fakeGl();
+  const runtime = waveRuntime(gl, { failRuntime: "initialRaf" });
+  load(runtime);
+  let commits = 0;
+  const outcome = await createTransition(runtime, {
+    commit: () => { commits += 1; return true; },
+  }).finished;
+
+  assert.equal(commits, 1);
+  assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
+  assert.equal(gl.deletedPrograms.length, 1);
+  assert.equal(gl.deletedVertexArrays.length, 1);
+  assert.equal(gl.lostContexts, 1);
+  assertClean(runtime);
+});
+
+test("spectral fold responds to context loss before and after handoff exactly once", async () => {
+  for (const afterCommit of [false, true]) {
+    const gl = fakeGl();
+    const runtime = waveRuntime(gl);
+    load(runtime);
+    let commits = 0;
+    const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+    runtime.runFrame(0);
+    if (afterCommit) runtime.runFrame(326);
+    runtime.triggerCanvas("webglcontextlost");
+    runtime.triggerCanvas("webglcontextlost");
+    assert.deepEqual(plain(await transition.finished), {
+      committed: true,
+      completed: true,
+      renderer: "webgl2",
+    });
+    assert.equal(commits, 1);
+    assert.equal(gl.deletedPrograms.length, 0);
+    assert.equal(gl.deletedVertexArrays.length, 0);
+    assert.equal(gl.lostContexts, 0);
+    assertClean(runtime);
+  }
+});
+
+test("spectral fold settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
+  for (const trigger of ["motion", "hidden"] as const) {
+    await t.test(trigger, async () => {
+      const runtime = waveRuntime(fakeGl());
+      load(runtime);
+      let commits = 0;
+      const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+      if (trigger === "motion") runtime.triggerMotion(true);
+      else {
+        runtime.context.document.hidden = true;
+        runtime.triggerDocument("visibilitychange");
+      }
+      assert.equal((await transition.finished).committed, true);
+      assert.equal(commits, 1);
+      assertClean(runtime);
+    });
+  }
+
+  await t.test("pagehide before handoff cancels without commit", async () => {
+    const runtime = waveRuntime(fakeGl());
+    load(runtime);
+    let commits = 0;
+    const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+    runtime.triggerWindow("pagehide");
+    assert.deepEqual(plain(await transition.finished), {
+      committed: false,
+      completed: false,
+      renderer: "webgl2",
+    });
+    assert.equal(commits, 0);
+    assertClean(runtime);
+  });
+
+  await t.test("pagehide after handoff preserves committed target", async () => {
+    const runtime = waveRuntime(fakeGl());
+    load(runtime);
+    let commits = 0;
+    const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+    runtime.runFrame(0);
+    runtime.runFrame(326);
+    runtime.triggerWindow("pagehide");
+    assert.equal((await transition.finished).committed, true);
+    assert.equal(commits, 1);
+    assertClean(runtime);
+  });
+});
+
+test("spectral fold resize preserves its clock, commit count, DPR cap, and pixel budget", async () => {
+  const gl = fakeGl();
+  const runtime = waveRuntime(gl, {
+    innerWidth: 3_840,
+    innerHeight: 2_160,
+    devicePixelRatio: 3,
+  });
+  load(runtime);
+  let commits = 0;
+  const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
+
+  runtime.runFrame(10_000);
+  runtime.context.innerWidth = 1_920;
+  runtime.context.innerHeight = 1_080;
+  runtime.triggerWindow("resize");
+  runtime.runFrame(10_325);
+  assert.equal(commits, 0);
+  runtime.runFrame(10_326);
+  assert.equal(commits, 1);
+  runtime.triggerWindow("resize");
+  runtime.runFrame(10_680);
+  await transition.finished;
+
+  for (const [width, height] of runtime.canvasSizes) {
+    assert.ok(width * height <= 1_600_000);
+  }
+  assert.ok(runtime.firstCanvasSize.width < Math.round(3_840 * 1.25));
+  assert.ok(runtime.firstCanvasSize.height < Math.round(2_160 * 1.25));
+  assert.equal(commits, 1);
+  assertClean(runtime);
+});
+
+test("spectral fold fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
+  const gl = fakeGl();
+  const runtime = waveRuntime(gl);
+  load(runtime);
+  const transition = createTransition(runtime);
+  runtime.runFrame(0);
+  runtime.runFrame(680);
+  await transition.finished;
+
+  assert.equal(runtime.cancelledFrames.length, 1);
+  assert.equal(gl.deletedPrograms.length, 1);
+  assert.equal(gl.deletedVertexArrays.length, 1);
+  assert.equal(gl.lostContexts, 1);
+  assert.equal(runtime.canvas.width, 1);
+  assert.equal(runtime.canvas.height, 1);
+  assertClean(runtime);
+});
+
+type RuntimeFailure = { runtime: "getContext" | "nullContext" | "append" };
+type GlFailure = { gl: "shader" | "compile" | "program" | "link" | "vao" | "viewport" };
+
+function createTransition(runtime: ReturnType<typeof waveRuntime>, overrides: Record<string, unknown> = {}) {
+  return runtime.context.PlatformWaveTransition.create({
+    sourcePlatform: "netease",
+    targetPlatform: "qq",
+    direction: 1,
+    sourceAnchor: { x: 0.25, y: 0.04 },
+    targetAnchor: { x: 0.75, y: 0.04 },
+    commit: () => true,
+    ...overrides,
+  });
+}
+
+function load(runtime: ReturnType<typeof waveRuntime>) {
+  vm.runInNewContext(waveSource, runtime.context);
+}
 
 function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
   reducedMotion?: boolean;
   innerWidth?: number;
   innerHeight?: number;
+  devicePixelRatio?: number;
+  failRuntime?: "getContext" | "nullContext" | "append" | "initialRaf";
 } = {}) {
   const bodyClasses = new Set<string>();
   const bodyAttributes = new Map<string, string>();
@@ -271,18 +378,38 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
   const windowListeners = new Map<string, (...args: any[]) => void>();
   const documentListeners = new Map<string, (...args: any[]) => void>();
   const motionListeners = new Map<string, (...args: any[]) => void>();
+  const contextRequests: Array<{ name: string; options: Record<string, unknown> }> = [];
+  const canvasSizes: Array<[number, number]> = [];
+  const cancelledFrames: number[] = [];
+  let canvasWidth = 0;
+  let canvasHeight = 0;
+  let frame: ((now: number) => void) | undefined;
+  let frameId = 0;
   const canvas = {
     className: "",
-    width: 0,
-    height: 0,
-    removed: false,
+    removed: true,
+    set width(value: number) {
+      canvasWidth = value;
+    },
+    get width() { return canvasWidth; },
+    set height(value: number) {
+      canvasHeight = value;
+      if (canvasWidth > 0) canvasSizes.push([canvasWidth, canvasHeight]);
+    },
+    get height() { return canvasHeight; },
     setAttribute() {},
-    getContext: () => gl,
-    addEventListener(name: string, listener: (event: { preventDefault(): void }) => void) { canvasListeners.set(name, listener); },
+    getContext(name: string, contextOptions: Record<string, unknown>) {
+      contextRequests.push({ name, options: { ...contextOptions } });
+      if (options.failRuntime === "getContext") throw new Error("synthetic getContext failure");
+      if (options.failRuntime === "nullContext") return null;
+      return gl;
+    },
+    addEventListener(name: string, listener: (event: { preventDefault(): void }) => void) {
+      canvasListeners.set(name, listener);
+    },
     removeEventListener(name: string) { canvasListeners.delete(name); },
     remove() { this.removed = true; },
   };
-  let frame: ((now: number) => void) | undefined;
   const motion = {
     matches: Boolean(options.reducedMotion),
     addEventListener(name: string, listener: (...args: any[]) => void) { motionListeners.set(name, listener); },
@@ -296,14 +423,17 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
     Object,
     Error,
     WebGL2RenderingContext: class {},
-    HTMLElement: class {},
     innerWidth: options.innerWidth ?? 1_200,
     innerHeight: options.innerHeight ?? 800,
-    devicePixelRatio: 2,
-    performance: { now: () => 0 },
+    devicePixelRatio: options.devicePixelRatio ?? 2,
     matchMedia: () => motion,
-    requestAnimationFrame(callback: (now: number) => void) { frame = callback; return 1; },
-    cancelAnimationFrame() {},
+    requestAnimationFrame(callback: (now: number) => void) {
+      if (options.failRuntime === "initialRaf" && frameId === 0) throw new Error("synthetic RAF failure");
+      frame = callback;
+      frameId += 1;
+      return frameId;
+    },
+    cancelAnimationFrame(id: number) { cancelledFrames.push(id); },
     addEventListener(name: string, listener: (...args: any[]) => void) { windowListeners.set(name, listener); },
     removeEventListener(name: string) { windowListeners.delete(name); },
     document: {
@@ -312,7 +442,10 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
       addEventListener(name: string, listener: (...args: any[]) => void) { documentListeners.set(name, listener); },
       removeEventListener(name: string) { documentListeners.delete(name); },
       body: {
-        append() { canvas.removed = false; },
+        append() {
+          if (options.failRuntime === "append") throw new Error("synthetic append failure");
+          canvas.removed = false;
+        },
         classList: {
           add: (value: string) => bodyClasses.add(value),
           remove: (value: string) => bodyClasses.delete(value),
@@ -328,89 +461,122 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
     canvas,
     bodyClasses,
     bodyAttributes,
+    canvasListeners,
     windowListeners,
     documentListeners,
     motionListeners,
-    get frame() { return frame; },
+    contextRequests,
+    canvasSizes,
+    cancelledFrames,
+    get firstCanvasSize() {
+      const first = canvasSizes.find(([width, height]) => width > 1 && height > 1) ?? [0, 0];
+      return { width: first[0], height: first[1] };
+    },
+    runFrame(now: number) {
+      const active = frame;
+      assert.ok(active, "expected an active animation frame");
+      active(now);
+    },
     triggerCanvas(name: string) { canvasListeners.get(name)?.({ preventDefault() {} }); },
     triggerDocument(name: string) { documentListeners.get(name)?.(); },
-    triggerMotion(matches: boolean) { motion.matches = matches; motionListeners.get("change")?.({ matches }); },
+    triggerWindow(name: string) { windowListeners.get(name)?.({}); },
+    triggerMotion(matches: boolean) {
+      motion.matches = matches;
+      motionListeners.get("change")?.({ matches });
+    },
   };
 }
 
-function fakeGl(options: { failProgramAt?: number; failBufferAt?: number; failDrawAt?: number } = {}) {
+function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "viewport" | "draw") {
   let programCount = 0;
-  let bufferCount = 0;
-  let drawCount = 0;
+  let vaoCount = 0;
   let lostContexts = 0;
+  let shaderCount = 0;
   const deletedPrograms: object[] = [];
-  const deletedBuffers: object[] = [];
-  const uploads: Float32Array[] = [];
+  const deletedVertexArrays: object[] = [];
   const drawCalls: Array<{ mode: number; first: number; count: number }> = [];
   const uniformScalars: Array<{ name?: string; value: number }> = [];
-  return {
+  const shaderSources: string[] = [];
+  const forbiddenCalls: string[] = [];
+  const events: string[] = [];
+  const gl = {
     VERTEX_SHADER: 1,
     FRAGMENT_SHADER: 2,
     COMPILE_STATUS: 3,
     LINK_STATUS: 4,
-    ARRAY_BUFFER: 5,
-    STATIC_DRAW: 6,
-    COLOR_BUFFER_BIT: 7,
-    BLEND: 8,
-    ONE: 9,
-    ONE_MINUS_SRC_ALPHA: 10,
-    TRIANGLE_STRIP: 11,
-    POINTS: 12,
-    FLOAT: 13,
+    COLOR_BUFFER_BIT: 5,
+    TRIANGLES: 6,
     deletedPrograms,
-    deletedBuffers,
-    uploads,
+    deletedVertexArrays,
     drawCalls,
     uniformScalars,
+    shaderSources,
+    forbiddenCalls,
+    events,
+    failViewport: false,
     get createdPrograms() { return programCount; },
+    get createdVertexArrays() { return vaoCount; },
     get lostContexts() { return lostContexts; },
     getExtension(name: string) {
       return name === "WEBGL_lose_context" ? { loseContext() { lostContexts += 1; } } : null;
     },
-    createShader: () => ({}),
-    shaderSource() {},
+    createShader() {
+      shaderCount += 1;
+      return failure === "shader" && shaderCount === 2 ? null : {};
+    },
+    shaderSource(_shader: object, source: string) { shaderSources.push(source); },
     compileShader() {},
-    getShaderParameter: () => true,
-    getShaderInfoLog: () => "",
+    getShaderParameter: () => failure !== "compile",
+    getShaderInfoLog: () => "synthetic shader failure",
     deleteShader() {},
     createProgram() {
       programCount += 1;
-      return options.failProgramAt === programCount ? null : {};
+      return failure === "program" ? null : {};
     },
     attachShader() {},
     linkProgram() {},
-    getProgramParameter: () => true,
-    getProgramInfoLog: () => "",
+    getProgramParameter: () => failure !== "link",
+    getProgramInfoLog: () => "synthetic link failure",
     deleteProgram(value: object) { deletedPrograms.push(value); },
-    createBuffer() {
-      bufferCount += 1;
-      return options.failBufferAt === bufferCount ? null : {};
+    createVertexArray() {
+      vaoCount += 1;
+      return failure === "vao" ? null : {};
     },
-    deleteBuffer(value: object) { deletedBuffers.push(value); },
-    bindBuffer() {},
-    bufferData(_target: number, value: Float32Array) { uploads.push(new Float32Array(value)); },
+    bindVertexArray() {},
+    deleteVertexArray(value: object) { deletedVertexArrays.push(value); },
     getUniformLocation: (_program: object, name: string) => ({ name }),
-    viewport() {},
+    viewport() {
+      if (failure === "viewport" || gl.failViewport) throw new Error("synthetic viewport failure");
+    },
     uniform1f(location: { name?: string }, value: number) { uniformScalars.push({ name: location?.name, value }); },
+    uniform2f() {},
     uniform3fv() {},
     clearColor() {},
     clear() {},
-    enable() {},
-    blendFunc() {},
     useProgram() {},
-    enableVertexAttribArray() {},
-    vertexAttribPointer() {},
     drawArrays(mode: number, first: number, count: number) {
-      drawCount += 1;
+      events.push("draw");
       drawCalls.push({ mode, first, count });
-      if (options.failDrawAt === drawCount) throw new Error("synthetic draw failure");
+      if (failure === "draw") throw new Error("synthetic draw failure");
     },
+    createBuffer() { forbiddenCalls.push("createBuffer"); return {}; },
+    bindBuffer() { forbiddenCalls.push("bindBuffer"); },
+    bufferData() { forbiddenCalls.push("bufferData"); },
+    createTexture() { forbiddenCalls.push("createTexture"); return {}; },
+    createFramebuffer() { forbiddenCalls.push("createFramebuffer"); return {}; },
+    readPixels() { forbiddenCalls.push("readPixels"); },
   };
+  return gl;
+}
+
+function assertClean(runtime: ReturnType<typeof waveRuntime>) {
+  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
+  assert.equal(runtime.bodyAttributes.has("aria-busy"), false);
+  assert.equal(runtime.canvas.removed, true);
+  assert.equal(runtime.canvasListeners.size, 0);
+  assert.equal(runtime.windowListeners.size, 0);
+  assert.equal(runtime.documentListeners.size, 0);
+  assert.equal(runtime.motionListeners.size, 0);
 }
 
 function plain(value: unknown): unknown {

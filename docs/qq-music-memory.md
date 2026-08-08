@@ -2,7 +2,7 @@
 
 本文件只维护当前已实现的 QQ 音乐领域事实、共享边界和安全不变量，不记录旧共享实现、浏览器验收或发布结论。QQ 代码改变身份、上游接口、分页、并发、代理、状态、结果或活动语义时，必须在同一修改阶段更新本文件并删除过时描述。
 
-QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；当前源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
+`docs/qq-music-integration-design.md` 仅保留历史迁移与设计决策；当前实现契约只以本文件、`qq-music-architecture.md`、源码和测试为准。不得把历史文档中的旧共享实现、版本基线或交付状态重新复制为当前事实。共享接线的当前事实只在文末专章维护。
 
 本文件和本地测试只记录实现契约，不代表任何 commit、push、Release 或安装包已经存在；发布状态必须以 Git 与 GitHub Release 的实际记录为准。
 
@@ -11,9 +11,9 @@ QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基�
 ## 产品边界
 
 - QQ 音乐是独立平台适配。它不复用网易云的时间游标、时间分片、source state、target-v3 JSONL 或歌曲覆盖账本。
-- 首发任务只有 `song` 和 `likes`：指定一首 QQ 歌曲扫描，或发现公开“我喜欢”歌曲后跨歌曲扫描。
-- 首发目标输入为数字 QQ 号、QQ 音乐个人主页 URL 或 `EncryptUin`；评论作者只按完整 `EncryptUin` 精确相等匹配。
-- 首发不保存 QQ Cookie/musickey，不做扫码登录、私密喜欢列表、未经验证的公开听歌记录或同一歌曲多页并发。
+- 当前任务只有 `song` 和 `likes`：指定一首 QQ 歌曲扫描，或发现公开“我喜欢”歌曲后跨歌曲扫描。
+- 当前目标输入为数字 QQ 号、QQ 音乐个人主页 URL 或 `EncryptUin`；评论作者只按完整 `EncryptUin` 精确相等匹配。
+- 当前不保存 QQ Cookie/musickey，不做扫码登录、私密喜欢列表、未经验证的公开听歌记录或同一歌曲多页并发。
 - QQ CGI 不是稳定公开 SDK。常规测试必须使用 stub 或回环服务；未经用户明确要求，不做高频实网验证。
 
 ## 模块所有权
@@ -61,8 +61,8 @@ page 2, cursor B  -> ...
 ## 代理、故障切换与取消
 
 - `maxProxyLanes=0` 使用全部有序已验证出口；正数只限制本任务子集，不缩容或重建共享池。
-- 共享池现有验证只证明出口/IP 和网易云探测通过，不代表 QQ 域已验证；UI 不得把它标记为“QQ 已验证”。首发不增加强制 QQ 启动探针。
-- 每次 QQ 请求都必须独立 fail-closed。HTTP 转发和 HTTPS CONNECT 的拒绝、超时、取消或永久代理错误都不能回退本机直连。
+- 共享池现有验证只证明出口/IP 和网易云探测通过，不代表 QQ 域已验证；UI 不得把它标记为“QQ 已验证”。当前不增加强制 QQ 启动探针。
+- 使用共享池或显式代理承载 QQ 请求时必须独立 fail-closed。HTTP 转发和 HTTPS CONNECT 的拒绝、超时、取消或永久代理错误都不能回退本机直连；只有用户明确启用 `allowDirect` 且任务没有选择代理承载时才允许直连。
 - 普通网络或可重试上游失败保留工作并触发 LaneRecovery；永久代理 4xx（不含限流/可重试状态）只下线当前 Lane，原 cursor 交给健康 Lane。
 - `403/429` 按 Governor 冷却语义结算并保留工作。全部 Lane 不可用时任务明确 `paused` 并保留检查点。
 - Scanner 同时接受外部任务 signal，并以共享 Gate signal 作为内部取消屏障：外部 abort 会取消全部 Lane/Governor/Gate；Gate abort 会停止队列、LaneAllocator、LaneRecovery 和槽位等待。`executeLane` 在请求前后检查 Gate，JSONL `sync()` 后、状态提交前再次检查同一任务屏障；停止后不得迟到启动请求、提交页状态或重新入队。
@@ -140,9 +140,9 @@ data/logs/qq-<job-id>.jsonl
 - 平台切换只改变 workbench 内容、主题、模式和请求归属，不改变共享外壳几何。网易云与 QQ 桌面端共用紧凑图标 rail、导航项尺寸和任务抽屉锚点；QQ 不展开 rail 或常驻显示导航文字。横向或纵向缩放不得让顶栏、平台 tabs、窗口按钮、rail、任务栏、drawer 和 inspector 相互碰撞；overlay 模式中的 drawer 与 inspector 互斥，宽表格与长面板在自身容器内滚动。
 - 平台切换同时推进 platform/mode 版本，旧 mode 动画和启动响应只能提交到原 owner/view；mode 改变会立即绘制目标 view 的缓存/空快照。离开平台或从 `parallel/song` 切到兄弟 mode 会取消对应歌曲 lookup，但不取消正式扫描；QQ lookup 的 busy 栅栏不在取消时预先释放，而在请求真正结算的异步 `finally` 中移除 controller。完成的平台过渡若回报 `committed=false` 或激活平台不符，上层会同步应用目标平台、展示、快照与 SSE；重选当前平台也会重绘并刷新。Renderer 只接受匹配 generation；QQ 结果 key 为 `songId:commentId`，SSE 由 route jobId 与事件 generation 双重绑定。
 - QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 直接展示主机上限对应的可调度 Worker，并自动显示每出口许可。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。QQ 不保存登录 Cookie；工作区固定显示“本地服务”并隐藏网易云二维码登录按钮，网易云已保存会话不得串入 QQ 展示。
-- `web/platform-wave.js` 用一次性 WebGL2 规则点阵在 760 ms 内从左下向右上移动浪脊，46% 时提交工作区。网格间距约 30 CSS px，限制为 19–58 列、14–36 行（最多 2088 点）；一个静态 buffer/program 与每帧一次 `POINTS` draw 通过 signed-distance Gaussian crest 和衰减尾波局部托举、放大、提亮点阵。业务 DOM 不写 `transform`/`will-change`，页面位置与滚动值不抖动。使用 `low-power`、DPR `1..1.25`、无抗锯齿/深度缓冲；setup/draw/commit/cleanup 均异常安全并释放 RAF、监听器、buffer、program、context、Canvas。提交前取消不改平台，提交后取消保留新平台；reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都安全结算。
+- `web/platform-wave.js` 用一次性 WebGL2“双域声谱折幕”在约 680 ms 内完成平台交接：源色细载波起音，深色哑光幕与 4–6 条确定性等高线扫入，并在约 326 ms/48% 的全视口不透明帧唯一提交目标工作区，再以目标色揭幕和收束。渲染器只使用 `gl_VertexID` 全屏三角形、一个 program/VAO、每帧一次 `TRIANGLES` draw，不创建 VBO、纹理或 FBO；DPR 不超过 1.25，颜色缓冲不超过 1,600,000 像素。业务 DOM 不写 `transform`/`opacity`/`filter`/`will-change`，共享外壳几何与滚动位置不抖动；目标结果异步回填后会按当前平台代际二次恢复非零滚动坐标，避免空表钳制为 0。切换期间新触发的 WAAPI、弹窗和 Toast 无动画即时呈现，Canvas 是唯一继续变化的元素。提交前取消保留源平台，提交后取消保留目标平台；reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都安全结算并释放 RAF、监听器、VAO、program、context 与 Canvas。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=48`、`platform-wave.js?v=4`、`app.js?v=60`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=49`、`platform-wave.js?v=5`、`app.js?v=61`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 

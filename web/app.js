@@ -83,6 +83,7 @@ let classicDecodeController;
 let classicVerificationController;
 let desiredPlatform = platform;
 let platformTransition;
+let pendingPlatformScrollRestore;
 let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
@@ -97,6 +98,9 @@ const settlementPending = Object.fromEntries(["netease:parallel", "netease:sourc
 const visibleResults = new Map();
 let visibleResultOrder = [];
 const disclosureAnimations = new WeakMap();
+const activeDisclosureDetails = new Set();
+const interfaceAnimations = new Set();
+const fallbackMotionElements = new Set();
 let activeSongsSignature = "";
 const activeSongRows = new Map();
 const inspectorOverlayQuery = matchMedia("(max-width: 1280px)");
@@ -1578,6 +1582,7 @@ function emptyLogRow() {
 function connectResultStream() {
   resultStream?.close();
   resultStream = undefined;
+  if (pageLifecycleSuspended) return;
   const streamView = taskViewKey();
   const view = TASK_VIEWS[streamView];
   const expectedGeneration = resultGenerations[streamView];
@@ -1713,6 +1718,7 @@ function renderResults(liveCommentId) {
     pruneVisibleResults(100);
   }
   el.results.replaceChildren(...(items.length ? items.map((item) => resultRow(item, resultKey(item, resultView) === liveCommentId)) : [emptyRow()]));
+  if (items.length) restorePendingPlatformScroll();
 }
 
 function scheduleResultsRender() {
@@ -2321,7 +2327,7 @@ function applyRememberedTaskTab() {
   setActiveNavigation(tabName);
 }
 
-function applyPlatformPresentation() {
+function applyPlatformPresentation({ announce = false } = {}) {
   document.body.dataset.platform = platform;
   document.body.dataset.mode = mode;
   el.platformIdentity.textContent = platform === "qq" ? "QQ MUSIC WORKSPACE" : "NETEASE WORKSPACE";
@@ -2352,27 +2358,92 @@ function applyPlatformPresentation() {
   applyRememberedTaskTab();
   syncToolbarContext();
   syncResultExportAvailability();
-  el.platformLiveRegion.textContent = platform === "qq" ? "已进入 QQ 音乐工作台" : "已进入网易云音乐工作台";
+  if (announce) {
+    el.platformLiveRegion.textContent = platform === "qq" ? "已进入 QQ 音乐工作台" : "已进入网易云音乐工作台";
+  }
+}
+
+function platformAnchor(item, fallbackX) {
+  if (!item || typeof item.getBoundingClientRect !== "function") return { x: fallbackX, y: 0.04 };
+  const rect = item.getBoundingClientRect();
+  return {
+    x: Math.min(1, Math.max(0, (rect.left + rect.width / 2) / Math.max(1, innerWidth))),
+    y: Math.min(1, Math.max(0, (rect.top + rect.height / 2) / Math.max(1, innerHeight))),
+  };
+}
+
+function capturePlatformScrollState() {
+  const nodes = [...new Set([
+    document.scrollingElement,
+    el.taskSidebar,
+    $('#runtimeInspector'),
+    el.inspectorBody,
+    el.primaryNavigation,
+    $('#globalPlatformSwitch'),
+    ...$$('.tabs'),
+    ...$$('.table-wrap'),
+  ].filter(Boolean))];
+  const positions = nodes.map((node) => ({ node, left: node.scrollLeft, top: node.scrollTop }));
+  const pageLeft = scrollX;
+  const pageTop = scrollY;
+  return () => {
+    for (const entry of positions) {
+      entry.node.scrollLeft = entry.left;
+      entry.node.scrollTop = entry.top;
+    }
+    scrollTo(pageLeft, pageTop);
+  };
+}
+
+function armPlatformScrollRestore(targetPlatform, switchVersion, restore) {
+  if (typeof restore !== "function") return;
+  pendingPlatformScrollRestore = { targetPlatform, switchVersion, restore };
+}
+
+function restorePendingPlatformScroll() {
+  const pending = pendingPlatformScrollRestore;
+  if (!pending) return false;
+  if (pending.switchVersion !== platformSwitchVersion
+    || pending.targetPlatform !== platform
+    || pending.targetPlatform !== desiredPlatform) {
+    pendingPlatformScrollRestore = undefined;
+    return false;
+  }
+  pendingPlatformScrollRestore = undefined;
+  pending.restore();
+  return true;
 }
 
 function createPlatformTransition(targetPlatform, commit) {
+  const tabs = $$('[data-platform-target]');
+  const sourceTab = tabs.find((item) => item.dataset.platformTarget === platform);
+  const targetTab = tabs.find((item) => item.dataset.platformTarget === targetPlatform);
+  const sourceIndex = Math.max(0, tabs.indexOf(sourceTab));
+  const targetIndex = Math.max(0, tabs.indexOf(targetTab));
+  const direction = targetIndex >= sourceIndex ? 1 : -1;
+  const sourceAnchor = platformAnchor(sourceTab, direction > 0 ? 0.25 : 0.75);
+  const targetAnchor = platformAnchor(targetTab, direction > 0 ? 0.75 : 0.25);
   const engine = globalThis.PlatformWaveTransition;
   if (!engine?.create) {
+    let committed = false;
     let commitError;
-    try { commit(); } catch (error) { commitError = error; }
-    return { finished: Promise.resolve({ committed: !commitError, completed: true, renderer: "none", commitError }), cancel() {} };
+    try { committed = commit() === true; } catch (error) { commitError = error; }
+    return { finished: Promise.resolve({ committed, completed: true, renderer: "none", commitError }), cancel() {} };
   }
   try {
     return engine.create({
       sourcePlatform: platform,
       targetPlatform,
-      motionLayers: $$(".platform-motion-layer"),
+      direction,
+      sourceAnchor,
+      targetAnchor,
       commit,
     });
   } catch {
+    let committed = false;
     let commitError;
-    try { commit(); } catch (error) { commitError = error; }
-    return { finished: Promise.resolve({ committed: !commitError, completed: true, renderer: "none", commitError }), cancel() {} };
+    try { committed = commit() === true; } catch (error) { commitError = error; }
+    return { finished: Promise.resolve({ committed, completed: true, renderer: "none", commitError }), cancel() {} };
   }
 }
 
@@ -2395,6 +2466,36 @@ function refreshSelectedTaskPresentation() {
   if ($('.tab.active')?.dataset.tab === "logs") void refreshLogs();
 }
 
+function commitPlatformSelection(value, switchVersion, options = {}) {
+  if (!['netease', 'qq'].includes(value)) return false;
+  if (switchVersion !== undefined && (switchVersion !== platformSwitchVersion || desiredPlatform !== value)) return false;
+  const previousPlatform = platform;
+  const changed = previousPlatform !== value;
+  const restoreFocus = Boolean(options.restoreFocus);
+  try {
+    if (changed) {
+      selectedTabs[previousPlatform] = $('.tab.active')?.dataset.tab || "results";
+      cancelSongLookup(SONG_SEARCHES[previousPlatform]);
+      selectedModes[previousPlatform] = mode;
+      platform = value;
+      mode = selectedModes[platform];
+      modeSwitchVersion += 1;
+    }
+    applyPlatformPresentation({ announce: changed && options.announce !== false });
+    resetVisibleResults();
+    resetVisibleLogs();
+    renderSelectedTaskSnapshot();
+    connectResultStream();
+    if (restoreFocus && changed) $(`[data-platform-target="${platform}"]`)?.focus({ preventScroll: true });
+    return true;
+  } finally {
+    options.restoreScroll?.();
+    if (changed && options.deferScrollRestore) {
+      armPlatformScrollRestore(value, switchVersion, options.restoreScroll);
+    }
+  }
+}
+
 async function switchPlatform(value) {
   if (!["netease", "qq"].includes(value)) return;
   desiredPlatform = value;
@@ -2402,6 +2503,8 @@ async function switchPlatform(value) {
   modeSwitchVersion += 1;
   platformTransition?.cancel();
   platformTransition = undefined;
+  pendingPlatformScrollRestore = undefined;
+  cancelInterfaceMotions();
   if (value === platform) {
     applyPlatformPresentation();
     renderSelectedTaskSnapshot();
@@ -2409,42 +2512,51 @@ async function switchPlatform(value) {
     refreshSelectedTaskPresentation();
     return;
   }
+  const restorePlatformFocus = el.taskSidebar.contains(document.activeElement) || document.activeElement === el.login;
+  const restoreScroll = capturePlatformScrollState();
+  let commitRecovered = false;
   const transition = createPlatformTransition(value, () => {
-    if (switchVersion !== platformSwitchVersion || desiredPlatform !== value) return;
-    const restorePlatformFocus = el.taskSidebar.contains(document.activeElement) || document.activeElement === el.login;
-    selectedTabs[platform] = $('.tab.active')?.dataset.tab || "results";
-    cancelSongLookup(SONG_SEARCHES[platform]);
-    selectedModes[platform] = mode;
-    platform = value;
-    mode = selectedModes[platform];
-    modeSwitchVersion += 1;
-    applyPlatformPresentation();
-    resetVisibleResults();
-    resetVisibleLogs();
-    renderSelectedTaskSnapshot();
-    connectResultStream();
-    if (restorePlatformFocus) $(`[data-platform-target="${platform}"]`)?.focus({ preventScroll: true });
+    const commitOptions = {
+      announce: true,
+      restoreFocus: restorePlatformFocus,
+      restoreScroll,
+      deferScrollRestore: true,
+    };
+    try {
+      return commitPlatformSelection(value, switchVersion, commitOptions);
+    } catch (error) {
+      try {
+        const recovered = commitPlatformSelection(value, switchVersion, commitOptions);
+        if (recovered) {
+          commitRecovered = true;
+          return true;
+        }
+      } catch (recoveryError) {
+        throw recoveryError;
+      }
+      throw error;
+    }
   });
   platformTransition = transition;
   const outcome = await transition.finished;
   if (platformTransition === transition) platformTransition = undefined;
-  if (!outcome.completed || switchVersion !== platformSwitchVersion || desiredPlatform !== value) return;
+  if (switchVersion !== platformSwitchVersion || desiredPlatform !== value) return;
+  if (!outcome.completed) return;
   if (!outcome.committed || platform !== value) {
     try {
-      platform = value;
-      mode = selectedModes[platform];
-      modeSwitchVersion += 1;
-      applyPlatformPresentation();
-      resetVisibleResults();
-      resetVisibleLogs();
-      renderSelectedTaskSnapshot();
-      connectResultStream();
+      if (!commitPlatformSelection(value, switchVersion, {
+        announce: platform !== value,
+        restoreFocus: restorePlatformFocus,
+        restoreScroll,
+        deferScrollRestore: true,
+      })) return;
       toast("平台动画已安全降级，工作台状态已恢复。");
     } catch {
       toast("平台切换未能完成，请重试。");
       return;
     }
   }
+  if (commitRecovered) toast("平台状态已在遮罩内安全收敛。");
   refreshSelectedTaskPresentation();
 }
 
@@ -2492,20 +2604,48 @@ async function slideSwap(outgoing, incoming, direction = 1, shouldCommit = () =>
   ], 240, "cubic-bezier(.2,.8,.2,1)");
   return true;
 }
-async function playMotion(element, frames, duration, easing) {
-  if (typeof element.animate === "function") {
-    const animation = element.animate(frames, { duration, easing });
-    await animation.finished.catch(() => {});
-    return;
-  }
-  Object.assign(element.style, frames[0]);
-  void element.offsetWidth;
-  element.style.transition = `opacity ${duration}ms ${easing}, transform ${duration}ms ${easing}`;
-  Object.assign(element.style, frames[1]);
-  await new Promise((resolve) => setTimeout(resolve, duration));
+
+function clearFallbackMotion(element) {
   element.style.removeProperty("opacity");
   element.style.removeProperty("transform");
   element.style.removeProperty("transition");
+}
+
+function cancelInterfaceMotions() {
+  for (const details of activeDisclosureDetails) {
+    disclosureAnimations.get(details)?.cancel();
+    disclosureAnimations.delete(details);
+    const expanded = details.dataset.expanded === "true";
+    details.open = expanded;
+    details.querySelector(":scope > summary")?.setAttribute("aria-expanded", String(expanded));
+    details.classList.remove("is-animating");
+  }
+  activeDisclosureDetails.clear();
+  for (const animation of interfaceAnimations) animation.cancel();
+  interfaceAnimations.clear();
+  for (const element of fallbackMotionElements) clearFallbackMotion(element);
+  fallbackMotionElements.clear();
+}
+
+async function playMotion(element, frames, duration, easing) {
+  if (document.body.classList.contains("platform-switching")) return;
+  if (typeof element.animate === "function") {
+    const animation = element.animate(frames, { duration, easing });
+    interfaceAnimations.add(animation);
+    await animation.finished.catch(() => {}).finally(() => interfaceAnimations.delete(animation));
+    return;
+  }
+  fallbackMotionElements.add(element);
+  try {
+    Object.assign(element.style, frames[0]);
+    void element.offsetWidth;
+    element.style.transition = `opacity ${duration}ms ${easing}, transform ${duration}ms ${easing}`;
+    Object.assign(element.style, frames[1]);
+    await new Promise((resolve) => setTimeout(resolve, duration));
+  } finally {
+    fallbackMotionElements.delete(element);
+    clearFallbackMotion(element);
+  }
 }
 
 function setupAnimatedDisclosures() {
@@ -2531,10 +2671,13 @@ async function animateDisclosure(details, expanded) {
   if (expanded && !details.open) details.open = true;
   details.dataset.expanded = String(expanded);
   summary.setAttribute("aria-expanded", String(expanded));
-  if (matchMedia("(prefers-reduced-motion: reduce)").matches || typeof content.animate !== "function") {
+  if (document.body.classList.contains("platform-switching")
+    || matchMedia("(prefers-reduced-motion: reduce)").matches
+    || typeof content.animate !== "function") {
     details.open = expanded;
     details.classList.remove("is-animating");
     disclosureAnimations.delete(details);
+    activeDisclosureDetails.delete(details);
     return;
   }
   const endHeight = expanded ? content.scrollHeight : 0;
@@ -2544,11 +2687,15 @@ async function animateDisclosure(details, expanded) {
     { height: `${endHeight}px`, opacity: expanded ? 1 : 0.25, transform: expanded ? "translateY(0)" : "translateY(-6px)" },
   ], { duration: expanded ? 280 : 220, easing: "cubic-bezier(.2,.8,.2,1)", fill: "both" });
   disclosureAnimations.set(details, animation);
+  activeDisclosureDetails.add(details);
+  interfaceAnimations.add(animation);
   await animation.finished.catch(() => {});
+  interfaceAnimations.delete(animation);
   if (disclosureAnimations.get(details) !== animation) return;
   if (!expanded) details.open = false;
   animation.cancel();
   disclosureAnimations.delete(details);
+  activeDisclosureDetails.delete(details);
   details.classList.remove("is-animating");
 }
 
@@ -2916,6 +3063,8 @@ addEventListener("visibilitychange", () => {
 addEventListener("pagehide", () => {
   pageLifecycleSuspended = true;
   platformTransition?.cancel();
+  platformTransition = undefined;
+  cancelInterfaceMotions();
   cancelClassicVerification();
   for (const search of Object.values(SONG_SEARCHES)) {
     clearTimeout(search.timer);
@@ -2931,12 +3080,27 @@ addEventListener("pagehide", () => {
 addEventListener("pageshow", (event) => {
   if (!event.persisted || !pageLifecycleSuspended) return;
   pageLifecycleSuspended = false;
+  let streamConnected = false;
+  if (desiredPlatform !== platform) {
+    try {
+      streamConnected = commitPlatformSelection(desiredPlatform, platformSwitchVersion, {
+        announce: true,
+        restoreScroll: capturePlatformScrollState(),
+        deferScrollRestore: true,
+      });
+    } catch {
+      desiredPlatform = platform;
+      applyPlatformPresentation();
+    }
+  } else {
+    applyPlatformPresentation();
+  }
   inspectorOverlayQuery.addEventListener("change", syncInspectorForViewport);
   syncInspectorForViewport();
   startRuntimeTimer();
   scheduleRefreshLoop(0);
   scheduleAuthRefreshLoop(0);
-  connectResultStream();
+  if (!streamConnected) connectResultStream();
   if (resultsRenderPending) scheduleResultsRender();
 });
 
