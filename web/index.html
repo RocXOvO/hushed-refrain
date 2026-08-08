@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>乐评寻踪</title>
   <link rel="icon" type="image/png" href="/app-icon.png">
-  <link rel="stylesheet" href="/styles.css?v=50">
+  <link rel="stylesheet" href="/styles.css?v=51">
 </head>
 <body class="task-panel-collapsed inspector-collapsed" data-platform="netease" data-mode="parallel">
   <div id="appSplash" class="app-splash" role="status" aria-label="乐评寻踪正在启动">
@@ -29,7 +29,6 @@
     <div class="topbar-end">
       <div class="top-actions">
         <span id="connectionBadge" class="status-badge neutral"><span class="status-dot"></span>本地服务</span>
-        <button id="transitionModeButton" class="button ghost" type="button" title="切换平台动效：对角积木波" aria-label="当前平台动效为对角积木波，点击切换为中心涟漪" data-pattern="diagonal"><img src="/icons/layers-2.svg" alt=""><span>积木波</span></button>
         <button id="updateButton" class="button ghost update-trigger" type="button" title="检查新版本"><img src="/icons/refresh-cw.svg" alt=""><span id="updateButtonLabel">检查更新</span><i id="updateIndicator" aria-label="有新版本" hidden></i></button>
         <button id="loginButton" class="button ghost" type="button" aria-label="二维码登录"><img src="/icons/qr-code.svg" alt=""><span>二维码登录</span></button>
       </div>
@@ -190,7 +189,7 @@
   <dialog id="updateDialog" class="update-dialog"><div class="dialog-heading update-dialog-heading"><div><p class="eyebrow">UPDATE AVAILABLE</p><h2>发现新版本</h2></div><button id="closeUpdateButton" class="icon-button" type="button" title="关闭" aria-label="关闭"><img src="/icons/x.svg" alt=""></button></div><div class="update-content"><div class="update-summary"><span class="update-icon"><img src="/icons/package-open.svg" alt=""></span><div><strong id="updateReleaseName">乐评寻踪</strong><p id="updatePublishedAt">已有新版本可下载</p></div></div><div class="update-version-route"><span id="currentVersionLabel">v0.0.0</span><img src="/icons/arrow-right.svg" alt="升级到"><strong id="latestVersionLabel">v0.0.0</strong></div><div id="updateNotes" class="update-notes">查看 GitHub Release 获取更新内容。</div><p id="updateAsset" class="update-asset"></p><div id="updateProgress" class="update-progress" hidden><div><span id="updateProgressLabel">正在下载安装包</span><strong id="updateProgressPercent">0%</strong></div><span class="update-progress-track"><i id="updateProgressBar"></i></span></div><div class="dialog-actions"><button id="laterUpdateButton" class="button secondary" type="button">稍后提醒</button><a id="downloadUpdateButton" class="button primary" href="#" target="_blank" rel="noreferrer"><img src="/icons/download.svg" alt=""><span>下载更新</span></a></div></div></dialog>
   <dialog id="parameterHelpDialog" class="parameter-help-dialog"><div class="dialog-heading"><div><p class="eyebrow">PARAMETER GUIDE</p><h2 id="parameterHelpTitle">参数说明</h2></div><button id="closeParameterHelpButton" class="icon-button" type="button" title="关闭" aria-label="关闭参数说明"><img src="/icons/x.svg" alt=""></button></div><div class="parameter-help-content"><p id="parameterHelpDescription"></p><div class="dialog-actions"><button id="gotParameterHelpButton" class="button primary" type="button">知道了</button></div></div></dialog>
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
-  <script src="/platform-wave.js?v=6" defer></script>
-  <script src="/app.js?v=62" defer></script>
+  <script src="/platform-wave.js?v=12" defer></script>
+  <script src="/app.js?v=63" defer></script>
 </body>
 </html>

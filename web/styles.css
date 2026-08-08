@@ -952,7 +952,7 @@ dialog::backdrop { background: rgb(20 20 22 / 52%); }
   inset: 0;
   pointer-events: none;
 }
-.platform-wave-canvas { contain: strict; }
+.platform-particle-wave-canvas { contain: strict; }
 body.platform-switching { cursor: progress; }
 body.platform-switching .platform-surface,
 body.platform-switching .platform-surface *,

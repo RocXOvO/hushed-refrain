@@ -483,11 +483,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=50/);
-  assert.match(pageText, /platform-wave\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=62/);
-  assert.match(pageText, /id="transitionModeButton"[^>]*data-pattern="diagonal"/);
-  assert.match(pageText, /当前平台动效为对角积木波，点击切换为中心涟漪/);
+  assert.match(pageText, /styles\.css\?v=51/);
+  assert.match(pageText, /platform-wave\.js\?v=12/);
+  assert.match(pageText, /app\.js\?v=63/);
+  assert.doesNotMatch(pageText, /transitionModeButton|对角积木波|中心涟漪/);
   assert.match(pageText, /id="loginButton"[^>]+aria-label="二维码登录"/);
   assert.match(pageText, /id="globalPlatformSwitch"[^>]*role="tablist"/);
   assert.match(pageText, /data-platform-target="netease"[^>]*aria-controls="neteaseWorkbench"/);
@@ -652,10 +651,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /const expanded = details\.dataset\.expanded === "true";[\s\S]*details\.open = expanded/);
   assert.match(appText, /let commitRecovered = false;[\s\S]*commitPlatformSelection\(value, switchVersion, commitOptions\)[\s\S]*commitRecovered = true/);
   assert.match(appText, /let streamConnected = false;[\s\S]*streamConnected = commitPlatformSelection[\s\S]*if \(!streamConnected\) connectResultStream\(\)/);
-  assert.match(appText, /direction,\s*sourceAnchor,\s*targetAnchor,\s*pattern: platformTransitionPattern,\s*commit/s);
-  assert.match(appText, /ncm-platform-transition-pattern-v1/);
-  assert.match(appText, /platformTransitionPattern === "diagonal" \? "ripple" : "diagonal"/);
-  assert.match(appText, /affectsNextTransition[\s\S]*将在下次平台切换时生效/);
+  assert.match(appText, /sourcePlatform: platform,\s*targetPlatform,\s*direction,\s*commit/s);
+  assert.doesNotMatch(appText, /platformTransitionPattern|transitionModeButton|ncm-platform-transition-pattern-v1|\/api\/preferences/);
   assert.match(appText, /committed = commit\(\) === true/);
   assert.match(appText, /desiredPlatform !== platform[\s\S]*commitPlatformSelection\(desiredPlatform/);
   assert.doesNotMatch(appText, /motionLayers:/);
@@ -678,25 +675,25 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const platformWaveText = await platformWave.text();
   assert.match(platformWaveText, /getContext\("webgl2"/);
   assert.match(platformWaveText, /gl_VertexID/);
+  assert.match(platformWaveText, /gl_InstanceID/);
   assert.match(platformWaveText, /createVertexArray/);
   assert.match(platformWaveText, /gl\.drawArrays\(gl\.TRIANGLES, 0, 3\)/);
+  assert.match(platformWaveText, /gl\.drawArraysInstanced\(gl\.TRIANGLES, 0, 6, particleCount\)/);
   assert.match(platformWaveText, /const DURATION_MS = 680/);
   assert.match(platformWaveText, /const COMMIT_MS = 326/);
   assert.match(platformWaveText, /const MAX_DPR = 1\.25/);
   assert.match(platformWaveText, /const MAX_COLOR_PIXELS = 1_600_000/);
+  assert.match(platformWaveText, /const MAX_PARTICLES = MAX_GRID_COLUMNS \* MAX_GRID_ROWS \+ RING_PARTICLES/);
+  assert.match(platformWaveText, /const RING_SEGMENTS = 240/);
+  assert.match(platformWaveText, /ringParticle = instance >= floorCount/);
   assert.match(platformWaveText, /fwidth/);
-  assert.match(platformWaveText, /vec2 blockGrid = max/);
-  assert.match(platformWaveText, /vec2 blockId = floor\(blockSpace\)/);
-  assert.match(platformWaveText, /vec2 blockLocal = fract\(blockSpace\) - 0\.5/);
-  assert.match(platformWaveText, /float blockOrder/);
-  assert.match(platformWaveText, /float blockMask/);
-  assert.match(platformWaveText, /vec3 blockFace/);
-  assert.match(platformWaveText, /uniform float u_pattern/);
-  assert.match(platformWaveText, /radialPoint = \(center - 0\.5\) \* vec2\(aspect, 1\.0\)/);
-  assert.match(platformWaveText, /float covering = easeInOut\(elapsedMs \/ COVER_END\)/);
-  assert.match(platformWaveText, /float revealing = easeInOut\(\(elapsedMs - COVER_END\) \/ \(RELEASE_END - COVER_END\)\)/);
-  assert.doesNotMatch(platformWaveText, /curtain|contourIndex/);
-  assert.match(platformWaveText, /elapsedMs >= COVER_END[\s\S]*alpha = 1\.0/);
+  assert.match(platformWaveText, /float lemniscateDistance/);
+  assert.match(platformWaveText, /radiusSquared \* radiusSquared - aSquared/);
+  assert.match(platformWaveText, /vec3 camera = vec3\(0\.0, 3\.34, 3\.66\)/);
+  assert.match(platformWaveText, /float backdropAlpha\(\)/);
+  assert.match(platformWaveText, /if \(alpha <= 0\.001\) discard/);
+  assert.match(platformWaveText, /drawAt\(COMMIT_MS\);\s*invokeCommit\(\)/);
+  assert.doesNotMatch(platformWaveText, /u_pattern|blockOrder|blockMask|blockFace|diagonal|ripple|curtain|contourIndex/);
   assert.doesNotMatch(platformWaveText, /Math\.random|POINTS|TRIANGLE_STRIP|createBuffer|createTexture|createFramebuffer|readPixels|translate3d|will-change/);
   assert.match(platformWaveText, /prefers-reduced-motion: reduce/);
   assert.match(platformWaveText, /webglcontextlost/);
@@ -707,6 +704,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(platformWaveText, /function safely/);
   assert.match(platformWaveText, /powerPreference: "low-power"/);
   assert.match(platformWaveText, /WEBGL_lose_context/);
+
+  const removedPreferences = await fetch(`${base}/api/preferences`);
+  assert.equal(removedPreferences.status, 404);
 
   const icon = await fetch(`${base}/icons/search.svg`);
   assert.equal(icon.status, 200);
@@ -872,63 +872,6 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(calibratedValue.pages, 100);
   assert.equal(calibratedValue.estimatedRequests, 125);
   assert.equal(calibratedValue.effectiveWorkers, 4);
-});
-
-test("dashboard persists a validated platform transition preference across loopback ports", async (context) => {
-  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-preferences-"));
-  const firstServer = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
-  context.after(() => new Promise<void>((done) => firstServer.close(() => done())));
-  const firstAddress = firstServer.address() as AddressInfo;
-  const firstBase = `http://127.0.0.1:${firstAddress.port}`;
-  const initial = await fetch(`${firstBase}/api/preferences`);
-  assert.deepEqual(await initial.json(), {
-    version: 1,
-    platformTransitionPattern: "diagonal",
-    updatedAt: new Date(0).toISOString(),
-  });
-  const saved = await fetch(`${firstBase}/api/preferences`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ platformTransitionPattern: "ripple" }),
-  });
-  assert.equal(saved.status, 200);
-  assert.equal((await saved.json() as { platformTransitionPattern: string }).platformTransitionPattern, "ripple");
-  const invalid = await fetch(`${firstBase}/api/preferences`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ platformTransitionPattern: "random" }),
-  });
-  assert.equal(invalid.status, 400);
-
-  const secondServer = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
-  context.after(() => new Promise<void>((done) => secondServer.close(() => done())));
-  const secondAddress = secondServer.address() as AddressInfo;
-  assert.notEqual(secondAddress.port, firstAddress.port);
-  const restored = await fetch(`http://127.0.0.1:${secondAddress.port}/api/preferences`);
-  const restoredPreferences = await restored.json() as { platformTransitionPattern: string; updatedAt: string };
-  assert.equal(restoredPreferences.platformTransitionPattern, "ripple");
-  assert.ok(Number.isFinite(Date.parse(restoredPreferences.updatedAt)));
-  assert.equal(
-    JSON.parse(await readFile(join(runtimeRoot, "data", "ui-preferences.json"), "utf8")).platformTransitionPattern,
-    "ripple",
-  );
-  await writeFile(join(runtimeRoot, "data", "ui-preferences.json"), "{broken-json");
-  const corruptFallback = await fetch(`http://127.0.0.1:${secondAddress.port}/api/preferences`);
-  assert.deepEqual(await corruptFallback.json(), {
-    version: 1,
-    platformTransitionPattern: "diagonal",
-    updatedAt: new Date(0).toISOString(),
-  });
-  await writeFile(join(runtimeRoot, "data", "ui-preferences.json"), JSON.stringify({
-    version: 1,
-    platformTransitionPattern: "ripple",
-    updatedAt: "2026",
-  }));
-  const nonCanonicalDateFallback = await fetch(`http://127.0.0.1:${secondAddress.port}/api/preferences`);
-  assert.equal(
-    (await nonCanonicalDateFallback.json() as { platformTransitionPattern: string }).platformTransitionPattern,
-    "diagonal",
-  );
 });
 
 test("recognizes only local socket addresses for private result reports", () => {

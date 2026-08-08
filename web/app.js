@@ -26,7 +26,7 @@ const el = {
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
   activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
-  appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"), platformSurface: $("#platformSurface"), platformLiveRegion: $("#platformLiveRegion"), transitionMode: $("#transitionModeButton"),
+  appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"), platformSurface: $("#platformSurface"), platformLiveRegion: $("#platformLiveRegion"),
   neteaseWorkbench: $("#neteaseWorkbench"), qqWorkbench: $("#qqWorkbench"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
@@ -84,9 +84,6 @@ let classicVerificationController;
 let desiredPlatform = platform;
 let platformTransition;
 let pendingPlatformScrollRestore;
-let platformTransitionPattern = readTransitionPattern();
-let transitionPreferenceVersion = 0;
-let transitionPreferenceWriteTail = Promise.resolve();
 let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
@@ -2366,15 +2363,6 @@ function applyPlatformPresentation({ announce = false } = {}) {
   }
 }
 
-function platformAnchor(item, fallbackX) {
-  if (!item || typeof item.getBoundingClientRect !== "function") return { x: fallbackX, y: 0.04 };
-  const rect = item.getBoundingClientRect();
-  return {
-    x: Math.min(1, Math.max(0, (rect.left + rect.width / 2) / Math.max(1, innerWidth))),
-    y: Math.min(1, Math.max(0, (rect.top + rect.height / 2) / Math.max(1, innerHeight))),
-  };
-}
-
 function capturePlatformScrollState() {
   const nodes = [...new Set([
     document.scrollingElement,
@@ -2424,8 +2412,6 @@ function createPlatformTransition(targetPlatform, commit) {
   const sourceIndex = Math.max(0, tabs.indexOf(sourceTab));
   const targetIndex = Math.max(0, tabs.indexOf(targetTab));
   const direction = targetIndex >= sourceIndex ? 1 : -1;
-  const sourceAnchor = platformAnchor(sourceTab, direction > 0 ? 0.25 : 0.75);
-  const targetAnchor = platformAnchor(targetTab, direction > 0 ? 0.75 : 0.25);
   const engine = globalThis.PlatformWaveTransition;
   if (!engine?.create) {
     let committed = false;
@@ -2438,9 +2424,6 @@ function createPlatformTransition(targetPlatform, commit) {
       sourcePlatform: platform,
       targetPlatform,
       direction,
-      sourceAnchor,
-      targetAnchor,
-      pattern: platformTransitionPattern,
       commit,
     });
   } catch {
@@ -2449,61 +2432,6 @@ function createPlatformTransition(targetPlatform, commit) {
     try { committed = commit() === true; } catch (error) { commitError = error; }
     return { finished: Promise.resolve({ committed, completed: true, renderer: "none", commitError }), cancel() {} };
   }
-}
-
-function readTransitionPattern() {
-  try {
-    return globalThis.localStorage?.getItem("ncm-platform-transition-pattern-v1") === "ripple"
-      ? "ripple"
-      : "diagonal";
-  } catch {
-    return "diagonal";
-  }
-}
-
-async function restoreTransitionPatternPreference() {
-  const version = transitionPreferenceVersion;
-  try {
-    const saved = await api("/api/preferences");
-    if (version !== transitionPreferenceVersion) return;
-    platformTransitionPattern = saved.platformTransitionPattern === "ripple" ? "ripple" : "diagonal";
-    try { globalThis.localStorage?.setItem("ncm-platform-transition-pattern-v1", platformTransitionPattern); } catch { /* The runtime file remains authoritative. */ }
-    syncTransitionModeButton();
-  } catch {
-    syncTransitionModeButton();
-  }
-}
-
-function persistTransitionPatternPreference(pattern) {
-  transitionPreferenceWriteTail = transitionPreferenceWriteTail
-    .catch(() => undefined)
-    .then(() => api("/api/preferences", {
-      method: "POST",
-      body: JSON.stringify({ platformTransitionPattern: pattern }),
-    }))
-    .catch(() => {
-      if (platformTransitionPattern === pattern) toast("动效已在本次会话生效，但本机偏好保存失败。");
-    });
-}
-
-function syncTransitionModeButton() {
-  const ripple = platformTransitionPattern === "ripple";
-  const currentLabel = ripple ? "中心涟漪" : "对角积木波";
-  const nextLabel = ripple ? "对角积木波" : "中心涟漪";
-  el.transitionMode.dataset.pattern = platformTransitionPattern;
-  el.transitionMode.title = `切换平台动效：${currentLabel}`;
-  el.transitionMode.setAttribute("aria-label", `当前平台动效为${currentLabel}，点击切换为${nextLabel}`);
-  el.transitionMode.querySelector("span").textContent = ripple ? "涟漪" : "积木波";
-}
-
-function toggleTransitionPattern() {
-  const affectsNextTransition = document.body.classList.contains("platform-switching");
-  transitionPreferenceVersion += 1;
-  platformTransitionPattern = platformTransitionPattern === "diagonal" ? "ripple" : "diagonal";
-  try { globalThis.localStorage?.setItem("ncm-platform-transition-pattern-v1", platformTransitionPattern); } catch { /* Keep the in-memory preference. */ }
-  syncTransitionModeButton();
-  persistTransitionPatternPreference(platformTransitionPattern);
-  toast(`平台切换动效已设为${platformTransitionPattern === "ripple" ? "中心涟漪" : "对角积木波"}${affectsNextTransition ? "，将在下次平台切换时生效" : ""}。`);
 }
 
 function renderSelectedTaskSnapshot() {
@@ -2960,7 +2888,7 @@ function dismissSplash() {
 }
 
 async function boot() {
-  await Promise.all([setupDesktopUpdates(), restoreTransitionPatternPreference()]);
+  await setupDesktopUpdates();
   const restored = await restoreResumeTask();
   connectResultStream();
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
@@ -3031,7 +2959,6 @@ $("#closeSettlementButton").addEventListener("click", () => el.settlementDialog.
 $("#viewSettlementLogsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("logs")) void refreshLogs(); });
 $("#viewSettlementResultsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("results")) void refreshResults(); });
 el.updateButton.addEventListener("click", () => void checkUpdates(true));
-el.transitionMode.addEventListener("click", toggleTransitionPattern);
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
 $("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
 el.updateDownload.addEventListener("click", (event) => void activateUpdate(event));
@@ -3071,7 +2998,6 @@ $$('.tab').forEach((tab) => {
   });
 });
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
-syncTransitionModeButton();
 configureModeSwitch();
 syncModeVisibility();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));

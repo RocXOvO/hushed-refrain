@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 const waveSource = readFileSync(join(process.cwd(), "web", "platform-wave.js"), "utf8");
 
-test("modular block transition honors reduced motion without requesting WebGL", async () => {
+test("particle wave transition honors reduced motion without requesting WebGL", async () => {
   const runtime = waveRuntime(fakeGl(), { reducedMotion: true });
   load(runtime);
   let commits = 0;
@@ -24,7 +24,7 @@ test("modular block transition honors reduced motion without requesting WebGL", 
   assertClean(runtime);
 });
 
-test("modular block transition uses the frozen WebGL2 context and one fullscreen triangle", async () => {
+test("particle wave transition uses one backing pass and one bounded instanced field", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -35,7 +35,7 @@ test("modular block transition uses the frozen WebGL2 context and one fullscreen
     options: {
       alpha: true,
       antialias: false,
-      depth: false,
+      depth: true,
       stencil: false,
       preserveDrawingBuffer: false,
       premultipliedAlpha: true,
@@ -43,18 +43,26 @@ test("modular block transition uses the frozen WebGL2 context and one fullscreen
     },
   }]);
   runtime.runFrame(0);
-  assert.deepEqual(gl.drawCalls, [{ mode: gl.TRIANGLES, first: 0, count: 3 }]);
+  assert.deepEqual(gl.drawCalls, [
+    { kind: "arrays", mode: gl.TRIANGLES, first: 0, count: 3 },
+    { kind: "instanced", mode: gl.TRIANGLES, first: 0, count: 6, instances: 4_388 },
+  ]);
   assert.equal(gl.createdPrograms, 1);
   assert.equal(gl.createdVertexArrays, 1);
   assert.equal(gl.forbiddenCalls.length, 0);
   assert.ok(gl.uniformPairs.some(({ name, x, y }) => name === "u_resolution" && x === 1_200 && y === 800));
   assert.match(gl.shaderSources.join("\n"), /gl_VertexID/);
-  assert.match(gl.shaderSources.join("\n"), /fwidth/);
-  assert.match(gl.shaderSources.join("\n"), /blockGrid/);
-  assert.match(gl.shaderSources.join("\n"), /floor\(blockSpace\)/);
-  assert.match(gl.shaderSources.join("\n"), /fract\(blockSpace\) - 0\.5/);
-  assert.match(gl.shaderSources.join("\n"), /blockFace/);
-  assert.doesNotMatch(gl.shaderSources.join("\n"), /curtain|contourIndex/);
+  assert.match(gl.shaderSources.join("\n"), /gl_InstanceID/);
+  assert.match(gl.shaderSources.join("\n"), /lemniscateDistance/);
+  assert.match(gl.shaderSources.join("\n"), /particleCorner/);
+  assert.match(gl.shaderSources.join("\n"), /vec3 camera = vec3\(0\.0, 3\.34, 3\.66\)/);
+  assert.match(gl.shaderSources.join("\n"), /fwidth\(distanceToBar\)/);
+  assert.match(gl.shaderSources.join("\n"), /if \(alpha <= 0\.001\) discard/);
+  assert.match(waveSource, /MAX_PARTICLES = MAX_GRID_COLUMNS \* MAX_GRID_ROWS \+ RING_PARTICLES/);
+  assert.match(gl.shaderSources.join("\n"), /ringParticle = instance >= floorCount/);
+  assert.match(gl.shaderSources.join("\n"), /1\.98 \* sin\(ringPhase\), 1\.60 \* sin\(ringPhase\) \* cos\(ringPhase\)/);
+  assert.match(waveSource, /gl\.drawArraysInstanced\(gl\.TRIANGLES, 0, 6, particleCount\)/);
+  assert.doesNotMatch(gl.shaderSources.join("\n"), /u_pattern|blockOrder|blockMask|blockFace/);
   assert.equal(waveSource.includes("Math.random"), false);
   assert.equal(/\.style\.(?:transform|opacity|filter|willChange)\s*=/.test(waveSource), false);
 
@@ -65,94 +73,59 @@ test("modular block transition uses the frozen WebGL2 context and one fullscreen
   assertClean(runtime);
 });
 
-test("modular block transition supports a reversible diagonal wave and an aspect-correct ripple", async () => {
-  const diagonalGl = fakeGl();
-  const diagonalRuntime = waveRuntime(diagonalGl);
-  load(diagonalRuntime);
-  const diagonal = createTransition(diagonalRuntime, { direction: -1 });
-  diagonalRuntime.runFrame(0);
-  assert.ok(diagonalGl.uniformScalars.some(({ name, value }) => name === "u_pattern" && value === 0));
-  assert.ok(diagonalGl.uniformScalars.some(({ name, value }) => name === "u_direction" && value === -1));
-  diagonal.cancel();
-  await diagonal.finished;
-  assertClean(diagonalRuntime);
+test("particle wave mirrors only its travel direction and keeps a deterministic perspective field", async () => {
+  const gl = fakeGl();
+  const runtime = waveRuntime(gl, { innerWidth: 390, innerHeight: 844 });
+  load(runtime);
+  const transition = createTransition(runtime, { direction: -1 });
+  runtime.runFrame(0);
 
-  const rippleGl = fakeGl();
-  const rippleRuntime = waveRuntime(rippleGl, { innerWidth: 390, innerHeight: 844 });
-  load(rippleRuntime);
-  const ripple = createTransition(rippleRuntime, { pattern: "ripple" });
-  rippleRuntime.runFrame(0);
-  assert.ok(rippleGl.uniformScalars.some(({ name, value }) => name === "u_pattern" && value === 1));
-  const shader = rippleGl.shaderSources.join("\n");
-  assert.match(shader, /\(center\.x \+ center\.y\) \* 0\.5/);
-  assert.match(shader, /radialPoint = \(center - 0\.5\) \* vec2\(aspect, 1\.0\)/);
-  assert.match(shader, /length\(radialPoint\) \/ radialMaximum/);
-  assert.match(shader, /mix\(diagonal \+ diagonalWave, radius \+ rippleWave, step\(0\.5, u_pattern\)\)/);
-  ripple.cancel();
-  await ripple.finished;
-  assertClean(rippleRuntime);
+  assert.ok(gl.uniformScalars.some(({ name, value }) => name === "u_direction" && value === -1));
+  assert.ok(gl.uniformPairs.some(({ name, x, y }) => name === "u_grid" && x === 28 && y === 47));
+  assert.deepEqual(gl.drawCalls.at(-1), {
+    kind: "instanced",
+    mode: gl.TRIANGLES,
+    first: 0,
+    count: 6,
+    instances: 2_756,
+  });
+  const shader = gl.shaderSources.join("\n");
+  assert.match(shader, /radiusSquared \* radiusSquared - aSquared \* \(p\.x \* p\.x - p\.y \* p\.y\)/);
+  assert.match(shader, /if \(ringParticle\) height = 0\.18 \+ grain \* 0\.040/);
+  assert.match(shader, /sceneScaleX = min\(1\.0, aspect \/ 1\.35\)/);
+  assert.match(shader, /view\.x \* focalLength \/ aspect/);
+  assert.match(shader, /mix\(u_sourceAccent, u_targetAccent, v_themeMix\)/);
+  assert.equal(waveSource.includes("Math.random"), false);
+  assert.equal(/\.style\.(?:transform|opacity|filter|willChange)\s*=/.test(waveSource), false);
 
-  const invalidGl = fakeGl();
-  const invalidRuntime = waveRuntime(invalidGl);
-  load(invalidRuntime);
-  const invalid = createTransition(invalidRuntime, { pattern: "future-pattern" });
-  invalidRuntime.runFrame(0);
-  assert.ok(invalidGl.uniformScalars.some(({ name, value }) => name === "u_pattern" && value === 0));
-  invalid.cancel();
-  await invalid.finished;
-  assertClean(invalidRuntime);
+  transition.cancel();
+  await transition.finished;
+  assertClean(runtime);
 });
 
-test("modular block geometry stays continuous at the 90ms and 590ms modulation points", () => {
+test("particle wave backing is fully opaque across the atomic handoff", () => {
   const easeInOut = (value: number) => {
     const bounded = Math.min(1, Math.max(0, value));
     return bounded * bounded * (3 - 2 * bounded);
   };
-  const coverHalfSize = (elapsedMs: number, order: number) => {
-    const covering = easeInOut(elapsedMs / 326);
-    const local = Math.min(1, Math.max(0, (covering - order * 0.78) / 0.22));
-    const scale = easeInOut(local);
-    const joining = easeInOut((covering - 0.82) / 0.18);
-    const gap = 0.070 * (1 - joining);
-    return Math.max(0, (0.5 - gap) * scale);
-  };
-  const coverPulse = (elapsedMs: number, order: number) => {
-    const covering = easeInOut(elapsedMs / 326);
-    const local = Math.min(1, Math.max(0, (covering - order * 0.78) / 0.22));
-    const joining = easeInOut((covering - 0.82) / 0.18);
-    const attack = easeInOut(elapsedMs / 90);
-    return Math.sin(local * Math.PI) * attack * (1 - joining * 0.45);
-  };
-  const revealHalfSize = (elapsedMs: number, order: number) => {
-    const revealing = easeInOut((elapsedMs - 326) / (680 - 326));
-    const local = Math.min(1, Math.max(0, (revealing - order * 0.78) / 0.22));
-    const remaining = 1 - easeInOut(local);
-    const tailFade = 1 - easeInOut((elapsedMs - 590) / (680 - 590));
-    return 0.5 * remaining * (0.82 + 0.18 * tailFade);
-  };
-  const revealPulse = (elapsedMs: number, order: number) => {
-    const revealing = easeInOut((elapsedMs - 326) / (680 - 326));
-    const local = Math.min(1, Math.max(0, (revealing - order * 0.78) / 0.22));
-    const tailFade = 1 - easeInOut((elapsedMs - 590) / (680 - 590));
-    return Math.sin(local * Math.PI) * tailFade;
-  };
-
-  assert.ok(Math.abs(coverHalfSize(89.999, 0.18) - coverHalfSize(90.001, 0.18)) < 0.0001);
-  assert.ok(Math.abs(coverPulse(89.999, 0.18) - coverPulse(90.001, 0.18)) < 0.0001);
-  assert.ok(Math.abs(revealHalfSize(589.999, 0.82) - revealHalfSize(590.001, 0.82)) < 0.0001);
-  assert.ok(Math.abs(revealPulse(589.999, 0.82) - revealPulse(590.001, 0.82)) < 0.0001);
-  assert.equal(coverHalfSize(326, 1), 0.5, "the last block must close the viewport at commit");
-  assert.equal(revealHalfSize(326, 0), 0.5, "reveal must inherit the fully covered geometry");
-  assert.equal(revealHalfSize(680, 1), 0, "the final tail must be fully removed");
-  assert.match(waveSource, /float covering = easeInOut\(elapsedMs \/ COVER_END\)/);
-  assert.match(waveSource, /float attack = easeInOut\(clamp\(elapsedMs \/ ATTACK_END/);
-  assert.match(waveSource, /float pulse = sin\(localProgress \* 3\.14159265\) \* attack \* \(1\.0 - joining \* 0\.45\)/);
-  assert.match(waveSource, /float revealing = easeInOut\(\(elapsedMs - COVER_END\) \/ \(RELEASE_END - COVER_END\)\)/);
-  assert.match(waveSource, /float pulse = sin\(localProgress \* 3\.14159265\) \* tailFade/);
-  assert.doesNotMatch(waveSource, /else if \(elapsedMs < REVEAL_END\)/);
+  const alpha = (elapsedMs: number) => elapsedMs <= 326
+    ? easeInOut(elapsedMs / 205)
+    : 1 - easeInOut((elapsedMs - 420) / (680 - 420));
+  assert.equal(alpha(0), 0);
+  assert.ok(alpha(204) < 1);
+  assert.equal(alpha(205), 1);
+  assert.equal(alpha(325), 1);
+  assert.equal(alpha(326), 1);
+  assert.equal(alpha(420), 1);
+  assert.ok(alpha(421) < 1);
+  assert.equal(alpha(680), 0);
+  assert.match(waveSource, /if \(u_elapsedMs <= COVER_END\) return easeInOut\(u_elapsedMs \/ 205\.0\)/);
+  assert.match(waveSource, /return 1\.0 - easeInOut\(\(u_elapsedMs - 420\.0\) \/ \(RELEASE_END - 420\.0\)\)/);
+  assert.match(waveSource, /drawAt\(COMMIT_MS\);\s*invokeCommit\(\)/);
+  assert.doesNotMatch(waveSource, /diagonal|ripple|u_pattern|blockGrid|blockFace/);
 });
 
-test("modular block transition commits once at the 326ms fully opaque handoff", async () => {
+test("particle wave transition commits once at the 326ms fully opaque handoff", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -174,14 +147,14 @@ test("modular block transition commits once at the 326ms fully opaque handoff", 
   assert.equal(commits, 1);
   assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
   assert.ok(gl.uniformScalars.some(({ name, value }) => name === "u_elapsedMs" && value === 326));
-  assert.match(gl.shaderSources.join("\n"), /elapsedMs\s*>=\s*COVER_END/);
-  assert.match(gl.shaderSources.join("\n"), /alpha\s*=\s*1\.0/);
-  assert.match(gl.shaderSources.join("\n"), /sourceTarget = mix\(u_sourceMatte, u_targetMatte/);
-  assert.match(gl.shaderSources.join("\n"), /commitAccent = mix\(u_sourceAccent, u_targetAccent/);
+  assert.match(gl.shaderSources.join("\n"), /float backdropAlpha\(\)/);
+  assert.match(gl.shaderSources.join("\n"), /easeInOut\(u_elapsedMs \/ 205\.0\)/);
+  assert.match(gl.shaderSources.join("\n"), /vec3 matte = mix\(u_sourceMatte, u_targetMatte, v_themeMix\)/);
+  assert.match(gl.shaderSources.join("\n"), /vec3 glow = mix\(u_sourceGlow, u_targetGlow, v_themeMix\)/);
   assertClean(runtime);
 });
 
-test("modular block transition cancel before commit preserves source and after commit preserves target", async () => {
+test("particle wave transition cancel before commit preserves source and after commit preserves target", async () => {
   {
     const runtime = waveRuntime(fakeGl());
     load(runtime);
@@ -217,7 +190,7 @@ test("modular block transition cancel before commit preserves source and after c
   }
 });
 
-test("modular block transition preserves commit false and commit errors without hanging", async () => {
+test("particle wave transition preserves commit false and commit errors without hanging", async () => {
   {
     const runtime = waveRuntime(fakeGl());
     load(runtime);
@@ -251,7 +224,7 @@ test("modular block transition preserves commit false and commit errors without 
   }
 });
 
-test("modular block transition immediately commits and releases every partial setup failure", async (t) => {
+test("particle wave transition immediately commits and releases every partial setup failure", async (t) => {
   const cases: Array<[string, GlFailure | RuntimeFailure]> = [
     ["getContext throw", { runtime: "getContext" }],
     ["getContext null", { runtime: "nullContext" }],
@@ -279,15 +252,15 @@ test("modular block transition immediately commits and releases every partial se
   }
 });
 
-test("modular block transition converts draw and resize exceptions into an immediate committed settlement", async (t) => {
-  for (const failure of ["draw", "viewport"] as const) {
+test("particle wave transition converts both draw-pass and resize exceptions into an immediate committed settlement", async (t) => {
+  for (const failure of ["draw", "drawInstanced", "viewport"] as const) {
     await t.test(failure, async () => {
-      const gl = fakeGl(failure === "draw" ? "draw" : undefined);
+      const gl = fakeGl(failure === "viewport" ? undefined : failure);
       const runtime = waveRuntime(gl);
       load(runtime);
       let commits = 0;
       const transition = createTransition(runtime, { commit: () => { commits += 1; return true; } });
-      if (failure === "draw") runtime.runFrame(0);
+      if (failure !== "viewport") runtime.runFrame(0);
       else {
         gl.failViewport = true;
         runtime.triggerWindow("resize");
@@ -303,7 +276,7 @@ test("modular block transition converts draw and resize exceptions into an immed
   }
 });
 
-test("modular block transition releases a fully initialized renderer when the first RAF request throws", async () => {
+test("particle wave transition releases a fully initialized renderer when the first RAF request throws", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, { failRuntime: "initialRaf" });
   load(runtime);
@@ -320,7 +293,7 @@ test("modular block transition releases a fully initialized renderer when the fi
   assertClean(runtime);
 });
 
-test("modular block transition responds to context loss before and after handoff exactly once", async () => {
+test("particle wave transition responds to context loss before and after handoff exactly once", async () => {
   for (const afterCommit of [false, true]) {
     const gl = fakeGl();
     const runtime = waveRuntime(gl);
@@ -344,7 +317,7 @@ test("modular block transition responds to context loss before and after handoff
   }
 });
 
-test("modular block transition settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
+test("particle wave transition settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
   for (const trigger of ["motion", "hidden"] as const) {
     await t.test(trigger, async () => {
       const runtime = waveRuntime(fakeGl());
@@ -391,7 +364,7 @@ test("modular block transition settles on dynamic reduced motion, hidden state, 
   });
 });
 
-test("modular block transition resize preserves its clock, commit count, DPR cap, and pixel budget", async () => {
+test("particle wave transition resize preserves its clock, commit count, particle cap, DPR cap, and pixel budget", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, {
     innerWidth: 3_840,
@@ -417,13 +390,16 @@ test("modular block transition resize preserves its clock, commit count, DPR cap
   for (const [width, height] of runtime.canvasSizes) {
     assert.ok(width * height <= 1_600_000);
   }
+  for (const call of gl.drawCalls.filter((entry) => entry.kind === "instanced")) {
+    assert.ok((call.instances ?? 0) <= 5_920);
+  }
   assert.ok(runtime.firstCanvasSize.width < Math.round(3_840 * 1.25));
   assert.ok(runtime.firstCanvasSize.height < Math.round(2_160 * 1.25));
   assert.equal(commits, 1);
   assertClean(runtime);
 });
 
-test("modular block transition fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
+test("particle wave transition fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -442,15 +418,13 @@ test("modular block transition fully releases RAF, listeners, GPU state, canvas,
 });
 
 type RuntimeFailure = { runtime: "getContext" | "nullContext" | "append" };
-type GlFailure = { gl: "shader" | "compile" | "program" | "link" | "vao" | "viewport" };
+type GlFailure = { gl: "shader" | "compile" | "program" | "link" | "vao" | "viewport" | "draw" | "drawInstanced" };
 
 function createTransition(runtime: ReturnType<typeof waveRuntime>, overrides: Record<string, unknown> = {}) {
   return runtime.context.PlatformWaveTransition.create({
     sourcePlatform: "netease",
     targetPlatform: "qq",
     direction: 1,
-    sourceAnchor: { x: 0.25, y: 0.04 },
-    targetAnchor: { x: 0.75, y: 0.04 },
     commit: () => true,
     ...overrides,
   });
@@ -582,14 +556,20 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
   };
 }
 
-function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "viewport" | "draw") {
+function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "viewport" | "draw" | "drawInstanced") {
   let programCount = 0;
   let vaoCount = 0;
   let lostContexts = 0;
   let shaderCount = 0;
   const deletedPrograms: object[] = [];
   const deletedVertexArrays: object[] = [];
-  const drawCalls: Array<{ mode: number; first: number; count: number }> = [];
+  const drawCalls: Array<{
+    kind: "arrays" | "instanced";
+    mode: number;
+    first: number;
+    count: number;
+    instances?: number;
+  }> = [];
   const uniformScalars: Array<{ name?: string; value: number }> = [];
   const uniformPairs: Array<{ name?: string; x: number; y: number }> = [];
   const shaderSources: string[] = [];
@@ -602,6 +582,12 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
     LINK_STATUS: 4,
     COLOR_BUFFER_BIT: 5,
     TRIANGLES: 6,
+    DEPTH_BUFFER_BIT: 8,
+    BLEND: 9,
+    DEPTH_TEST: 10,
+    ONE: 11,
+    ONE_MINUS_SRC_ALPHA: 12,
+    LEQUAL: 13,
     deletedPrograms,
     deletedVertexArrays,
     drawCalls,
@@ -646,15 +632,26 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
       if (failure === "viewport" || gl.failViewport) throw new Error("synthetic viewport failure");
     },
     uniform1f(location: { name?: string }, value: number) { uniformScalars.push({ name: location?.name, value }); },
+    uniform1i(location: { name?: string }, value: number) { uniformScalars.push({ name: location?.name, value }); },
     uniform2f(location: { name?: string }, x: number, y: number) { uniformPairs.push({ name: location?.name, x, y }); },
     uniform3fv() {},
     clearColor() {},
+    clearDepth() {},
     clear() {},
     useProgram() {},
+    enable() {},
+    disable() {},
+    blendFunc() {},
+    depthFunc() {},
     drawArrays(mode: number, first: number, count: number) {
       events.push("draw");
-      drawCalls.push({ mode, first, count });
+      drawCalls.push({ kind: "arrays", mode, first, count });
       if (failure === "draw") throw new Error("synthetic draw failure");
+    },
+    drawArraysInstanced(mode: number, first: number, count: number, instances: number) {
+      events.push("draw");
+      drawCalls.push({ kind: "instanced", mode, first, count, instances });
+      if (failure === "drawInstanced") throw new Error("synthetic instanced draw failure");
     },
     createBuffer() { forbiddenCalls.push("createBuffer"); return {}; },
     bindBuffer() { forbiddenCalls.push("bindBuffer"); },
