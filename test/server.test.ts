@@ -483,9 +483,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=49/);
-  assert.match(pageText, /platform-wave\.js\?v=5/);
-  assert.match(pageText, /app\.js\?v=61/);
+  assert.match(pageText, /styles\.css\?v=50/);
+  assert.match(pageText, /platform-wave\.js\?v=6/);
+  assert.match(pageText, /app\.js\?v=62/);
+  assert.match(pageText, /id="transitionModeButton"[^>]*data-pattern="diagonal"/);
+  assert.match(pageText, /当前平台动效为对角积木波，点击切换为中心涟漪/);
   assert.match(pageText, /id="loginButton"[^>]+aria-label="二维码登录"/);
   assert.match(pageText, /id="globalPlatformSwitch"[^>]*role="tablist"/);
   assert.match(pageText, /data-platform-target="netease"[^>]*aria-controls="neteaseWorkbench"/);
@@ -650,7 +652,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /const expanded = details\.dataset\.expanded === "true";[\s\S]*details\.open = expanded/);
   assert.match(appText, /let commitRecovered = false;[\s\S]*commitPlatformSelection\(value, switchVersion, commitOptions\)[\s\S]*commitRecovered = true/);
   assert.match(appText, /let streamConnected = false;[\s\S]*streamConnected = commitPlatformSelection[\s\S]*if \(!streamConnected\) connectResultStream\(\)/);
-  assert.match(appText, /direction,\s*sourceAnchor,\s*targetAnchor,\s*commit/s);
+  assert.match(appText, /direction,\s*sourceAnchor,\s*targetAnchor,\s*pattern: platformTransitionPattern,\s*commit/s);
+  assert.match(appText, /ncm-platform-transition-pattern-v1/);
+  assert.match(appText, /platformTransitionPattern === "diagonal" \? "ripple" : "diagonal"/);
+  assert.match(appText, /affectsNextTransition[\s\S]*将在下次平台切换时生效/);
   assert.match(appText, /committed = commit\(\) === true/);
   assert.match(appText, /desiredPlatform !== platform[\s\S]*commitPlatformSelection\(desiredPlatform/);
   assert.doesNotMatch(appText, /motionLayers:/);
@@ -680,7 +685,17 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(platformWaveText, /const MAX_DPR = 1\.25/);
   assert.match(platformWaveText, /const MAX_COLOR_PIXELS = 1_600_000/);
   assert.match(platformWaveText, /fwidth/);
-  assert.match(platformWaveText, /for \(int contourIndex = 0; contourIndex < 5/);
+  assert.match(platformWaveText, /vec2 blockGrid = max/);
+  assert.match(platformWaveText, /vec2 blockId = floor\(blockSpace\)/);
+  assert.match(platformWaveText, /vec2 blockLocal = fract\(blockSpace\) - 0\.5/);
+  assert.match(platformWaveText, /float blockOrder/);
+  assert.match(platformWaveText, /float blockMask/);
+  assert.match(platformWaveText, /vec3 blockFace/);
+  assert.match(platformWaveText, /uniform float u_pattern/);
+  assert.match(platformWaveText, /radialPoint = \(center - 0\.5\) \* vec2\(aspect, 1\.0\)/);
+  assert.match(platformWaveText, /float covering = easeInOut\(elapsedMs \/ COVER_END\)/);
+  assert.match(platformWaveText, /float revealing = easeInOut\(\(elapsedMs - COVER_END\) \/ \(RELEASE_END - COVER_END\)\)/);
+  assert.doesNotMatch(platformWaveText, /curtain|contourIndex/);
   assert.match(platformWaveText, /elapsedMs >= COVER_END[\s\S]*alpha = 1\.0/);
   assert.doesNotMatch(platformWaveText, /Math\.random|POINTS|TRIANGLE_STRIP|createBuffer|createTexture|createFramebuffer|readPixels|translate3d|will-change/);
   assert.match(platformWaveText, /prefers-reduced-motion: reduce/);
@@ -755,6 +770,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /max-height:\s*calc\(100dvh - 24px\)/);
   assert.match(styleText, /\.classic-encrypt-uin-content\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(styleText, /\[data-desktop-platform="win32"\] \.topbar/s);
+  assert.match(styleText, /@media \(min-width:\s*821px\) and \(max-width:\s*1000px\)\s*\{\s*\.topbar\s*\{/s);
+  assert.doesNotMatch(styleText, /@media \(min-width:\s*821px\) and \(max-width:\s*1000px\)[\s\S]{0,160}\[data-desktop-platform="win32"\]/s);
   assert.match(styleText, /body\.inspector-collapsed \.inspector-heading > div\s*\{[^}]*position:\s*absolute/s);
   assert.match(styleText, /\.inspector-body\s*\{[^}]*transition:/s);
   assert.match(styleText, /\.inspector-body\s*\{[^}]*min-width:\s*0/s);
@@ -855,6 +872,63 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(calibratedValue.pages, 100);
   assert.equal(calibratedValue.estimatedRequests, 125);
   assert.equal(calibratedValue.effectiveWorkers, 4);
+});
+
+test("dashboard persists a validated platform transition preference across loopback ports", async (context) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-preferences-"));
+  const firstServer = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => firstServer.close(() => done())));
+  const firstAddress = firstServer.address() as AddressInfo;
+  const firstBase = `http://127.0.0.1:${firstAddress.port}`;
+  const initial = await fetch(`${firstBase}/api/preferences`);
+  assert.deepEqual(await initial.json(), {
+    version: 1,
+    platformTransitionPattern: "diagonal",
+    updatedAt: new Date(0).toISOString(),
+  });
+  const saved = await fetch(`${firstBase}/api/preferences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ platformTransitionPattern: "ripple" }),
+  });
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json() as { platformTransitionPattern: string }).platformTransitionPattern, "ripple");
+  const invalid = await fetch(`${firstBase}/api/preferences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ platformTransitionPattern: "random" }),
+  });
+  assert.equal(invalid.status, 400);
+
+  const secondServer = await startDashboard({ host: "127.0.0.1", port: 0, runtimeRoot });
+  context.after(() => new Promise<void>((done) => secondServer.close(() => done())));
+  const secondAddress = secondServer.address() as AddressInfo;
+  assert.notEqual(secondAddress.port, firstAddress.port);
+  const restored = await fetch(`http://127.0.0.1:${secondAddress.port}/api/preferences`);
+  const restoredPreferences = await restored.json() as { platformTransitionPattern: string; updatedAt: string };
+  assert.equal(restoredPreferences.platformTransitionPattern, "ripple");
+  assert.ok(Number.isFinite(Date.parse(restoredPreferences.updatedAt)));
+  assert.equal(
+    JSON.parse(await readFile(join(runtimeRoot, "data", "ui-preferences.json"), "utf8")).platformTransitionPattern,
+    "ripple",
+  );
+  await writeFile(join(runtimeRoot, "data", "ui-preferences.json"), "{broken-json");
+  const corruptFallback = await fetch(`http://127.0.0.1:${secondAddress.port}/api/preferences`);
+  assert.deepEqual(await corruptFallback.json(), {
+    version: 1,
+    platformTransitionPattern: "diagonal",
+    updatedAt: new Date(0).toISOString(),
+  });
+  await writeFile(join(runtimeRoot, "data", "ui-preferences.json"), JSON.stringify({
+    version: 1,
+    platformTransitionPattern: "ripple",
+    updatedAt: "2026",
+  }));
+  const nonCanonicalDateFallback = await fetch(`http://127.0.0.1:${secondAddress.port}/api/preferences`);
+  assert.equal(
+    (await nonCanonicalDateFallback.json() as { platformTransitionPattern: string }).platformTransitionPattern,
+    "diagonal",
+  );
 });
 
 test("recognizes only local socket addresses for private result reports", () => {

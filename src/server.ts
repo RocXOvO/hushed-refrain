@@ -101,6 +101,15 @@ interface RuntimePaths {
   pool: string;
   poolWork: string;
   resumeTask: string;
+  uiPreferences: string;
+}
+
+type PlatformTransitionPattern = "diagonal" | "ripple";
+
+interface UiPreferences {
+  version: 1;
+  platformTransitionPattern: PlatformTransitionPattern;
+  updatedAt: string;
 }
 
 interface LegacyResumeTaskDescriptor {
@@ -1587,6 +1596,17 @@ async function route(
   const url = new URL(request.url ?? "/", "http://localhost");
   if (method === "GET" && url.pathname === "/api/health") return json(response, 200, { ok: true, time: new Date().toISOString() });
   if (method === "GET" && url.pathname === "/api/update") return json(response, 200, await updateChecker());
+  if (method === "GET" && url.pathname === "/api/preferences") {
+    return json(response, 200, await readUiPreferences(paths.uiPreferences));
+  }
+  if (method === "POST" && url.pathname === "/api/preferences") {
+    const input = jsonObject(await body(request));
+    const platformTransitionPattern = input.platformTransitionPattern;
+    if (platformTransitionPattern !== "diagonal" && platformTransitionPattern !== "ripple") {
+      throw new HttpError(400, "平台切换动效只支持 diagonal 或 ripple。");
+    }
+    return json(response, 200, await saveUiPreferences(paths.uiPreferences, platformTransitionPattern));
+  }
   if (method === "GET" && url.pathname === "/api/tasks/active") {
     return json(response, 200, {
       active: coordinator.isBusy(),
@@ -1876,7 +1896,73 @@ function runtimePaths(root: string): RuntimePaths {
     pool: join(ncm, "proxy-pool.json"),
     poolWork: join(ncm, "mihomo-pool"),
     resumeTask: join(data, "resume-task.json"),
+    uiPreferences: join(data, "ui-preferences.json"),
   };
+}
+
+function defaultUiPreferences(): UiPreferences {
+  return {
+    version: 1,
+    platformTransitionPattern: "diagonal",
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
+async function readUiPreferences(path: string): Promise<UiPreferences> {
+  return withUiPreferencesLock(path, async () => {
+    try {
+      return await readAtomicJson(path, decodeUiPreferences) ?? defaultUiPreferences();
+    } catch (error) {
+      if (error instanceof SyntaxError) return defaultUiPreferences();
+      throw error;
+    }
+  });
+}
+
+async function saveUiPreferences(
+  path: string,
+  platformTransitionPattern: PlatformTransitionPattern,
+): Promise<UiPreferences> {
+  return withUiPreferencesLock(path, async () => {
+    const preferences: UiPreferences = {
+      version: 1,
+      platformTransitionPattern,
+      updatedAt: new Date().toISOString(),
+    };
+    await writeAtomicJson(path, preferences);
+    return preferences;
+  });
+}
+
+function decodeUiPreferences(value: unknown): UiPreferences {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new SyntaxError("Invalid UI preferences.");
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.version !== 1
+    || (candidate.platformTransitionPattern !== "diagonal" && candidate.platformTransitionPattern !== "ripple")
+    || typeof candidate.updatedAt !== "string"
+    || !Number.isFinite(Date.parse(candidate.updatedAt))
+    || new Date(candidate.updatedAt).toISOString() !== candidate.updatedAt
+  ) {
+    throw new SyntaxError("Invalid UI preferences.");
+  }
+  return candidate as unknown as UiPreferences;
+}
+
+async function withUiPreferencesLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(path), { recursive: true });
+  const release = await lockfile.lock(path, {
+    realpath: false,
+    stale: 30_000,
+    retries: { retries: 20, factor: 1.2, minTimeout: 5, maxTimeout: 100, randomize: true },
+  });
+  try {
+    return await operation();
+  } finally {
+    await release().catch(() => {});
+  }
 }
 
 async function saveResumeTask(path: string, descriptor: unknown): Promise<void> {

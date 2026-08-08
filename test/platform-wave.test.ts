@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 const waveSource = readFileSync(join(process.cwd(), "web", "platform-wave.js"), "utf8");
 
-test("spectral fold honors reduced motion without requesting WebGL", async () => {
+test("modular block transition honors reduced motion without requesting WebGL", async () => {
   const runtime = waveRuntime(fakeGl(), { reducedMotion: true });
   load(runtime);
   let commits = 0;
@@ -24,7 +24,7 @@ test("spectral fold honors reduced motion without requesting WebGL", async () =>
   assertClean(runtime);
 });
 
-test("spectral fold uses the frozen WebGL2 context and one fullscreen triangle", async () => {
+test("modular block transition uses the frozen WebGL2 context and one fullscreen triangle", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -47,8 +47,14 @@ test("spectral fold uses the frozen WebGL2 context and one fullscreen triangle",
   assert.equal(gl.createdPrograms, 1);
   assert.equal(gl.createdVertexArrays, 1);
   assert.equal(gl.forbiddenCalls.length, 0);
+  assert.ok(gl.uniformPairs.some(({ name, x, y }) => name === "u_resolution" && x === 1_200 && y === 800));
   assert.match(gl.shaderSources.join("\n"), /gl_VertexID/);
   assert.match(gl.shaderSources.join("\n"), /fwidth/);
+  assert.match(gl.shaderSources.join("\n"), /blockGrid/);
+  assert.match(gl.shaderSources.join("\n"), /floor\(blockSpace\)/);
+  assert.match(gl.shaderSources.join("\n"), /fract\(blockSpace\) - 0\.5/);
+  assert.match(gl.shaderSources.join("\n"), /blockFace/);
+  assert.doesNotMatch(gl.shaderSources.join("\n"), /curtain|contourIndex/);
   assert.equal(waveSource.includes("Math.random"), false);
   assert.equal(/\.style\.(?:transform|opacity|filter|willChange)\s*=/.test(waveSource), false);
 
@@ -59,7 +65,94 @@ test("spectral fold uses the frozen WebGL2 context and one fullscreen triangle",
   assertClean(runtime);
 });
 
-test("spectral fold commits once at the 326ms fully opaque handoff", async () => {
+test("modular block transition supports a reversible diagonal wave and an aspect-correct ripple", async () => {
+  const diagonalGl = fakeGl();
+  const diagonalRuntime = waveRuntime(diagonalGl);
+  load(diagonalRuntime);
+  const diagonal = createTransition(diagonalRuntime, { direction: -1 });
+  diagonalRuntime.runFrame(0);
+  assert.ok(diagonalGl.uniformScalars.some(({ name, value }) => name === "u_pattern" && value === 0));
+  assert.ok(diagonalGl.uniformScalars.some(({ name, value }) => name === "u_direction" && value === -1));
+  diagonal.cancel();
+  await diagonal.finished;
+  assertClean(diagonalRuntime);
+
+  const rippleGl = fakeGl();
+  const rippleRuntime = waveRuntime(rippleGl, { innerWidth: 390, innerHeight: 844 });
+  load(rippleRuntime);
+  const ripple = createTransition(rippleRuntime, { pattern: "ripple" });
+  rippleRuntime.runFrame(0);
+  assert.ok(rippleGl.uniformScalars.some(({ name, value }) => name === "u_pattern" && value === 1));
+  const shader = rippleGl.shaderSources.join("\n");
+  assert.match(shader, /\(center\.x \+ center\.y\) \* 0\.5/);
+  assert.match(shader, /radialPoint = \(center - 0\.5\) \* vec2\(aspect, 1\.0\)/);
+  assert.match(shader, /length\(radialPoint\) \/ radialMaximum/);
+  assert.match(shader, /mix\(diagonal \+ diagonalWave, radius \+ rippleWave, step\(0\.5, u_pattern\)\)/);
+  ripple.cancel();
+  await ripple.finished;
+  assertClean(rippleRuntime);
+
+  const invalidGl = fakeGl();
+  const invalidRuntime = waveRuntime(invalidGl);
+  load(invalidRuntime);
+  const invalid = createTransition(invalidRuntime, { pattern: "future-pattern" });
+  invalidRuntime.runFrame(0);
+  assert.ok(invalidGl.uniformScalars.some(({ name, value }) => name === "u_pattern" && value === 0));
+  invalid.cancel();
+  await invalid.finished;
+  assertClean(invalidRuntime);
+});
+
+test("modular block geometry stays continuous at the 90ms and 590ms modulation points", () => {
+  const easeInOut = (value: number) => {
+    const bounded = Math.min(1, Math.max(0, value));
+    return bounded * bounded * (3 - 2 * bounded);
+  };
+  const coverHalfSize = (elapsedMs: number, order: number) => {
+    const covering = easeInOut(elapsedMs / 326);
+    const local = Math.min(1, Math.max(0, (covering - order * 0.78) / 0.22));
+    const scale = easeInOut(local);
+    const joining = easeInOut((covering - 0.82) / 0.18);
+    const gap = 0.070 * (1 - joining);
+    return Math.max(0, (0.5 - gap) * scale);
+  };
+  const coverPulse = (elapsedMs: number, order: number) => {
+    const covering = easeInOut(elapsedMs / 326);
+    const local = Math.min(1, Math.max(0, (covering - order * 0.78) / 0.22));
+    const joining = easeInOut((covering - 0.82) / 0.18);
+    const attack = easeInOut(elapsedMs / 90);
+    return Math.sin(local * Math.PI) * attack * (1 - joining * 0.45);
+  };
+  const revealHalfSize = (elapsedMs: number, order: number) => {
+    const revealing = easeInOut((elapsedMs - 326) / (680 - 326));
+    const local = Math.min(1, Math.max(0, (revealing - order * 0.78) / 0.22));
+    const remaining = 1 - easeInOut(local);
+    const tailFade = 1 - easeInOut((elapsedMs - 590) / (680 - 590));
+    return 0.5 * remaining * (0.82 + 0.18 * tailFade);
+  };
+  const revealPulse = (elapsedMs: number, order: number) => {
+    const revealing = easeInOut((elapsedMs - 326) / (680 - 326));
+    const local = Math.min(1, Math.max(0, (revealing - order * 0.78) / 0.22));
+    const tailFade = 1 - easeInOut((elapsedMs - 590) / (680 - 590));
+    return Math.sin(local * Math.PI) * tailFade;
+  };
+
+  assert.ok(Math.abs(coverHalfSize(89.999, 0.18) - coverHalfSize(90.001, 0.18)) < 0.0001);
+  assert.ok(Math.abs(coverPulse(89.999, 0.18) - coverPulse(90.001, 0.18)) < 0.0001);
+  assert.ok(Math.abs(revealHalfSize(589.999, 0.82) - revealHalfSize(590.001, 0.82)) < 0.0001);
+  assert.ok(Math.abs(revealPulse(589.999, 0.82) - revealPulse(590.001, 0.82)) < 0.0001);
+  assert.equal(coverHalfSize(326, 1), 0.5, "the last block must close the viewport at commit");
+  assert.equal(revealHalfSize(326, 0), 0.5, "reveal must inherit the fully covered geometry");
+  assert.equal(revealHalfSize(680, 1), 0, "the final tail must be fully removed");
+  assert.match(waveSource, /float covering = easeInOut\(elapsedMs \/ COVER_END\)/);
+  assert.match(waveSource, /float attack = easeInOut\(clamp\(elapsedMs \/ ATTACK_END/);
+  assert.match(waveSource, /float pulse = sin\(localProgress \* 3\.14159265\) \* attack \* \(1\.0 - joining \* 0\.45\)/);
+  assert.match(waveSource, /float revealing = easeInOut\(\(elapsedMs - COVER_END\) \/ \(RELEASE_END - COVER_END\)\)/);
+  assert.match(waveSource, /float pulse = sin\(localProgress \* 3\.14159265\) \* tailFade/);
+  assert.doesNotMatch(waveSource, /else if \(elapsedMs < REVEAL_END\)/);
+});
+
+test("modular block transition commits once at the 326ms fully opaque handoff", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -83,10 +176,12 @@ test("spectral fold commits once at the 326ms fully opaque handoff", async () =>
   assert.ok(gl.uniformScalars.some(({ name, value }) => name === "u_elapsedMs" && value === 326));
   assert.match(gl.shaderSources.join("\n"), /elapsedMs\s*>=\s*COVER_END/);
   assert.match(gl.shaderSources.join("\n"), /alpha\s*=\s*1\.0/);
+  assert.match(gl.shaderSources.join("\n"), /sourceTarget = mix\(u_sourceMatte, u_targetMatte/);
+  assert.match(gl.shaderSources.join("\n"), /commitAccent = mix\(u_sourceAccent, u_targetAccent/);
   assertClean(runtime);
 });
 
-test("spectral fold cancel before commit preserves source and after commit preserves target", async () => {
+test("modular block transition cancel before commit preserves source and after commit preserves target", async () => {
   {
     const runtime = waveRuntime(fakeGl());
     load(runtime);
@@ -122,7 +217,7 @@ test("spectral fold cancel before commit preserves source and after commit prese
   }
 });
 
-test("spectral fold preserves commit false and commit errors without hanging", async () => {
+test("modular block transition preserves commit false and commit errors without hanging", async () => {
   {
     const runtime = waveRuntime(fakeGl());
     load(runtime);
@@ -156,7 +251,7 @@ test("spectral fold preserves commit false and commit errors without hanging", a
   }
 });
 
-test("spectral fold immediately commits and releases every partial setup failure", async (t) => {
+test("modular block transition immediately commits and releases every partial setup failure", async (t) => {
   const cases: Array<[string, GlFailure | RuntimeFailure]> = [
     ["getContext throw", { runtime: "getContext" }],
     ["getContext null", { runtime: "nullContext" }],
@@ -184,7 +279,7 @@ test("spectral fold immediately commits and releases every partial setup failure
   }
 });
 
-test("spectral fold converts draw and resize exceptions into an immediate committed settlement", async (t) => {
+test("modular block transition converts draw and resize exceptions into an immediate committed settlement", async (t) => {
   for (const failure of ["draw", "viewport"] as const) {
     await t.test(failure, async () => {
       const gl = fakeGl(failure === "draw" ? "draw" : undefined);
@@ -208,7 +303,7 @@ test("spectral fold converts draw and resize exceptions into an immediate commit
   }
 });
 
-test("spectral fold releases a fully initialized renderer when the first RAF request throws", async () => {
+test("modular block transition releases a fully initialized renderer when the first RAF request throws", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, { failRuntime: "initialRaf" });
   load(runtime);
@@ -225,7 +320,7 @@ test("spectral fold releases a fully initialized renderer when the first RAF req
   assertClean(runtime);
 });
 
-test("spectral fold responds to context loss before and after handoff exactly once", async () => {
+test("modular block transition responds to context loss before and after handoff exactly once", async () => {
   for (const afterCommit of [false, true]) {
     const gl = fakeGl();
     const runtime = waveRuntime(gl);
@@ -249,7 +344,7 @@ test("spectral fold responds to context loss before and after handoff exactly on
   }
 });
 
-test("spectral fold settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
+test("modular block transition settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
   for (const trigger of ["motion", "hidden"] as const) {
     await t.test(trigger, async () => {
       const runtime = waveRuntime(fakeGl());
@@ -296,7 +391,7 @@ test("spectral fold settles on dynamic reduced motion, hidden state, and pagehid
   });
 });
 
-test("spectral fold resize preserves its clock, commit count, DPR cap, and pixel budget", async () => {
+test("modular block transition resize preserves its clock, commit count, DPR cap, and pixel budget", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, {
     innerWidth: 3_840,
@@ -328,7 +423,7 @@ test("spectral fold resize preserves its clock, commit count, DPR cap, and pixel
   assertClean(runtime);
 });
 
-test("spectral fold fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
+test("modular block transition fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -496,6 +591,7 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
   const deletedVertexArrays: object[] = [];
   const drawCalls: Array<{ mode: number; first: number; count: number }> = [];
   const uniformScalars: Array<{ name?: string; value: number }> = [];
+  const uniformPairs: Array<{ name?: string; x: number; y: number }> = [];
   const shaderSources: string[] = [];
   const forbiddenCalls: string[] = [];
   const events: string[] = [];
@@ -510,6 +606,7 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
     deletedVertexArrays,
     drawCalls,
     uniformScalars,
+    uniformPairs,
     shaderSources,
     forbiddenCalls,
     events,
@@ -549,7 +646,7 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
       if (failure === "viewport" || gl.failViewport) throw new Error("synthetic viewport failure");
     },
     uniform1f(location: { name?: string }, value: number) { uniformScalars.push({ name: location?.name, value }); },
-    uniform2f() {},
+    uniform2f(location: { name?: string }, x: number, y: number) { uniformPairs.push({ name: location?.name, x, y }); },
     uniform3fv() {},
     clearColor() {},
     clear() {},

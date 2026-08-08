@@ -120,3 +120,158 @@ test("platform switching makes new WAAPI and disclosure motion settle immediatel
   assert.equal(attributes.get("aria-expanded"), "true");
   assert.equal(animationCalls, 0);
 });
+
+test("platform transition preference defaults safely and persists an accessible mode toggle", async () => {
+  const stored = new Map<string, string>([["ncm-platform-transition-pattern-v1", "future-mode"]]);
+  const attributes = new Map<string, string>();
+  const label = { textContent: "" };
+  const button = {
+    dataset: {} as Record<string, string>,
+    title: "",
+    setAttribute(name: string, value: string) { attributes.set(name, value); },
+    querySelector() { return label; },
+  };
+  const messages: string[] = [];
+  const savedPatterns: string[] = [];
+  let switching = false;
+  let failSaves = false;
+  const context: Record<string, unknown> = {
+    localStorage: {
+      getItem(key: string) { return stored.get(key) ?? null; },
+      setItem(key: string, value: string) { stored.set(key, value); },
+    },
+    document: { body: { classList: { contains: () => switching } } },
+    el: { transitionMode: button },
+    async api(_path: string, options?: { body?: string }) {
+      if (!options?.body) return { platformTransitionPattern: "ripple" };
+      if (failSaves) throw new Error("disk unavailable");
+      const body = JSON.parse(options.body) as { platformTransitionPattern: string };
+      savedPatterns.push(body.platformTransitionPattern);
+      return { version: 1, ...body };
+    },
+    toast(message: string) { messages.push(message); },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    var platformTransitionPattern = readTransitionPattern();
+    var transitionPreferenceVersion = 0;
+    var transitionPreferenceWriteTail = Promise.resolve();
+    ${extractFunction("readTransitionPattern")}
+    ${extractFunction("restoreTransitionPatternPreference")}
+    ${extractFunction("persistTransitionPatternPreference")}
+    ${extractFunction("syncTransitionModeButton")}
+    ${extractFunction("toggleTransitionPattern")}
+    globalThis.testApi = {
+      readTransitionPattern,
+      restoreTransitionPatternPreference,
+      syncTransitionModeButton,
+      toggleTransitionPattern,
+      pattern() { return platformTransitionPattern; },
+      settled() { return transitionPreferenceWriteTail; },
+    };
+  `, context);
+  const api = context.testApi as {
+    readTransitionPattern(): string;
+    restoreTransitionPatternPreference(): Promise<void>;
+    syncTransitionModeButton(): void;
+    toggleTransitionPattern(): void;
+    pattern(): string;
+    settled(): Promise<void>;
+  };
+
+  assert.equal(api.readTransitionPattern(), "diagonal");
+  await api.restoreTransitionPatternPreference();
+  assert.equal(api.pattern(), "ripple");
+  assert.equal(button.dataset.pattern, "ripple");
+  assert.equal(button.title, "切换平台动效：中心涟漪");
+  assert.equal(label.textContent, "涟漪");
+  assert.equal(attributes.get("aria-label"), "当前平台动效为中心涟漪，点击切换为对角积木波");
+  api.toggleTransitionPattern();
+  await api.settled();
+  assert.equal(api.pattern(), "diagonal");
+  assert.equal(stored.get("ncm-platform-transition-pattern-v1"), "diagonal");
+  assert.deepEqual(messages, ["平台切换动效已设为对角积木波。"]);
+  switching = true;
+  api.toggleTransitionPattern();
+  await api.settled();
+  assert.equal(api.pattern(), "ripple");
+  assert.deepEqual(savedPatterns, ["diagonal", "ripple"]);
+  assert.equal(messages.at(-1), "平台切换动效已设为中心涟漪，将在下次平台切换时生效。");
+  switching = false;
+  failSaves = true;
+  api.toggleTransitionPattern();
+  await api.settled();
+  assert.equal(api.pattern(), "diagonal");
+  assert.equal(stored.get("ncm-platform-transition-pattern-v1"), "diagonal");
+  assert.equal(messages.at(-1), "动效已在本次会话生效，但本机偏好保存失败。");
+
+  const failingContext: Record<string, unknown> = {
+    localStorage: { getItem() { throw new Error("storage disabled"); } },
+  };
+  failingContext.globalThis = failingContext;
+  vm.runInNewContext(`${extractFunction("readTransitionPattern")} globalThis.result = readTransitionPattern();`, failingContext);
+  assert.equal(failingContext.result, "diagonal");
+});
+
+test("a delayed durable preference restore cannot overwrite a newer user selection", async () => {
+  let resolveRestore!: (value: { platformTransitionPattern: string }) => void;
+  const restoreResponse = new Promise<{ platformTransitionPattern: string }>((resolve) => { resolveRestore = resolve; });
+  const stored = new Map<string, string>();
+  const label = { textContent: "" };
+  const savedPatterns: string[] = [];
+  const context: Record<string, unknown> = {
+    localStorage: {
+      getItem(key: string) { return stored.get(key) ?? null; },
+      setItem(key: string, value: string) { stored.set(key, value); },
+    },
+    document: { body: { classList: { contains: () => false } } },
+    el: {
+      transitionMode: {
+        dataset: {},
+        setAttribute() {},
+        querySelector() { return label; },
+      },
+    },
+    api(_path: string, options?: { body?: string }) {
+      if (!options?.body) return restoreResponse;
+      const value = JSON.parse(options.body) as { platformTransitionPattern: string };
+      savedPatterns.push(value.platformTransitionPattern);
+      return Promise.resolve(value);
+    },
+    toast() {},
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    var platformTransitionPattern = readTransitionPattern();
+    var transitionPreferenceVersion = 0;
+    var transitionPreferenceWriteTail = Promise.resolve();
+    ${extractFunction("readTransitionPattern")}
+    ${extractFunction("restoreTransitionPatternPreference")}
+    ${extractFunction("persistTransitionPatternPreference")}
+    ${extractFunction("syncTransitionModeButton")}
+    ${extractFunction("toggleTransitionPattern")}
+    globalThis.testApi = {
+      restoreTransitionPatternPreference,
+      toggleTransitionPattern,
+      pattern() { return platformTransitionPattern; },
+      settled() { return transitionPreferenceWriteTail; },
+    };
+  `, context);
+  const api = context.testApi as {
+    restoreTransitionPatternPreference(): Promise<void>;
+    toggleTransitionPattern(): void;
+    pattern(): string;
+    settled(): Promise<void>;
+  };
+
+  const restoring = api.restoreTransitionPatternPreference();
+  api.toggleTransitionPattern();
+  resolveRestore({ platformTransitionPattern: "diagonal" });
+  await restoring;
+  await api.settled();
+
+  assert.equal(api.pattern(), "ripple");
+  assert.equal(stored.get("ncm-platform-transition-pattern-v1"), "ripple");
+  assert.deepEqual(savedPatterns, ["ripple"]);
+  assert.equal(label.textContent, "涟漪");
+});

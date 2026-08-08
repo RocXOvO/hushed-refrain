@@ -1045,17 +1045,17 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
 }
 
 @media (min-width: 821px) and (max-width: 1000px) {
-  [data-desktop-platform="win32"] .topbar {
+  .topbar {
     padding-left: 10px;
     grid-template-columns: auto minmax(290px, 1fr) auto;
     gap: 7px;
   }
-  [data-desktop-platform="win32"] .brand-copy,
-  [data-desktop-platform="win32"] .ui-version-badge,
-  [data-desktop-platform="win32"] .topbar .status-badge,
-  [data-desktop-platform="win32"] .top-actions .button span { display: none; }
-  [data-desktop-platform="win32"] .top-actions { gap: 3px; }
-  [data-desktop-platform="win32"] .top-actions .button { width: 34px; padding: 0; }
+  .brand-copy,
+  .ui-version-badge,
+  .topbar .status-badge,
+  .top-actions .button span { display: none; }
+  .top-actions { gap: 3px; }
+  .top-actions .button { width: 34px; padding: 0; }
 }
 
 @media (max-width: 820px) {

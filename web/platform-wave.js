@@ -9,14 +9,14 @@
   const COLORS = {
     netease: {
       accent: new Float32Array([0.875, 0.180, 0.216]),
-      matte: new Float32Array([0.060, 0.061, 0.066]),
+      matte: new Float32Array([0.145, 0.148, 0.160]),
     },
     qq: {
       accent: new Float32Array([0.039, 0.694, 0.588]),
-      matte: new Float32Array([0.018, 0.075, 0.072]),
+      matte: new Float32Array([0.035, 0.205, 0.205]),
     },
   };
-  const NEUTRAL_MATTE = new Float32Array([0.075, 0.078, 0.082]);
+  const NEUTRAL_MATTE = new Float32Array([0.130, 0.136, 0.148]);
 
   const VERTEX_SOURCE = `#version 300 es
     precision highp float;
@@ -43,6 +43,7 @@
     uniform vec3 u_targetMatte;
     uniform vec3 u_neutralMatte;
     uniform float u_direction;
+    uniform float u_pattern;
     uniform float u_elapsedMs;
     out vec4 outColor;
 
@@ -56,79 +57,85 @@
       return value * value * (3.0 - 2.0 * value);
     }
 
-    float lineMask(float distanceToLine, float halfWidth) {
-      float aa = max(fwidth(distanceToLine), 0.00045);
-      return 1.0 - smoothstep(halfWidth - aa, halfWidth + aa, abs(distanceToLine));
+    float blockOrder(vec2 center, float aspect) {
+      float diagonal = u_direction > 0.0
+        ? (center.x + center.y) * 0.5
+        : ((1.0 - center.x) + (1.0 - center.y)) * 0.5;
+      float diagonalWave = sin((center.x - center.y) * 18.0) * 0.028
+        + sin((center.x + center.y) * 9.0) * 0.012;
+      vec2 radialPoint = (center - 0.5) * vec2(aspect, 1.0);
+      float radialMaximum = max(0.001, length(vec2(0.5 * aspect, 0.5)));
+      float radius = length(radialPoint) / radialMaximum;
+      float rippleWave = sin(radius * 34.0) * 0.018 * (1.0 - radius * 0.35);
+      return clamp(mix(diagonal + diagonalWave, radius + rippleWave, step(0.5, u_pattern)), 0.0, 1.0);
+    }
+
+    float blockMask(vec2 localPoint, float halfSize) {
+      float blockDistance = max(abs(localPoint.x), abs(localPoint.y)) - halfSize;
+      float aa = max(fwidth(blockDistance), 0.0012);
+      return 1.0 - smoothstep(-aa, aa, blockDistance);
+    }
+
+    vec3 blockFace(
+      vec2 localPoint,
+      vec2 blockId,
+      float halfSize,
+      float order,
+      float pulse,
+      vec3 matte,
+      vec3 accent
+    ) {
+      float tone = fract(blockId.x * 0.173 + blockId.y * 0.317);
+      float edgeDistance = max(0.0, halfSize - max(abs(localPoint.x), abs(localPoint.y)));
+      float bevel = 1.0 - smoothstep(0.015, 0.105, edgeDistance);
+      float faceLight = clamp(0.52 + (localPoint.y - localPoint.x) * 0.24, 0.32, 0.76);
+      vec3 base = mix(matte, u_neutralMatte, 0.10 + tone * 0.16);
+      base *= mix(0.86, 1.10, faceLight);
+      float accentAmount = 0.07 + bevel * 0.20 + pulse * 0.30 + order * 0.035;
+      return mix(base, accent, clamp(accentAmount, 0.0, 0.48));
     }
 
     void main() {
       float elapsedMs = u_elapsedMs;
       float aspect = u_resolution.x / max(1.0, u_resolution.y);
-      vec2 centered = vec2((v_uv.x - 0.5) * aspect, v_uv.y - 0.5);
-      float axis = u_direction > 0.0 ? v_uv.x : 1.0 - v_uv.x;
-      float crossAxis = centered.y;
+      float blockPixels = clamp(min(u_resolution.x, u_resolution.y) * 0.055, 34.0, 58.0);
+      vec2 blockGrid = max(vec2(8.0, 7.0), floor(u_resolution / blockPixels));
+      vec2 blockSpace = v_uv * blockGrid;
+      vec2 blockId = floor(blockSpace);
+      vec2 blockLocal = fract(blockSpace) - 0.5;
+      vec2 blockCenter = (blockId + 0.5) / blockGrid;
+      float order = blockOrder(blockCenter, aspect);
       float alpha = 0.0;
-      vec3 color = u_neutralMatte;
+      vec3 color = mix(u_sourceMatte, u_targetMatte, 0.5);
 
-      if (elapsedMs < ATTACK_END) {
-        float attack = easeInOut(elapsedMs / ATTACK_END);
-        float sourceAxis = u_direction > 0.0 ? u_sourceAnchor.x : 1.0 - u_sourceAnchor.x;
-        float carrierAxis = mix(sourceAxis, -0.018, attack);
-        float carrier = lineMask(axis - carrierAxis, 0.0012 + attack * 0.0008);
-        float verticalFocus = exp(-abs(v_uv.y - (1.0 - u_sourceAnchor.y)) * 7.0);
-        alpha = carrier * mix(0.45, 0.92, attack) * mix(0.58, 1.0, verticalFocus);
-        color = mix(u_sourceAccent, u_neutralMatte, attack * 0.38);
-      } else if (elapsedMs < COVER_END) {
-        float covering = easeInOut((elapsedMs - ATTACK_END) / (COVER_END - ATTACK_END));
-        float front = mix(-0.035, 1.055, covering);
-        float edgeWave = sin(crossAxis * 25.0 + covering * 2.6) * 0.007
-          + sin(crossAxis * 53.0 - covering * 1.9) * 0.003;
-        float signedEdge = axis - front - edgeWave;
-        float aa = max(fwidth(signedEdge), 0.0007);
-        float curtain = 1.0 - smoothstep(-aa, aa, signedEdge);
-        float contours = 0.0;
-        for (int contourIndex = 0; contourIndex < 5; contourIndex += 1) {
-          float offset = 0.018 + float(contourIndex) * 0.023;
-          float spectral = front - offset
-            + sin(crossAxis * (18.0 + float(contourIndex) * 4.0) + float(contourIndex) * 1.7) * 0.0045;
-          contours += lineMask(axis - spectral, 0.00065) * (1.0 - float(contourIndex) * 0.12);
-        }
-        float handoff = lineMask(signedEdge, 0.00135);
-        alpha = clamp(curtain + contours * curtain * 0.20 + handoff * 0.36, 0.0, 1.0);
-        vec3 matte = mix(u_sourceMatte, u_neutralMatte, covering);
-        color = mix(matte, mix(u_sourceAccent, u_neutralMatte, covering), clamp(contours * 0.23 + handoff * 0.50, 0.0, 1.0));
+      if (elapsedMs < COVER_END) {
+        float covering = easeInOut(elapsedMs / COVER_END);
+        float localProgress = clamp((covering - order * 0.78) / 0.22, 0.0, 1.0);
+        float scale = easeInOut(localProgress);
+        float joining = easeInOut(clamp((covering - 0.82) / 0.18, 0.0, 1.0));
+        float attack = easeInOut(clamp(elapsedMs / ATTACK_END, 0.0, 1.0));
+        float gap = mix(0.070, 0.0, joining);
+        float halfSize = max(0.0, (0.5 - gap) * scale);
+        float pulse = sin(localProgress * 3.14159265) * attack * (1.0 - joining * 0.45);
+        alpha = blockMask(blockLocal, halfSize) * step(0.001, scale);
+        color = blockFace(blockLocal, blockId, halfSize, order, pulse, mix(u_sourceMatte, u_neutralMatte, covering * 0.20), u_sourceAccent);
       } else if (elapsedMs >= COVER_END && elapsedMs <= COVER_END + 0.5) {
         alpha = 1.0;
-        color = u_neutralMatte;
-      } else if (elapsedMs < REVEAL_END) {
-        float revealing = easeInOut((elapsedMs - COVER_END) / (REVEAL_END - COVER_END));
-        float front = mix(-0.055, 1.055, revealing);
-        float edgeWave = sin(crossAxis * 27.0 - revealing * 2.4) * 0.006
-          + sin(crossAxis * 49.0 + revealing * 2.1) * 0.0025;
-        float signedEdge = axis - front - edgeWave;
-        float aa = max(fwidth(signedEdge), 0.0007);
-        float curtain = smoothstep(-aa, aa, signedEdge);
-        float contours = 0.0;
-        for (int contourIndex = 0; contourIndex < 5; contourIndex += 1) {
-          float offset = 0.016 + float(contourIndex) * 0.022;
-          float spectral = front + offset
-            + sin(crossAxis * (19.0 + float(contourIndex) * 3.5) - float(contourIndex) * 1.5) * 0.004;
-          contours += lineMask(axis - spectral, 0.00065) * (1.0 - float(contourIndex) * 0.12);
-        }
-        float handoff = lineMask(signedEdge, 0.00135);
-        alpha = clamp(curtain + contours * curtain * 0.20 + handoff * 0.34, 0.0, 1.0);
-        vec3 matte = mix(u_neutralMatte, u_targetMatte, revealing);
-        color = mix(matte, mix(u_neutralMatte, u_targetAccent, revealing), clamp(contours * 0.22 + handoff * 0.48, 0.0, 1.0));
+        float seamDistance = min(0.5 - abs(blockLocal.x), 0.5 - abs(blockLocal.y));
+        float seam = 1.0 - smoothstep(0.0, 0.075, seamDistance);
+        float checker = mod(blockId.x + blockId.y, 2.0);
+        vec3 sourceTarget = mix(u_sourceMatte, u_targetMatte, clamp(order * 0.82 + 0.09, 0.0, 1.0));
+        vec3 commitAccent = mix(u_sourceAccent, u_targetAccent, clamp(order, 0.0, 1.0));
+        color = mix(mix(sourceTarget, u_neutralMatte, 0.20 + checker * 0.05), commitAccent, seam * 0.22 + 0.06);
       } else {
-        float release = easeInOut((elapsedMs - REVEAL_END) / (RELEASE_END - REVEAL_END));
-        float targetAxis = u_direction > 0.0 ? u_targetAnchor.x : 1.0 - u_targetAnchor.x;
-        float carrierOne = mix(1.018, targetAxis, release);
-        float carrierTwo = mix(1.036, targetAxis, release);
-        float lineOne = lineMask(axis - carrierOne, 0.00075);
-        float lineTwo = lineMask(axis - carrierTwo, 0.00055);
-        float verticalFocus = exp(-abs(v_uv.y - (1.0 - u_targetAnchor.y)) * mix(2.8, 10.0, release));
-        alpha = (lineOne * 0.82 + lineTwo * 0.62) * (1.0 - release * 0.90) * mix(0.55, 1.0, verticalFocus);
-        color = u_targetAccent;
+        float revealing = easeInOut((elapsedMs - COVER_END) / (RELEASE_END - COVER_END));
+        float localProgress = clamp((revealing - order * 0.78) / 0.22, 0.0, 1.0);
+        float remaining = 1.0 - easeInOut(localProgress);
+        float tailFade = 1.0 - easeInOut((elapsedMs - REVEAL_END) / (RELEASE_END - REVEAL_END));
+        float halfSize = 0.5 * remaining * mix(0.82, 1.0, tailFade);
+        float pulse = sin(localProgress * 3.14159265) * tailFade;
+        alpha = blockMask(blockLocal, halfSize) * step(0.001, remaining);
+        color = blockFace(blockLocal, blockId, halfSize, order, pulse, mix(u_neutralMatte, u_targetMatte, 0.74), u_targetAccent);
       }
 
       alpha = clamp(alpha, 0.0, 1.0);
@@ -241,6 +248,7 @@
     const sourceAnchorY = boundedAnchor(options?.sourceAnchor?.y, 0.04);
     const targetAnchorX = boundedAnchor(options?.targetAnchor?.x, 0.75);
     const targetAnchorY = boundedAnchor(options?.targetAnchor?.y, 0.04);
+    const pattern = options?.pattern === "ripple" ? 1 : 0;
     let activeProgram;
     let vertexArray;
     let elapsedLocation;
@@ -284,7 +292,7 @@
       canvas.width = pixelWidth;
       canvas.height = pixelHeight;
       gl.viewport(0, 0, pixelWidth, pixelHeight);
-      if (resolutionLocation !== null) gl.uniform2f(resolutionLocation, pixelWidth, pixelHeight);
+      if (resolutionLocation !== null) gl.uniform2f(resolutionLocation, cssWidth, cssHeight);
     }
 
     try {
@@ -297,6 +305,7 @@
       elapsedLocation = location(gl, activeProgram, "u_elapsedMs");
       resolutionLocation = location(gl, activeProgram, "u_resolution");
       const directionLocation = location(gl, activeProgram, "u_direction");
+      const patternLocation = location(gl, activeProgram, "u_pattern");
       const sourceAnchorLocation = location(gl, activeProgram, "u_sourceAnchor");
       const targetAnchorLocation = location(gl, activeProgram, "u_targetAnchor");
       const sourceAccentLocation = location(gl, activeProgram, "u_sourceAccent");
@@ -305,6 +314,7 @@
       const targetMatteLocation = location(gl, activeProgram, "u_targetMatte");
       const neutralMatteLocation = location(gl, activeProgram, "u_neutralMatte");
       if (directionLocation !== null) gl.uniform1f(directionLocation, direction);
+      if (patternLocation !== null) gl.uniform1f(patternLocation, pattern);
       if (sourceAnchorLocation !== null) gl.uniform2f(sourceAnchorLocation, sourceAnchorX, sourceAnchorY);
       if (targetAnchorLocation !== null) gl.uniform2f(targetAnchorLocation, targetAnchorX, targetAnchorY);
       if (sourceAccentLocation !== null) gl.uniform3fv(sourceAccentLocation, sourceTheme.accent);
