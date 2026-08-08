@@ -1,6 +1,6 @@
 # QQ 音乐评论查询架构
 
-本文只描述 `v0.20.0` 源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
+本文只描述 `v0.21.0` 源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
 
 桌面显示品牌为“乐评寻踪 / MUSIC COMMENT TRACE”，`productName` 为“乐评寻踪”；这不改变 QQ 数据或升级身份。包名 `ncm-comment-finder`、appId `cn.local.ncm.commentfinder`、仓库 `RocXOvO/ncm-comment-finder`、安装包文件名前缀 `NCM-Comment-Finder` 和持久目录 `appData/ncm-comment-finder` 保持不变。
 

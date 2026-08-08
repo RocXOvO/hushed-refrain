@@ -2,7 +2,7 @@
 
 本文件只维护当前已实现的 QQ 音乐领域事实、共享边界和安全不变量，不记录旧共享实现、浏览器验收或发布结论。QQ 代码改变身份、上游接口、分页、并发、代理、状态、结果或活动语义时，必须在同一修改阶段更新本文件并删除过时描述。
 
-QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；`v0.20.0` 源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
+QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；`v0.21.0` 源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
 
 本文件和本地测试只记录实现契约，不代表任何 commit、push、Release 或安装包已经存在；发布状态必须以 Git 与 GitHub Release 的实际记录为准。
 
