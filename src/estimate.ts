@@ -29,7 +29,6 @@ export interface EstimateInput {
   proxyTransportEffectiveStartDelayMs?: number;
   proxyTransportStartJitterMs?: number;
   serialRequestChain?: boolean;
-  workersShareLanePacing?: boolean;
   checkpointSlots?: number;
 }
 
@@ -55,7 +54,6 @@ export interface ScanEstimate {
   proxyTransportStartJitterMs?: number;
   checkpointSlots?: number;
   serialRequestChain?: boolean;
-  workersShareLanePacing?: boolean;
 }
 
 export function estimateCommentScan(input: EstimateInput): ScanEstimate {
@@ -82,7 +80,6 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     ? totalWorkers
     : positiveInteger(input.maxWorkers, "maxWorkers");
   const serialRequestChain = Boolean(input.serialRequestChain);
-  const workersShareLanePacing = Boolean(input.workersShareLanePacing);
   const qqProfile = platform === "qq"
     ? qqMusicTransportProfile(serialRequestChain ? "song" : "likes", lanes, Math.min(totalWorkers, maxWorkers))
     : undefined;
@@ -120,9 +117,6 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
   const effectiveWorkers = serialRequestChain
     ? 1
     : Math.min(boundedWorkers, checkpointSlots);
-  const pacingWorkersPerLane = serialRequestChain || workersShareLanePacing
-    ? 1
-    : workersPerLane;
   const pages = pageCount(
     comments,
     pageSize,
@@ -138,7 +132,7 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
 
   const duration = (spacingMs: number, transportJitterFactor: number): number => {
     if (estimatedRequests === 0) return 0;
-    const laneTopologyCycleMs = spacingMs / pacingWorkersPerLane / lanes;
+    const laneTopologyCycleMs = spacingMs / lanes;
     const workerCycleMs = networkMs / effectiveWorkers;
     const transportCycleMs = proxyTransport
       ? Math.max(
@@ -171,7 +165,6 @@ export function estimateCommentScan(input: EstimateInput): ScanEstimate {
     ...(input.maxWorkers !== undefined || proxyTransport || serialRequestChain ? { effectiveWorkers } : {}),
     ...(platform === "qq" ? { checkpointSlots } : {}),
     ...(serialRequestChain ? { serialRequestChain: true } : {}),
-    ...(workersShareLanePacing ? { workersShareLanePacing: true } : {}),
     ...(proxyTransport
       ? {
         proxyTransportMaxConcurrent,

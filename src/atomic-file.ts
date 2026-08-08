@@ -21,6 +21,7 @@ export interface AtomicWriteOptions {
   randomId?: () => string;
   pid?: number;
   sleep?: (milliseconds: number) => Promise<void>;
+  signal?: AbortSignal;
 }
 
 export class AtomicWriteError extends Error {
@@ -69,6 +70,7 @@ async function writeAtomicContents(
   contents: string | Uint8Array,
   options: AtomicWriteOptions,
 ): Promise<void> {
+  options.signal?.throwIfAborted();
   const directory = dirname(path);
   try {
     await mkdir(directory, { recursive: true });
@@ -81,18 +83,28 @@ async function writeAtomicContents(
   );
   let file;
   let completedWrite = false;
+  let completedRename = false;
   try {
+    options.signal?.throwIfAborted();
     file = await open(temporary, "wx", 0o600);
+    options.signal?.throwIfAborted();
     if (typeof contents === "string") await file.writeFile(contents, "utf8");
     else await file.writeFile(contents);
+    options.signal?.throwIfAborted();
     await file.sync();
+    options.signal?.throwIfAborted();
     await file.close();
     file = undefined;
     completedWrite = true;
+    options.signal?.throwIfAborted();
     await renameWithRetry(temporary, path, options);
+    completedRename = true;
   } catch (error) {
     await file?.close().catch(() => {});
-    if (!completedWrite) await unlink(temporary).catch(() => {});
+    if (!completedRename && (!completedWrite || options.signal?.aborted)) {
+      await unlink(temporary).catch(() => {});
+    }
+    if (options.signal?.aborted) throw error;
     if (error instanceof AtomicWriteError) throw error;
     throw new AtomicWriteError((error as NodeJS.ErrnoException).code, completedWrite);
   }
@@ -166,6 +178,7 @@ async function renameWithRetry(
   const delays = options.retryDelaysMs ?? DEFAULT_RENAME_RETRY_DELAYS_MS;
   const sleep = options.sleep ?? delay;
   for (let attempt = 0; ; attempt += 1) {
+    options.signal?.throwIfAborted();
     try {
       await renameFile(source, destination);
       return;
@@ -174,9 +187,26 @@ async function renameWithRetry(
       if (!code || !RETRYABLE_RENAME_CODES.has(code) || attempt >= delays.length) {
         throw new AtomicWriteError(code);
       }
-      await sleep(delays[attempt]);
+      await abortableSleep(delays[attempt], options.signal, sleep);
     }
   }
+}
+
+function abortableSleep(
+  milliseconds: number,
+  signal: AbortSignal | undefined,
+  sleep: (milliseconds: number) => Promise<void>,
+): Promise<void> {
+  if (!signal) return sleep(milliseconds);
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    sleep(milliseconds).then(
+      () => { signal.removeEventListener("abort", onAbort); resolve(); },
+      (error) => { signal.removeEventListener("abort", onAbort); reject(error); },
+    );
+  });
 }
 
 function delay(milliseconds: number): Promise<void> {

@@ -59,7 +59,7 @@ test("accounts for worker concurrency when network latency exceeds spacing", () 
   assert.equal(estimate.expectedCommentsPerSecond, 1_000);
 });
 
-test("scales delay-bound throughput across workers on one lane", () => {
+test("does not let workers shorten one lane's configured start interval", () => {
   const singleWorker = estimateCommentScan({
     comments: 100_000,
     pageSize: 100,
@@ -80,8 +80,8 @@ test("scales delay-bound throughput across workers on one lane", () => {
   });
 
   assert.equal(singleWorker.expectedSeconds, 2_900);
-  assert.equal(fourWorkers.expectedSeconds, 725);
-  assert.equal(fourWorkers.expectedCommentsPerSecond, 137.93);
+  assert.equal(fourWorkers.expectedSeconds, singleWorker.expectedSeconds);
+  assert.equal(fourWorkers.expectedCommentsPerSecond, singleWorker.expectedCommentsPerSecond);
 });
 
 test("network latency becomes the lower bound when delay is zero", () => {
@@ -253,12 +253,45 @@ test("models a QQ song as one serial SeqNo chain while healthy lanes rotate", ()
   assert.equal(eightLanes.effectiveWorkers, 1);
   assert.equal(eightLanes.serialRequestChain, true);
   assert.equal(eightLanes.proxyTransportMaxConcurrent, 1);
-  assert.equal(eightLanes.proxyTransportStartDelayMs, 250);
+  assert.equal(eightLanes.proxyTransportStartDelayMs, 50);
   assert.equal(eightLanes.proxyTransportStartJitterMs, 0);
   assert.equal(eightLanes.checkpointSlots, 1);
 });
 
-test("keeps QQ likes pacing shared per lane while workers overlap network work", () => {
+test("models the new QQ likes defaults at a 50 ms aggregate start gate", () => {
+  const eightLanes = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 8,
+    minDelayMs: 300,
+    jitterMs: 100,
+    networkMs: 400,
+    lanes: 8,
+    workersPerLane: 1,
+    maxWorkers: 8,
+  });
+  const fourLanes = estimateCommentScan({
+    platform: "qq",
+    comments: 100_000,
+    pageSize: 25,
+    partitions: 4,
+    minDelayMs: 300,
+    jitterMs: 100,
+    networkMs: 400,
+    lanes: 4,
+    workersPerLane: 2,
+    maxWorkers: 8,
+  });
+
+  assert.equal(eightLanes.proxyTransportStartDelayMs, 50);
+  assert.equal(eightLanes.expectedSeconds, 200);
+  assert.equal(eightLanes.expectedCommentsPerSecond, 500);
+  assert.equal(fourLanes.expectedSeconds, 350);
+  assert.equal(fourLanes.expectedCommentsPerSecond, 285.71);
+});
+
+test("keeps per-lane pacing shared across workers while slow network work overlaps", () => {
   const pacingBoundOne = estimateCommentScan({
     platform: "qq",
     comments: 100_000,
@@ -270,7 +303,6 @@ test("keeps QQ likes pacing shared per lane while workers overlap network work",
     lanes: 2,
     workersPerLane: 1,
     maxWorkers: 32,
-    workersShareLanePacing: true,
   });
   const pacingBoundFour = estimateCommentScan({
     platform: "qq",
@@ -283,7 +315,6 @@ test("keeps QQ likes pacing shared per lane while workers overlap network work",
     lanes: 2,
     workersPerLane: 4,
     maxWorkers: 32,
-    workersShareLanePacing: true,
   });
   const networkBoundOne = estimateCommentScan({
     platform: "qq",
@@ -296,7 +327,6 @@ test("keeps QQ likes pacing shared per lane while workers overlap network work",
     lanes: 1,
     workersPerLane: 1,
     maxWorkers: 32,
-    workersShareLanePacing: true,
   });
   const networkBoundFour = estimateCommentScan({
     platform: "qq",
@@ -309,7 +339,6 @@ test("keeps QQ likes pacing shared per lane while workers overlap network work",
     lanes: 1,
     workersPerLane: 8,
     maxWorkers: 32,
-    workersShareLanePacing: true,
   });
 
   assert.equal(pacingBoundOne.expectedSeconds, 7_000);

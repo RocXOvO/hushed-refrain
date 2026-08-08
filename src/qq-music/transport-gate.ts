@@ -1,9 +1,9 @@
 import { RunCancelled } from "../errors";
 
 export const DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT = 4;
-export const DEFAULT_QQ_TRANSPORT_START_DELAY_MS = 250;
+export const DEFAULT_QQ_TRANSPORT_START_DELAY_MS = 50;
 export const MAX_QQ_TRANSPORT_CONCURRENT = 32;
-export const MIN_QQ_TRANSPORT_START_DELAY_MS = 80;
+export const MIN_QQ_TRANSPORT_START_DELAY_MS = 50;
 
 export interface QQMusicTransportProfile {
   maxConcurrent: number;
@@ -29,10 +29,7 @@ export function qqMusicTransportProfile(
   const maxConcurrent = Math.min(workerCap, MAX_QQ_TRANSPORT_CONCURRENT);
   return {
     maxConcurrent,
-    minStartDelayMs: Math.max(
-      MIN_QQ_TRANSPORT_START_DELAY_MS,
-      Math.ceil(1_000 / Math.max(DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT, maxConcurrent)),
-    ),
+    minStartDelayMs: MIN_QQ_TRANSPORT_START_DELAY_MS,
     checkpointSlots: maxConcurrent,
   };
 }

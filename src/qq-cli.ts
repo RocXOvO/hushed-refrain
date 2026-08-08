@@ -36,8 +36,8 @@ Scan options:
   --workers-per-lane N               default: 4; parallelizes songs, not pages of one song
   --max-workers N                    default: 8; hard cap 1..32
   --request-budget N                 default: 250; task-wide logical comment pages; 0 means unlimited
-  --min-delay-ms N                   default: 3000 per direct-IP cycle
-  --jitter-ms N                      default: 1000
+  --min-delay-ms N                   default: 300 between starts on one exit
+  --jitter-ms N                      default: 100 (actual range 300-399 ms)
   --max-retries N                    default: 2
   --forbidden-cooldown-ms N          default: 900000
   --state PATH                       default: data/qq/state-<stable-task-key>.json
@@ -98,8 +98,8 @@ async function main(): Promise<void> {
       "workers-per-lane": { type: "string", default: "4" },
       "max-workers": { type: "string", default: "8" },
       "request-budget": { type: "string", default: "250" },
-      "min-delay-ms": { type: "string", default: "3000" },
-      "jitter-ms": { type: "string", default: "1000" },
+      "min-delay-ms": { type: "string", default: "300" },
+      "jitter-ms": { type: "string", default: "100" },
       "max-retries": { type: "string", default: "2" },
       "forbidden-cooldown-ms": { type: "string", default: "900000" },
       state: { type: "string" },
@@ -148,7 +148,6 @@ async function main(): Promise<void> {
     client,
     transportGate,
     governor: new RequestGovernor({
-      concurrency: 1,
       requestBudget: 0,
       minDelayMs: integer(parsed.values["min-delay-ms"], "min-delay-ms", 0),
       jitterMs: integer(parsed.values["jitter-ms"], "jitter-ms", 0),

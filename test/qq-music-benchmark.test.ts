@@ -7,21 +7,21 @@ const base: Omit<QQMusicBenchmarkInput, "mode" | "lanes" | "pageSize"> = {
   maxWorkers: 8,
   songCount: 1,
   pagesPerSong: 10_000,
-  minDelayMs: 3_000,
-  averageJitterMs: 500,
-  gateMaxConcurrent: 4,
-  gateMinStartDelayMs: 250,
+  minDelayMs: 300,
+  averageJitterMs: 49.5,
+  gateMaxConcurrent: 32,
+  gateMinStartDelayMs: 50,
   averageRequestMs: 150,
   averageCheckpointMs: 20,
   averageCheckpointBytes: 250_000,
 };
 
-test("QQ delay-bound model reaches about 2x comments throughput with 8 vs 4 exits", () => {
+test("QQ song model remains one serial request chain even with more exits", () => {
   const fourLanes = modelQQMusicBenchmark({ ...base, mode: "song", lanes: 4, pageSize: 25 });
   const eightLanes = modelQQMusicBenchmark({ ...base, mode: "song", lanes: 8, pageSize: 25 });
   const ratio = eightLanes.commentsPerSecond / fourLanes.commentsPerSecond;
 
-  assert.ok(ratio > 1.99 && ratio < 2.01, `expected about 2x, got ${ratio}`);
+  assert.equal(ratio, 1);
   assert.equal(eightLanes.maxSameSongConcurrent, 1);
   assert.equal(eightLanes.participatingLanes, 8);
   assert.equal(eightLanes.requests, eightLanes.pages);
@@ -68,15 +68,13 @@ test("QQ likes model reports source requests and bounded cross-song concurrency"
   assert.equal(result.controlCheckpointWrites, 4);
   assert.equal(result.checkpointWrites, result.pageCheckpointWrites + 4);
   assert.equal(result.checkpointBytes, result.checkpointWrites * 250_000);
-  assert.equal(result.sourceDurationMs, 7_000);
+  assert.equal(result.sourceDurationMs, 699);
 });
 
-test("QQ likes dynamic 32-slot gate removes the legacy task-wide four-slot ceiling", () => {
+test("QQ likes model matches the 50 ms aggregate and 300-399 ms per-exit defaults", () => {
   const shared = {
     ...base,
     mode: "likes" as const,
-    lanes: 32,
-    workersPerLane: 1,
     maxWorkers: 32,
     songCount: 100,
     pagesPerSong: 10,
@@ -85,21 +83,26 @@ test("QQ likes dynamic 32-slot gate removes the legacy task-wide four-slot ceili
     checkpointPageCap: 4,
     averageCheckpointBatchPages: 2,
   };
-  const legacy = modelQQMusicBenchmark({
+  const fourLanes = modelQQMusicBenchmark({
     ...shared,
-    gateMaxConcurrent: 4,
-    gateMinStartDelayMs: 250,
-    checkpointSlots: 4,
-  });
-  const adaptive = modelQQMusicBenchmark({
-    ...shared,
+    lanes: 4,
+    workersPerLane: 8,
     gateMaxConcurrent: 32,
-    gateMinStartDelayMs: 80,
+    gateMinStartDelayMs: 50,
+    checkpointSlots: 32,
+  });
+  const eightLanes = modelQQMusicBenchmark({
+    ...shared,
+    lanes: 8,
+    workersPerLane: 4,
+    gateMaxConcurrent: 32,
+    gateMinStartDelayMs: 50,
     checkpointSlots: 32,
   });
 
-  assert.ok(adaptive.commentsPerSecond > legacy.commentsPerSecond * 2);
-  assert.equal(adaptive.maxSameSongConcurrent, 1);
+  assert.ok(eightLanes.commentsPerSecond > 490 && eightLanes.commentsPerSecond < 500);
+  assert.ok(fourLanes.commentsPerSecond > 282 && fourLanes.commentsPerSecond < 287);
+  assert.equal(eightLanes.maxSameSongConcurrent, 1);
 });
 
 test("QQ likes workers share each lane's pacing while overlapping slow requests", () => {

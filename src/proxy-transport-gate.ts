@@ -2,8 +2,8 @@ import { errorStatus, RunCancelled } from "./errors";
 import type { RequestGovernor } from "./governor";
 
 export const DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT = 8;
-export const DEFAULT_PROXY_TRANSPORT_START_DELAY_MS = 80;
-export const DEFAULT_PROXY_TRANSPORT_START_JITTER_MS = 40;
+export const DEFAULT_PROXY_TRANSPORT_START_DELAY_MS = 50;
+export const DEFAULT_PROXY_TRANSPORT_START_JITTER_MS = 0;
 
 export interface ProxyTransportGateOptions {
   maxConcurrent?: number;

@@ -20,6 +20,7 @@ const DESKTOP_UPDATE_CHANNELS = {
 
 const DESKTOP_EXPORT_CHANNELS = {
   resultsPdf: "desktop-export:results-pdf",
+  resultsPdfProgress: "desktop-export:results-pdf-progress",
 } as const;
 
 contextBridge.exposeInMainWorld("ncmDesktop", Object.freeze({
@@ -38,6 +39,11 @@ contextBridge.exposeInMainWorld("ncmDesktop", Object.freeze({
   downloadUpdate: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.download),
   installUpdate: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.install),
   exportResultsPdf: (request: unknown): Promise<unknown> => ipcRenderer.invoke(DESKTOP_EXPORT_CHANNELS.resultsPdf, request),
+  onResultsPdfProgress: (listener: (progress: unknown) => void): (() => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: unknown): void => listener(progress);
+    ipcRenderer.on(DESKTOP_EXPORT_CHANNELS.resultsPdfProgress, wrapped);
+    return () => ipcRenderer.removeListener(DESKTOP_EXPORT_CHANNELS.resultsPdfProgress, wrapped);
+  },
   onUpdateState: (listener: (state: unknown) => void): (() => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, state: unknown): void => listener(state);
     ipcRenderer.on(DESKTOP_UPDATE_CHANNELS.stateChanged, wrapped);

@@ -41,6 +41,32 @@ test("atomically writes binary PDF output", async () => {
   assert.equal((await readdir(root)).filter((name) => name.includes(".tmp-")).length, 0);
 });
 
+test("aborting a binary write during rename backoff cannot replace the official file", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-atomic-abort-"));
+  const path = join(root, "report.pdf");
+  await writeFile(path, "%PDF-old", "ascii");
+  const controller = new AbortController();
+  let waiting!: () => void;
+  const enteredBackoff = new Promise<void>((resolve) => { waiting = resolve; });
+  const write = writeAtomicBuffer(path, Buffer.from("%PDF-new", "ascii"), {
+    randomId: () => "aborted",
+    signal: controller.signal,
+    retryDelaysMs: [60_000],
+    renameFile: async () => {
+      throw Object.assign(new Error("locked"), { code: "EBUSY" });
+    },
+    sleep: async () => {
+      waiting();
+      await new Promise<void>(() => {});
+    },
+  });
+  await enteredBackoff;
+  controller.abort(new Error("timed out"));
+  await assert.rejects(write, /timed out/);
+  assert.equal(await readFile(path, "ascii"), "%PDF-old");
+  assert.equal((await readdir(root)).filter((name) => name.includes(".tmp-")).length, 0);
+});
+
 test("concurrent writes to one path use distinct temporary files", async () => {
   const root = await mkdtemp(join(tmpdir(), "ncm-atomic-concurrent-"));
   const path = join(root, "state.json");

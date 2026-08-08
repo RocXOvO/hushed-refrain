@@ -125,8 +125,8 @@ QQ HTTP 面：
 - 评论接口为 `GetNewCommentList`。
 - 评论 `pageSize` 新任务范围 `1..25`，默认 `25`。
 - 喜欢来源 `likedPageSize` 范围 `1..500`，默认 `500`，两者不可混用。
-- `HasMore=true` 必须返回非空十进制 `nextCursor`；从第二页起它必须严格小于请求游标。
-- 下一游标的权威来源是本页最后一条已严格规范化评论的 `SeqNo`；Client 校验整页 SeqNo 为十进制、响应末值与 `nextCursor` 一致，并拒绝相等、回跳或乱序的分页链。
+- `HasMore=true` 必须返回非空十进制 `nextCursor`；从第二页起，响应中的每一条 SeqNo 都必须严格小于请求游标。
+- 下一游标的权威来源是响应原始顺序中最后一条已规范化评论的 `SeqNo`。页内相等或局部乱序允许并全部处理；跨页不后退则整页不提交并隔离该歌曲，不猜测排序或取最小值。
 - 同一歌曲始终最多一个在途评论页。并发只发生在不同歌曲之间。
 - 只有成功且协议完整的页才能推进 `cursor/pageNo`；普通失败和 Lane 故障保留原游标。
 - `requestedSongId` 始终是 song 任务主键。歌曲详情响应只能补充 MID、名称和艺人；不得替换任务歌曲 ID，也不得用 JavaScript `Number` 转换十进制 ID。
@@ -134,8 +134,8 @@ QQ HTTP 面：
 ### 4.3 代理、限速与取消
 
 - 一条 `QQCommentLane` 拥有一个 Client、一个 Lane 专属 Governor，并引用任务唯一的 QQ TransportGate。
-- 生产 Governor pacing concurrency 固定为 `1`；`workersPerLane` 只增加跨歌曲候选工作，不能缩短单出口 `3000 ms + jitter` 周期。
-- QQ Gate 按主机 Worker 容量构建：`song` 固定 1 个在途且开始间隔至少 250 ms；`likes` 直接采用 `hostConcurrency` 的 1–32 容量，开始间隔为 `max(80, ceil(1000 / max(4, 容量))) ms`。它与网易云 AIMD `ProxyTransportGate` 是不同策略，且不改变单 Lane Governor 的节奏。
+- 生产 Governor 直接使用每出口最小请求启动间隔；`workersPerLane` 只增加跨歌曲候选工作，不能缩短它。QQ 新任务默认300–399ms。
+- QQ Gate 按主机 Worker 容量构建：`song` 固定1个在途，`likes` 采用 `hostConcurrency` 的1–32容量，两者聚合发车至少间隔50ms。它与网易云 AIMD策略不同，但都不能弱化单 Lane Governor。
 - QQ likes 的唯一 GUI Worker 容量为 `hostConcurrency`；Manager 选定 Lane 后自动派生 `workersPerLane = ceil(hostConcurrency / selectedLanes)`。Worker 是 invocation-local `worker-N`，每页通过共享 `LaneAllocator` 公平取得 Lane，单 Lane permit 不超过派生值。禁止通过裁掉后半段 Lane 实现 hard cap，单 Lane 也不得把主机容量缩成 1。QQ song 无论配置如何都只有一个活动 Worker/SeqNo 链，但每个成功页仍公平换 Lane。
 - 自动出口 `maxProxyLanes=0` 使用全部已验证出口；正数才是本任务上限。现有共享池不因任务选择而缩容或重建。
 - 首发不增加强制 QQ 启动探针：共享池的“已验证”只表示现有出口/网易云检查，UI 不得宣称已验证 QQ 域。每次 QQ 请求仍独立 fail-closed；Lane 连续最终失败达到阈值后在本任务下线，全部 Lane 不可用时明确 `paused` 并保留检查点。未来 QQ capability probe 只能按 pool generation 低频缓存于任务侧，不能回写或缩减共享池。
@@ -199,7 +199,7 @@ data/logs/qq-<job-id>.jsonl
 
 状态解码可读旧 `pageSize=1..100`；扫描器在任何远程请求或 finished 早退前先把 `26..100` 单向持久化为 `25`，保留每曲 SeqNo、pageNo、命中键和 JSONL。迁移保存失败时远程请求数必须为零。Decoder 还必须验证：任务 pages/comments 等于歌曲求和、`truncated => done`、createdAt/updatedAt 是有效 ISO、song 模式基数与 requestedSongId 一致。`onCheckpoint` 若发生在原子写前只能称 live snapshot，不能冒充 durable ack。
 
-`resume-task.json` 升级为平台化描述符：旧 v1 `source|parallel` 仍视为网易云；QQ 使用 v2 `platform:"qq" + mode:"song|likes"`。恢复只回填安全 allowlist，所有 fresh 关闭，不自动启动，不保存凭据。
+`resume-task.json` 当前为 v3 平台化描述符并带 `requestIntervalSemantics:"per-start-v1"`。旧 NetEase v1/v2 在锁内一次性等价换算并写回；旧 QQ v2 自定义间隔原样保留。恢复只回填安全 allowlist，所有 fresh 关闭，不自动启动，不保存凭据或改变检查点。
 
 ## 6. 结果、报告和安全
 
@@ -209,7 +209,7 @@ data/logs/qq-<job-id>.jsonl
 - 导出请求冻结为判别联合：NetEase `{platform:"netease",mode:"source"|"parallel",jobId,target:{kind:"uid",value}}`；QQ `{platform:"qq",mode:"song"|"likes",jobId,target:{kind:"encryptUin",value}}`。不得把 QQ target 塞入 uid 字段。
 - QQ target 必须来自该 generation 的 canonical EncryptUin，不得使用遮罩值、当前表单值或原始主页 URL。报告在异步读取前后验证 `platform + mode + jobId + canonicalTarget + outputPath`。
 - 报告 HTML 对用户/上游字段全部转义；只从已验证的 MID 或十进制 song ID 重建 QQ 官方链接，不信任持久化的任意 URL。
-- Electron PDF IPC、route query 和报告 meta 使用同一判别 DTO；隐藏窗口在 fonts-ready 后复核 platform/mode/jobId/target。文件名只使用平台与遮罩标识，不泄露完整 EncryptUin。仍不接收任意路径、URL、HTML 或打印参数。
+- Electron PDF IPC、route query 和报告 meta 使用同一判别 DTO；隐藏窗口在 fonts-ready 后复核 platform/mode/jobId/target。load/fonts/print/write 分别有界：未提交的写入可取消，已进入 OS rename 时保持目标路径锁直到结算，使同路径重试最后提交且不被旧写入覆盖；保存、取消和失败都有明确反馈，诊断只记录稳定阶段/错误码。文件名只使用平台与遮罩标识，不泄露完整 EncryptUin。仍不接收任意路径、URL、HTML 或打印参数。
 - 代理凭据、Cookie、状态、结果和日志都不得进入 Release 或测试输出。
 
 ## 7. Dashboard 设计
@@ -220,7 +220,7 @@ data/logs/qq-<job-id>.jsonl
 - QQ likes 的 Worker 是跨歌曲调度 Worker；显示 configured lanes/workers 与本轮实际参与 lanes/workers，不把它们当同时在途峰值。
 - 活动行复用 v0.19 的 keyed/bounded/in-place 更新、64 行工作集和单例计时器；QQ manager 通过请求事件与歌曲进度事件对齐现有行模型，不在 renderer 里另建轮询器。`done/truncated` 必须移除稳定行。
 - 结果表使用平台判别渲染链接和身份；旧视图的 SSE、日志、结果和估算响应不得污染新视图。
-- 估算 API 必须显式平台化；QQ 评论拒绝 `pageSize>25`，song 使用 `serialRequestChain=1`，likes 使用 `workersShareLanePacing=1`，按 host/lane 自动派生每 Lane permit，并使用与主机 Worker 上限一致的动态 Gate 和检查点槽位。
+- 估算 API 必须显式平台化；QQ 评论拒绝 `pageSize>25`，song 使用 `serialRequestChain=1`，likes 按 host/lane 自动派生每 Lane permit。两平台都把 `minDelayMs` 当同 Lane 字面启动间隔，QQ 使用50ms聚合 Gate和与主机 Worker 上限一致的检查点槽位。
 - `latestJobs`、result generation、settlement、REST/SSE/log/estimate guards 全部按完整 viewKey 保存；不能把 qq:song 与 qq:likes 折叠成一个前端 mode。现有 tabSwitchVersion、Inspector、窄屏媒体监听、滚动条、SSE batching 和单飞轮询保持原样。
 
 ## 8. 实施阶段与门禁

@@ -39,7 +39,9 @@ jobs:
           $stdoutPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stdout.log"
           $stderrPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stderr.log"
           $resultPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-result.log"
+          $pdfPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-report.pdf"
           $env:NCM_DESKTOP_SMOKE_RESULT = $resultPath
+          $env:NCM_DESKTOP_SMOKE_PDF = $pdfPath
           if (-not (Test-Path $appPath)) { throw "Packaged executable was not found: $appPath" }
           $process = Start-Process -FilePath $appPath -PassThru -Wait -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
           $stdout = if (Test-Path $stdoutPath) { Get-Content $stdoutPath -Raw } else { "" }
@@ -49,9 +51,12 @@ jobs:
           if ($process.ExitCode -ne 0) { throw "Packaged application exited with code $($process.ExitCode)." }
           $result = if (Test-Path $resultPath) { Get-Content $resultPath -Raw } else { "" }
           Write-Host $result
-          if ($result -notmatch "DESKTOP_SMOKE_OK" -or $result -notmatch "DESKTOP_WINDOW_BRIDGE_OK win32") {
+          if ($result -notmatch "DESKTOP_SMOKE_OK" -or $result -notmatch "DESKTOP_WINDOW_BRIDGE_OK win32" -or $result -notmatch "DESKTOP_PDF_OK") {
             throw "Packaged application did not report a successful Windows smoke test."
           }
+          if (-not (Test-Path $pdfPath)) { throw "Packaged application did not write the PDF smoke file." }
+          $magic = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($pdfPath), 0, 5)
+          if ($magic -ne "%PDF-") { throw "Packaged PDF smoke file is invalid." }
 
       - name: Build NSIS installer
         run: npx electron-builder --win nsis --x64 --publish never

@@ -343,12 +343,16 @@ export class QQJobManager {
         configuredWorkers: this.snapshotValue.configuredWorkers,
         hostConcurrency: config.hostConcurrency,
         requestBudget: config.requestBudget,
+        minDelayMs: config.minDelayMs,
+        jitterMs: config.jitterMs,
+        requestIntervalSemantics: "per-start-v1",
       });
       try {
         await this.resumeWriter(this.paths.resumeTask, {
-          version: 2,
+          version: 3,
           platform: "qq",
           mode: config.mode,
+          requestIntervalSemantics: "per-start-v1",
           updatedAt: this.now().toISOString(),
           input: {
             target: target.encryptUin,
@@ -764,8 +768,8 @@ export class QQJobManager {
         allowDirect: boolean(allowDirectInput),
         maxProxyLanes: 0,
         hostConcurrency: 1,
-        minDelayMs: 3_000,
-        jitterMs: 1_000,
+        minDelayMs: 300,
+        jitterMs: 100,
         forbiddenCooldownMs: 900_000,
       };
       const prepared = await this.prepareLanes(config, controller.signal);
@@ -836,7 +840,6 @@ export class QQJobManager {
       transportGate: gate,
       governor: new RequestGovernor({
         requestBudget: 0,
-        concurrency: 1,
         minDelayMs: config.minDelayMs,
         jitterMs: config.jitterMs,
         maxRetries: 2,
@@ -1085,8 +1088,8 @@ function parseStartRequest(input: QQStartRequest): ParsedStartRequest {
     pageSize: integer(input.pageSize ?? 25, "pageSize", 1, 25),
     likedPageSize: integer(input.likedPageSize ?? 500, "likedPageSize", 1, 500),
     requestBudget: integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000),
-    minDelayMs: integer(input.minDelayMs ?? 3_000, "minDelayMs", 0, 600_000),
-    jitterMs: integer(input.jitterMs ?? 1_000, "jitterMs", 0, 600_000),
+    minDelayMs: integer(input.minDelayMs ?? 300, "minDelayMs", 0, 600_000),
+    jitterMs: integer(input.jitterMs ?? 100, "jitterMs", 0, 600_000),
     forbiddenCooldownMs: integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000),
     maxCommentPagesPerSong: integer(input.maxCommentPagesPerSong ?? 0, "maxCommentPagesPerSong", 0, 1_000_000),
     maxSongs: integer(input.maxSongs ?? 0, "maxSongs", 0, 100_000),

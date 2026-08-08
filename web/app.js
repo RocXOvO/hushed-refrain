@@ -105,10 +105,10 @@ const PARAMETER_HELP = {
   "target-netease": ["用户 UID", "输入网易云音乐用户主页里的数字 UID。它不是昵称；可以使用右侧的获取教程查看具体位置。"],
   "target-qq": ["QQ 目标用户", "可输入数字 QQ 号、个人主页链接或 EncryptUin。实际匹配会使用规范化后的完整 EncryptUin。"],
   song: ["歌曲", "输入 2–80 个字符的歌名或歌手，然后从候选项中选择。也可直接粘贴纯数字歌曲 ID，客户端会继续兼容这条高级路径。"],
-  "workers-per-exit": ["每出口工作线程", "同一个代理出口最多可同时调度的工作数。网易云会在基础请求周期内分配多个启动时隙；QQ 的 Governor 启动节奏按并发 1 计算，增加工作线程不会缩短单出口周期，但慢请求的网络在途仍可能重叠。"],
+  "workers-per-exit": ["每出口工作线程", "同一个代理出口最多可同时调度的工作数。增加工作线程不会缩短该出口的请求启动间隔；它只允许慢请求的网络等待互相重叠，并提升跨歌曲调度能力。"],
   "total-workers": ["总工作线程上限", "整个任务在本机可创建的工作线程硬上限。实际数量还受可用出口、每出口工作线程和主机保护限制。"],
   "exit-limit": ["任务出口上限", "只限制当前任务最多使用多少个已验证独立出口，不会缩小或重建共享代理池。0 表示自动使用当前全部可用出口。"],
-  "request-interval": ["每出口请求间隔", "每个出口的基础请求周期，随机抖动会在此基础上增加。网易云会按每出口工作线程数在周期内分配启动时隙；QQ 始终保持每出口完整周期。数值越小越快，但触发上游限流的概率也更高。"],
+  "request-interval": ["每出口请求启动间隔", "同一出口相邻两次远程请求开始之间的真实最小间隔，随机抖动只会在此基础上增加。工作线程数不会缩短这个值；不同出口分别计时。数值越小越快，但触发上游限流的概率也更高。"],
   "request-limit": ["请求上限（0不限）", "限制当次运行可以预约的逻辑评论页数。0 表示不设任务级上限；停止后仍可从检查点继续。"],
   fresh: ["新建状态", "开启后忽略该模式的旧检查点并重新扫描。关闭时会尝试按已保存的游标或分片续跑；已持久化结果仍会去重。"],
 };
@@ -1640,10 +1640,29 @@ async function exportCurrentResults() {
   syncResultExportAvailability();
   el.exportResults.setAttribute("aria-busy", "true");
   el.exportResults.querySelector("span").textContent = "正在生成…";
+  let removeProgressListener;
   try {
     if (typeof window.ncmDesktop?.exportResultsPdf === "function") {
+      if (typeof window.ncmDesktop.onResultsPdfProgress === "function") {
+        const labels = {
+          "save-dialog": "选择位置…",
+          "load-report": "读取结果…",
+          fonts: "准备排版…",
+          print: "生成 PDF…",
+          write: "写入文件…",
+        };
+        removeProgressListener = window.ncmDesktop.onResultsPdfProgress((progress) => {
+          const label = labels[progress?.stage];
+          if (label) el.exportResults.querySelector("span").textContent = label;
+        });
+      }
       const result = await window.ncmDesktop.exportResultsPdf(request);
       if (result?.status === "saved") toast(`PDF 已导出：${shortPath(result.path)}`);
+      else if (result?.status === "cancelled") toast("已取消 PDF 导出。");
+      else if (result?.status === "failed") {
+        const suffix = result.logAvailable ? " 诊断已写入 desktop.log。" : "";
+        toast(`${result.message || "PDF 导出失败，请重试。"}${suffix}`);
+      }
     } else {
       const report = new URL("/report/results", location.origin);
       report.searchParams.set("platform", request.platform);
@@ -1658,6 +1677,7 @@ async function exportCurrentResults() {
   } catch (error) {
     toast(error.message || "PDF 导出失败。");
   } finally {
+    removeProgressListener?.();
     resultExportInProgress = false;
     el.exportResults.removeAttribute("aria-busy");
     el.exportResults.querySelector("span").textContent = "导出 PDF";
@@ -2219,9 +2239,14 @@ async function restoreResumeTask() {
     const source = el.sourceForm.elements.namedItem("source")?.value;
     $("#recordScopeField").hidden = source === "likes";
     const adjustments = Array.isArray(restored.adjustments) ? restored.adjustments : [];
-    return adjustments.includes("qq-comment-page-size-25")
-      ? "已恢复 QQ 音乐任务参数；旧版评论分页已安全调整为 25，检查点游标保持不变。"
-      : true;
+    const messages = [];
+    if (adjustments.includes("netease-request-spacing-per-start-v1")) {
+      messages.push("旧版网易云节奏已等价换算为同出口真实启动间隔；检查点和扫描进度保持不变");
+    }
+    if (adjustments.includes("qq-comment-page-size-25")) {
+      messages.push("旧版 QQ 评论分页已安全调整为 25；检查点游标保持不变");
+    }
+    return messages.length > 0 ? `已恢复任务参数：${messages.join("；")}。` : true;
   } catch {
     return false;
   }

@@ -38,6 +38,8 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
   assert.equal(fixture.options[0].workersPerLane, 8);
   assert.equal(first.configuredWorkers, 8);
   assert.equal(fixture.options[0].requestBudget, 0);
+  assert.equal(first.minDelayMs, 300);
+  assert.equal(first.jitterMs, 100);
   assert.doesNotMatch(basename(fixture.options[0].statePath), /canonical|123456789/);
   assert.doesNotMatch(basename(fixture.options[0].outputPath), /canonical|123456789/);
 
@@ -126,7 +128,7 @@ test("publishes the actual dynamic QQ transport profile for likes while song sta
   assert.equal(activeOptions?.workersPerLane, 4);
   assert.equal(activeOptions?.maxWorkers, 32);
   assert.equal(likes.proxyTransportMaxConcurrent, 32);
-  assert.equal(likes.proxyTransportStartDelayMs, 80);
+  assert.equal(likes.proxyTransportStartDelayMs, 50);
   finish(reportFor(activeOptions!));
   while (coordinator.isBusy()) await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -135,7 +137,7 @@ test("publishes the actual dynamic QQ transport profile for likes while song sta
   });
   assert.equal(song.configuredWorkers, 1);
   assert.equal(song.proxyTransportMaxConcurrent, 1);
-  assert.equal(song.proxyTransportStartDelayMs, 250);
+  assert.equal(song.proxyTransportStartDelayMs, 50);
   finish(reportFor(activeOptions!));
   while (coordinator.isBusy()) await new Promise<void>((resolve) => setImmediate(resolve));
 });

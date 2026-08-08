@@ -66,8 +66,8 @@ Parallel song options:
   --end-time TIME                   epoch milliseconds or ISO date
   --request-budget N                default: 5000
   --max-pages N                     default: 0 (all pages)
-  --min-delay-ms N                  default: 333 per worker
-  --jitter-ms N                     default: 100 per worker
+  --min-delay-ms N                  default: 111 between starts on one exit
+  --jitter-ms N                     default: 34 added to that start interval
   --stop-after-first
   --fresh
 
@@ -203,8 +203,8 @@ async function scanSongCommand(args: string[]): Promise<void> {
       "end-time": { type: "string" },
       "request-budget": { type: "string", default: "5000" },
       "max-pages": { type: "string", default: "0" },
-      "min-delay-ms": { type: "string", default: "333" },
-      "jitter-ms": { type: "string", default: "100" },
+      "min-delay-ms": { type: "string", default: "111" },
+      "jitter-ms": { type: "string", default: "34" },
       "max-retries": { type: "string", default: "2" },
       "forbidden-cooldown-ms": { type: "string", default: "900000" },
       output: { type: "string" },
@@ -263,7 +263,6 @@ async function scanSongCommand(args: string[]): Promise<void> {
     transportGate,
     governor: new RequestGovernor({
       requestBudget: Math.max(1_000, requestBudget * 2),
-      concurrency: workersPerLane,
       minDelayMs,
       jitterMs,
       maxRetries,

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { RequestGovernor } from "../src/governor";
 import { CooldownRequired, RunCancelled } from "../src/errors";
-import { QQMusicApiError } from "../src/qq-music/client";
+import { QQMusicApiError, QQMusicCommentPageProtocolError } from "../src/qq-music/client";
 import { QQMusicProxyError } from "../src/qq-music/proxy-fetch";
 import { QQMusicResultWriter } from "../src/qq-music/result-writer";
 import { runQQMusicScan } from "../src/qq-music/scanner";
@@ -833,6 +833,37 @@ test("permanent QQ protocol errors pause with the cursor resumable", async () =>
   assert.equal(state?.songs[0].done, false);
   assert.equal(state?.songs[0].truncated, false);
   assert.match(state?.songs[0].lastError ?? "", /permanent malformed/);
+});
+
+test("a song-scoped QQ cursor anomaly does not cancel other liked songs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "qq-cursor-isolation-"));
+  const options = { ...scanOptions(directory), mode: "likes" as const, songId: undefined, maxWorkers: 3 };
+  await saveQQMusicScanState(options.statePath, pendingLikesState(["1", "2", "3"]));
+  const calls: string[] = [];
+  const client = fakeClient({
+    comments: async (songId) => {
+      calls.push(songId);
+      if (songId === "1") {
+        throw new QQMusicCommentPageProtocolError(
+          "page-crosses-request-cursor",
+          "QQ Music comment page SeqNo values must be older than the request cursor.",
+        );
+      }
+      return { comments: [], hasMore: false };
+    },
+  });
+
+  const result = await runQQMusicScan([lane(client, governor(20))], options);
+  const state = await loadQQMusicScanState(options.statePath);
+
+  assert.equal(result.status, "paused");
+  assert.equal(result.coverageComplete, false);
+  assert.match(result.note ?? "", /1 QQ Music song/);
+  assert.deepEqual(new Set(calls), new Set(["1", "2", "3"]));
+  assert.equal(state?.songs.find((song) => song.id === "1")?.done, false);
+  assert.equal(state?.songs.find((song) => song.id === "1")?.pageNo, 0);
+  assert.equal(state?.songs.find((song) => song.id === "2")?.done, true);
+  assert.equal(state?.songs.find((song) => song.id === "3")?.done, true);
 });
 
 test("an unavailable QQ song resource truncates without a retry loop", async () => {

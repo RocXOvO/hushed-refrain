@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdir, readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { extname, join, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
+import lockfile from "proper-lockfile";
 import { EnhancedNcmClient, type NcmUserProfile } from "./api";
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import { CommentRateTracker } from "./comment-rate";
@@ -117,7 +118,16 @@ interface PlatformResumeTaskDescriptor {
   input: Record<string, string | number | boolean>;
 }
 
-type ResumeTaskDescriptor = LegacyResumeTaskDescriptor | PlatformResumeTaskDescriptor;
+interface CurrentResumeTaskDescriptor {
+  version: 3;
+  platform: "netease" | "qq";
+  mode: "source" | "parallel" | "song" | "likes";
+  requestIntervalSemantics: "per-start-v1";
+  updatedAt: string;
+  input: Record<string, string | number | boolean>;
+}
+
+type ResumeTaskDescriptor = LegacyResumeTaskDescriptor | PlatformResumeTaskDescriptor | CurrentResumeTaskDescriptor;
 
 type JobStatus = "idle" | "running" | "stopping" | RunReport["status"] | "error";
 
@@ -600,7 +610,6 @@ class JobManager {
       transportGate: this.transportGate,
       governor: new RequestGovernor({
         requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2),
-        concurrency: workersPerLane,
         minDelayMs,
         jitterMs,
         maxRetries: 3,
@@ -714,6 +723,9 @@ class JobManager {
       lanes: this.lanes.length,
       workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
       requestBudget,
+      minDelayMs,
+      jitterMs,
+      requestIntervalSemantics: "per-start-v1",
       laneSelection: selectedPoolEntries.length > 0 ? selectedPool.selection : undefined,
       proxyTransportMaxConcurrent: this.transportGate ? hostConcurrency : undefined,
       proxyTransportStartDelayMs: this.transportGate ? DEFAULT_PROXY_TRANSPORT_START_DELAY_MS : undefined,
@@ -721,8 +733,10 @@ class JobManager {
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
-        version: 1,
+        version: 3,
+        platform: "netease",
         mode: "source",
+        requestIntervalSemantics: "per-start-v1",
         updatedAt: new Date().toISOString(),
         input: {
           uid,
@@ -1057,8 +1071,8 @@ class ParallelJobManager {
     const pageSize = integer(input.pageSize ?? 1_000, "pageSize", 1, 2_000);
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const maxPages = integer(input.maxPages ?? 0, "maxPages", 0, 1_000_000);
-    const minDelayMs = integer(input.minDelayMs ?? 333, "minDelayMs", 0, 600_000);
-    const jitterMs = integer(input.jitterMs ?? 100, "jitterMs", 0, 600_000);
+    const minDelayMs = integer(input.minDelayMs ?? 111, "minDelayMs", 0, 600_000);
+    const jitterMs = integer(input.jitterMs ?? 34, "jitterMs", 0, 600_000);
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const pool = await readProxyPool(this.paths.pool);
     if (!pool || !proxyPoolStatusRunning(pool)) throw new HttpError(409, "代理池尚未运行。");
@@ -1078,7 +1092,7 @@ class ParallelJobManager {
       client: new EnhancedNcmClient({ proxy: entry.endpoint }),
       transportGate: this.transportGate,
       governor: new RequestGovernor({
-        requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2), concurrency: workersPerLane, minDelayMs, jitterMs,
+        requestBudget: requestBudget === 0 ? 0 : Math.max(1_000, requestBudget * 2), minDelayMs, jitterMs,
         maxRetries: 2, forbiddenCooldownMs,
       }),
     }));
@@ -1119,6 +1133,9 @@ class ParallelJobManager {
       lanes: this.lanes.length,
       workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
       requestBudget,
+      minDelayMs,
+      jitterMs,
+      requestIntervalSemantics: "per-start-v1",
       laneSelection: selectedPool.selection,
       proxyTransportMaxConcurrent: hostConcurrency,
       proxyTransportStartDelayMs: DEFAULT_PROXY_TRANSPORT_START_DELAY_MS,
@@ -1126,8 +1143,10 @@ class ParallelJobManager {
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
-        version: 1,
+        version: 3,
+        platform: "netease",
         mode: "parallel",
+        requestIntervalSemantics: "per-start-v1",
         updatedAt: new Date().toISOString(),
         input: {
           uid,
@@ -1510,6 +1529,7 @@ export async function startDashboard(options: DashboardOptions): Promise<Server>
   const qq = new QQJobManager({
     paths: { data: paths.data, pool: paths.pool, resumeTask: paths.resumeTask },
     coordinator,
+    resumeWriter: saveResumeTask,
     ...(options.qqClientFactory ? { clientFactory: options.qqClientFactory } : {}),
     ...(options.qqRunner ? { runner: options.qqRunner } : {}),
   });
@@ -1605,8 +1625,7 @@ async function route(
     });
   }
   if (method === "GET" && url.pathname === "/api/resume") {
-    const descriptor = await readResumeTask(paths.resumeTask);
-    return json(response, 200, descriptor ? normalizeResumeTaskForClient(descriptor) : { task: null });
+    return json(response, 200, await migrateResumeTaskForClient(paths.resumeTask));
   }
   if (method === "GET" && url.pathname === "/api/job") return json(response, 200, await jobs.status());
   if (method === "POST" && url.pathname === "/api/job") return json(response, 202, await jobs.start(await body(request)));
@@ -1741,7 +1760,6 @@ async function route(
       ? selection(url.searchParams.get("mode"), ["song", "likes"] as const, "mode")
       : selection(url.searchParams.get("mode") ?? "source", ["source", "parallel"] as const, "mode");
     const serialRequestChain = estimatePlatform === "qq" && estimateMode === "song";
-    const workersShareLanePacing = estimatePlatform === "qq" && estimateMode === "likes";
     const hostConcurrency = integer(
       url.searchParams.get("hostConcurrency") ?? DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT,
       "hostConcurrency",
@@ -1762,6 +1780,11 @@ async function route(
         serialRequestChain ? 1 : Math.min(estimateLanes * estimateWorkersPerLane, hostConcurrency),
       )
       : undefined;
+    const defaultEstimateSpacing = estimatePlatform === "qq"
+      ? { minDelayMs: 300, jitterMs: 100 }
+      : estimateMode === "parallel"
+        ? { minDelayMs: 111, jitterMs: 34 }
+        : { minDelayMs: 2_500, jitterMs: 800 };
     return json(response, 200, estimateCommentScan({
       platform: estimatePlatform,
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
@@ -1776,8 +1799,8 @@ async function route(
         : undefined,
       observedCommentsPerPage: optionalNumber(url.searchParams.get("observedCommentsPerPage"), "observedCommentsPerPage", 0.01, 2_000),
       requestSuccessRatio: optionalNumber(url.searchParams.get("requestSuccessRatio"), "requestSuccessRatio", 0.0001, 1),
-      minDelayMs: integer(url.searchParams.get("minDelayMs") ?? 2_500, "minDelayMs", 0, 600_000),
-      jitterMs: integer(url.searchParams.get("jitterMs") ?? 800, "jitterMs", 0, 600_000),
+      minDelayMs: integer(url.searchParams.get("minDelayMs") ?? defaultEstimateSpacing.minDelayMs, "minDelayMs", 0, 600_000),
+      jitterMs: integer(url.searchParams.get("jitterMs") ?? defaultEstimateSpacing.jitterMs, "jitterMs", 0, 600_000),
       networkMs: integer(url.searchParams.get("networkMs") ?? 400, "networkMs", 0, 600_000),
       lanes: estimateLanes,
       workersPerLane: estimateWorkersPerLane,
@@ -1803,7 +1826,6 @@ async function route(
       proxyTransportStartJitterMs: estimatePlatform === "qq" ? 0 : undefined,
       checkpointSlots: qqTransport?.checkpointSlots,
       serialRequestChain,
-      workersShareLanePacing,
     }));
   }
   if (method === "GET" && url.pathname === "/api/user") {
@@ -1857,20 +1879,83 @@ function runtimePaths(root: string): RuntimePaths {
   };
 }
 
-async function saveResumeTask(path: string, descriptor: ResumeTaskDescriptor): Promise<void> {
-  await writeAtomicJson(path, descriptor);
+async function saveResumeTask(path: string, descriptor: unknown): Promise<void> {
+  await withResumeTaskLock(path, () => writeAtomicJson(path, descriptor));
+}
+
+async function migrateResumeTaskForClient(
+  path: string,
+): Promise<{ task: ResumeTaskDescriptor; adjustments?: string[] } | { task: null }> {
+  return withResumeTaskLock(path, async () => {
+    const descriptor = await readResumeTask(path);
+    if (!descriptor) return { task: null };
+    const normalized = normalizeResumeTaskForClient(descriptor);
+    if (descriptor.version !== 3) await writeAtomicJson(path, normalized.task);
+    return normalized;
+  });
+}
+
+async function withResumeTaskLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  await mkdir(dirname(path), { recursive: true });
+  const release = await lockfile.lock(path, {
+    realpath: false,
+    stale: 120_000,
+    update: 20_000,
+    retries: { retries: 40, factor: 1.2, minTimeout: 5, maxTimeout: 100, randomize: true },
+  });
+  try {
+    return await operation();
+  } finally {
+    await release().catch(() => {});
+  }
 }
 
 export function normalizeResumeTaskForClient(
   descriptor: ResumeTaskDescriptor,
 ): { task: ResumeTaskDescriptor; adjustments?: string[] } {
-  if (descriptor.version !== 2 || descriptor.platform !== "qq") return { task: descriptor };
-  const savedPageSize = Number(descriptor.input.pageSize);
-  if (!Number.isInteger(savedPageSize) || savedPageSize <= 25) return { task: descriptor };
-  return {
-    task: { ...descriptor, input: { ...descriptor.input, pageSize: 25 } },
-    adjustments: ["qq-comment-page-size-25"],
+  const platform = descriptor.version === 1 ? "netease" : descriptor.platform;
+  let input = { ...descriptor.input };
+  const adjustments: string[] = [];
+  if (platform === "netease" && descriptor.version !== 3) {
+    const workersFallback = descriptor.mode === "parallel" ? 3 : 1;
+    const oldMinFallback = descriptor.mode === "parallel" ? 333 : 2_500;
+    const oldJitterFallback = descriptor.mode === "parallel" ? 100 : 800;
+    const workers = positiveResumeInteger(input.workersPerProxy, workersFallback);
+    const oldMin = nonNegativeResumeInteger(input.minDelayMs, oldMinFallback);
+    const oldJitter = nonNegativeResumeInteger(input.jitterMs, oldJitterFallback);
+    const minDelayMs = Math.ceil(oldMin / workers);
+    const jitterMs = oldJitter === 0
+      ? 0
+      : Math.max(0, Math.ceil((oldMin + oldJitter - 1) / workers) - minDelayMs + 1);
+    input = { ...input, minDelayMs, jitterMs };
+    adjustments.push("netease-request-spacing-per-start-v1");
+  }
+  if (platform === "qq") {
+    const savedPageSize = Number(input.pageSize);
+    if (Number.isInteger(savedPageSize) && savedPageSize > 25) {
+      input.pageSize = 25;
+      adjustments.push("qq-comment-page-size-25");
+    }
+  }
+  const task: CurrentResumeTaskDescriptor = {
+    version: 3,
+    platform,
+    mode: descriptor.mode,
+    requestIntervalSemantics: "per-start-v1",
+    updatedAt: descriptor.updatedAt,
+    input,
   };
+  return adjustments.length > 0 ? { task, adjustments } : { task };
+}
+
+function positiveResumeInteger(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function nonNegativeResumeInteger(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
 async function readResumeTask(path: string): Promise<ResumeTaskDescriptor | undefined> {
@@ -1884,8 +1969,14 @@ async function readResumeTask(path: string): Promise<ResumeTaskDescriptor | unde
         && (value.platform === "netease"
           ? value.mode === "source" || value.mode === "parallel"
           : value.mode === "song" || value.mode === "likes");
+      const validCurrent = value.version === 3
+        && value.requestIntervalSemantics === "per-start-v1"
+        && (value.platform === "netease" || value.platform === "qq")
+        && (value.platform === "netease"
+          ? value.mode === "source" || value.mode === "parallel"
+          : value.mode === "song" || value.mode === "likes");
       if (
-        (!validLegacy && !validPlatform) ||
+        (!validLegacy && !validPlatform && !validCurrent) ||
         typeof value.updatedAt !== "string" ||
         !value.input ||
         typeof value.input !== "object" ||

@@ -48,6 +48,21 @@ export class QQMusicProtocolError extends QQMusicApiError {
   }
 }
 
+export type QQMusicCommentPageProtocolReason =
+  | "empty-has-more"
+  | "page-crosses-request-cursor";
+
+/** A song-scoped cursor fault. It intentionally never retains the upstream response body. */
+export class QQMusicCommentPageProtocolError extends QQMusicProtocolError {
+  constructor(
+    public readonly reason: QQMusicCommentPageProtocolReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "QQMusicCommentPageProtocolError";
+  }
+}
+
 export class QQMusicClient implements QQMusicPlatformClient {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
@@ -343,35 +358,20 @@ export class QQMusicClient implements QQMusicPlatformClient {
       }
       return comment;
     });
-    for (let index = 1; index < comments.length; index += 1) {
-      if (BigInt(comments[index].seqNo) >= BigInt(comments[index - 1].seqNo)) {
-        throw new QQMusicProtocolError(
-          "QQ Music comment SeqNo values must be strictly descending within one page.",
-          data,
-        );
-      }
-    }
     const hasMore = requiredBooleanFlag(list.HasMore, "QQ Music comment response HasMore", data);
     const nextCursor = comments.at(-1)?.seqNo;
-    if (hasMore) {
-      const cursorDidNotDecrease = lastCommentSeqNo
-        && nextCursor
-        && BigInt(nextCursor) >= BigInt(lastCommentSeqNo);
-      if (!nextCursor || cursorDidNotDecrease) {
-        throw new QQMusicProtocolError(
-          "QQ Music comment cursor did not advance strictly backward; the checkpoint remains resumable.",
-          data,
-        );
-      }
-    }
-    if (
-      lastCommentSeqNo
-      && comments.length > 0
-      && BigInt(comments[0].seqNo) >= BigInt(lastCommentSeqNo)
-    ) {
-      throw new QQMusicProtocolError(
+    if (lastCommentSeqNo && comments.some(
+      (comment) => BigInt(comment.seqNo) >= BigInt(lastCommentSeqNo),
+    )) {
+      throw new QQMusicCommentPageProtocolError(
+        "page-crosses-request-cursor",
         "QQ Music comment page SeqNo values must be older than the request cursor.",
-        data,
+      );
+    }
+    if (hasMore && !nextCursor) {
+      throw new QQMusicCommentPageProtocolError(
+        "empty-has-more",
+        "QQ Music comment cursor did not advance strictly backward; the checkpoint remains resumable.",
       );
     }
     return {
@@ -570,7 +570,7 @@ function normalizeComment(raw: unknown): QQMusicComment | undefined {
   const commentId = idText(comment.CmId);
   const seqNo = idText(comment.SeqNo);
   const authorEncryptUin = text(comment.EncryptUin);
-  if (!commentId || !seqNo || !/^\d+$/.test(seqNo) || !authorEncryptUin) return undefined;
+  if (!commentId || !seqNo || !/^\d{1,64}$/.test(seqNo) || !authorEncryptUin) return undefined;
   const publishedSeconds = numberOrUndefined(comment.PubTime);
   return {
     commentId,

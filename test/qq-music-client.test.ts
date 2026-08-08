@@ -475,7 +475,7 @@ test("QQMusicClient rejects a has-more page whose SeqNo cursor does not advance"
   });
   await assert.rejects(
     client.getNewComments("7", 20, 1, "10"),
-    /cursor did not advance/,
+    /older than.*request cursor/,
   );
 });
 
@@ -488,7 +488,7 @@ test("QQMusicClient rejects forward and non-decimal comment cursors", async () =
       },
     })) as typeof fetch,
   });
-  await assert.rejects(forward.getNewComments("7", 20, 1, "10"), /strictly backward/);
+  await assert.rejects(forward.getNewComments("7", 20, 1, "10"), /older than.*request cursor/);
 
   const malformed = new QQMusicClient({
     fetch: (async () => cgiResponse({
@@ -501,7 +501,7 @@ test("QQMusicClient rejects forward and non-decimal comment cursors", async () =
   await assert.rejects(malformed.getNewComments("7", 20, 0), /invalid comment/);
 });
 
-test("QQMusicClient requires every comment SeqNo to form one strictly descending page", async () => {
+test("QQMusicClient preserves equal and locally unordered SeqNo rows using the raw last cursor", async () => {
   const unordered = new QQMusicClient({
     fetch: (async () => cgiResponse({
       CommentList: {
@@ -514,14 +514,35 @@ test("QQMusicClient requires every comment SeqNo to form one strictly descending
       },
     })) as typeof fetch,
   });
-  await assert.rejects(unordered.getNewComments("7", 20, 0), /SeqNo.*strictly descending/i);
+  const unorderedPage = await unordered.getNewComments("7", 20, 0);
+  assert.deepEqual(unorderedPage.comments.map((comment) => comment.seqNo), ["100", "80", "90"]);
+  assert.equal(unorderedPage.nextCursor, "90");
 
+  const equal = new QQMusicClient({
+    fetch: (async () => cgiResponse({
+      CommentList: {
+        HasMore: 1,
+        Comments: [
+          { CmId: "a", SeqNo: "100", EncryptUin: "opaque", Content: "" },
+          { CmId: "b", SeqNo: "100", EncryptUin: "opaque", Content: "" },
+          { CmId: "c", SeqNo: "90", EncryptUin: "opaque", Content: "" },
+        ],
+      },
+    })) as typeof fetch,
+  });
+  const equalPage = await equal.getNewComments("7", 20, 0);
+  assert.deepEqual(equalPage.comments.map((comment) => comment.commentId), ["a", "b", "c"]);
+  assert.equal(equalPage.nextCursor, "90");
+});
+
+test("QQMusicClient checks every returned SeqNo against the request cursor", async () => {
   const crossesRequestCursor = new QQMusicClient({
     fetch: (async () => cgiResponse({
       CommentList: {
         HasMore: 1,
         Comments: [
-          { CmId: "a", SeqNo: "101", EncryptUin: "opaque", Content: "" },
+          { CmId: "a", SeqNo: "99", EncryptUin: "opaque", Content: "" },
+          { CmId: "outlier", SeqNo: "101", EncryptUin: "opaque", Content: "" },
           { CmId: "b", SeqNo: "90", EncryptUin: "opaque", Content: "" },
         ],
       },
@@ -531,6 +552,21 @@ test("QQMusicClient requires every comment SeqNo to form one strictly descending
     crossesRequestCursor.getNewComments("7", 20, 1, "100"),
     /SeqNo.*older than.*request cursor/i,
   );
+
+  const safeDuplicates = new QQMusicClient({
+    fetch: (async () => cgiResponse({
+      CommentList: {
+        HasMore: 1,
+        Comments: [
+          { CmId: "a", SeqNo: "99", EncryptUin: "opaque", Content: "" },
+          { CmId: "b", SeqNo: "90", EncryptUin: "opaque", Content: "" },
+          { CmId: "c", SeqNo: "90", EncryptUin: "opaque", Content: "" },
+        ],
+      },
+    })) as typeof fetch,
+  });
+  const page = await safeDuplicates.getNewComments("7", 20, 1, "100");
+  assert.equal(page.nextCursor, "90");
 });
 
 test("QQMusicClient rejects missing list structures instead of reporting empty coverage", async () => {

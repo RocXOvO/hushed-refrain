@@ -9,6 +9,7 @@ import { encodeClassicEncryptUin } from "../src/qq-music/classic-encrypt-uin";
 import {
   isLoopbackAddress,
   NcmSongSearchRouter,
+  normalizeResumeTaskForClient,
   sourceTaskPaths,
   startDashboard,
   UserProbeRouter,
@@ -480,11 +481,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /评论读取进度/);
   assert.match(pageText, /总工作线程上限限制任务整体调度/);
   assert.match(pageText, /任务出口上限/);
-  assert.match(pageText, /每出口请求间隔/);
+  assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /styles\.css\?v=48/);
   assert.match(pageText, /platform-wave\.js\?v=4/);
-  assert.match(pageText, /app\.js\?v=59/);
+  assert.match(pageText, /app\.js\?v=60/);
   assert.match(pageText, /id="loginButton"[^>]+aria-label="二维码登录"/);
   assert.match(pageText, /id="globalPlatformSwitch"[^>]*role="tablist"/);
   assert.match(pageText, /data-platform-target="netease"[^>]*aria-controls="neteaseWorkbench"/);
@@ -514,7 +515,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /不会批量导入、枚举或反查/);
   assert.match(pageText, /name="pageSize"[^>]*max="25"[^>]*value="25"/);
   assert.match(pageText, /name="likedPageSize"[^>]*max="500"[^>]*value="500"/);
-  assert.match(pageText, /QQ 音乐按实际出口和总工作线程上限设置独立聚合保护/);
+  assert.match(pageText, /任务聚合发车间隔默认为 50ms/);
   assert.match(pageText, /id="neteaseSongQuery"/);
   assert.match(pageText, /id="neteaseSongResults"[^>]*role="listbox"/);
   assert.match(pageText, /id="qqSongQuery"/);
@@ -758,6 +759,18 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(value.pages, 500);
   assert.equal(value.expectedSeconds, 1_450);
 
+  const parallelDefaults = await fetch(`${base}/api/estimate?mode=parallel&comments=100000&pageSize=1000&lanes=4&workersPerLane=3&proxyTransport=1`);
+  assert.equal(parallelDefaults.status, 200);
+  const parallelDefaultValue = await parallelDefaults.json() as { expectedSeconds: number; proxyTransportStartDelayMs: number };
+  assert.equal(parallelDefaultValue.expectedSeconds, 5);
+  assert.equal(parallelDefaultValue.proxyTransportStartDelayMs, 50);
+
+  const qqDefaults = await fetch(`${base}/api/estimate?platform=qq&mode=likes&comments=100000&pageSize=25&partitions=10&lanes=8&workersPerLane=1&proxyTransport=1&hostConcurrency=8`);
+  assert.equal(qqDefaults.status, 200);
+  const qqDefaultValue = await qqDefaults.json() as { expectedSeconds: number; proxyTransportStartDelayMs: number };
+  assert.equal(qqDefaultValue.expectedSeconds, 200);
+  assert.equal(qqDefaultValue.proxyTransportStartDelayMs, 50);
+
   const pooledEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=100&minDelayMs=2500&jitterMs=800&networkMs=400&lanes=4&workersPerLane=1`);
   assert.equal(pooledEstimate.status, 200);
   const pooledValue = await pooledEstimate.json() as { expectedSeconds: number; totalWorkers: number };
@@ -768,7 +781,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(parallelEstimate.status, 200);
   const parallelValue = await parallelEstimate.json() as { pages: number; expectedSeconds: number; totalWorkers: number };
   assert.equal(parallelValue.pages, 100);
-  assert.equal(parallelValue.expectedSeconds, 5);
+  assert.equal(parallelValue.expectedSeconds, 10);
   assert.equal(parallelValue.totalWorkers, 12);
 
   const protectedEstimate = await fetch(`${base}/api/estimate?comments=100000&pageSize=1000&minDelayMs=333&jitterMs=100&networkMs=400&lanes=4&workersPerLane=3&proxyTransport=1`);
@@ -789,7 +802,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(qqEstimateValue.effectiveWorkers, 8);
   assert.equal(qqEstimateValue.checkpointSlots, 8);
   assert.equal(qqEstimateValue.proxyTransportMaxConcurrent, 8);
-  assert.equal(qqEstimateValue.proxyTransportStartDelayMs, 125);
+  assert.equal(qqEstimateValue.proxyTransportStartDelayMs, 50);
   const qqSingleLaneHostEstimate = await fetch(`${base}/api/estimate?platform=qq&mode=likes&comments=100000&pageSize=25&partitions=32&minDelayMs=0&jitterMs=0&networkMs=400&lanes=1&workersPerLane=32&proxyTransport=1&hostConcurrency=32`);
   assert.equal(qqSingleLaneHostEstimate.status, 200);
   const qqSingleLaneHostValue = await qqSingleLaneHostEstimate.json() as { effectiveWorkers: number; proxyTransportMaxConcurrent: number };
@@ -960,7 +973,55 @@ test("dashboard restores the last task descriptor from the persistent runtime ro
 
   const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { task: descriptor });
+  const restored = await response.json() as {
+    task: { version: number; platform: string; requestIntervalSemantics: string; input: Record<string, unknown> };
+    adjustments: string[];
+  };
+  assert.equal(restored.task.version, 3);
+  assert.equal(restored.task.platform, "netease");
+  assert.equal(restored.task.requestIntervalSemantics, "per-start-v1");
+  assert.equal(restored.task.input.minDelayMs, 111);
+  assert.equal(restored.task.input.jitterMs, 34);
+  assert.equal(restored.task.input.songId, descriptor.input.songId);
+  assert.deepEqual(restored.adjustments, ["netease-request-spacing-per-start-v1"]);
+  const persisted = JSON.parse(await readFile(join(dataDirectory, "resume-task.json"), "utf8")) as {
+    version: number;
+    requestIntervalSemantics: string;
+  };
+  assert.equal(persisted.version, 3);
+  assert.equal(persisted.requestIntervalSemantics, "per-start-v1");
+  const second = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
+  assert.equal(second.status, 200);
+  const secondValue = await second.json() as { task: { version: number }; adjustments?: string[] };
+  assert.equal(secondValue.task.version, 3);
+  assert.equal(secondValue.adjustments, undefined);
+});
+
+test("current request-start spacing descriptors are never migrated twice", () => {
+  const descriptor = {
+    version: 3 as const,
+    platform: "netease" as const,
+    mode: "parallel" as const,
+    requestIntervalSemantics: "per-start-v1" as const,
+    updatedAt: "2026-08-08T00:00:00.000Z",
+    input: { uid: "42", songId: "186016", workersPerProxy: 3, minDelayMs: 111, jitterMs: 34 },
+  };
+  assert.deepEqual(normalizeResumeTaskForClient(descriptor), { task: descriptor });
+});
+
+test("legacy QQ resume keeps its saved custom request-start spacing", () => {
+  const descriptor = {
+    version: 2 as const,
+    platform: "qq" as const,
+    mode: "likes" as const,
+    updatedAt: "2026-08-08T00:00:00.000Z",
+    input: { target: "synthetic-target", pageSize: 25, minDelayMs: 3_000, jitterMs: 1_000 },
+  };
+  const restored = normalizeResumeTaskForClient(descriptor);
+  assert.equal(restored.task.version, 3);
+  assert.equal(restored.task.input.minDelayMs, 3_000);
+  assert.equal(restored.task.input.jitterMs, 1_000);
+  assert.equal(restored.adjustments, undefined);
 });
 
 test("dashboard normalizes a legacy QQ page size without changing its resume generation", async (context) => {
@@ -981,7 +1042,9 @@ test("dashboard normalizes a legacy QQ page size without changing its resume gen
 
   const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
   assert.equal(response.status, 200);
-  const value = await response.json() as { task: typeof descriptor; adjustments: string[] };
+  const value = await response.json() as { task: typeof descriptor & { version: number; requestIntervalSemantics: string }; adjustments: string[] };
+  assert.equal(value.task.version, 3);
+  assert.equal(value.task.requestIntervalSemantics, "per-start-v1");
   assert.equal(value.task.input.pageSize, 25);
   assert.equal(value.task.input.target, descriptor.input.target);
   assert.deepEqual(value.adjustments, ["qq-comment-page-size-25"]);
@@ -1122,7 +1185,16 @@ test("dashboard restores a valid legacy temp descriptor after an interrupted Win
 
   const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
   assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { task: descriptor });
+  const restored = await response.json() as {
+    task: { version: number; platform: string; requestIntervalSemantics: string; input: Record<string, unknown> };
+    adjustments: string[];
+  };
+  assert.equal(restored.task.version, 3);
+  assert.equal(restored.task.platform, "netease");
+  assert.equal(restored.task.input.uid, "42");
+  assert.equal(restored.task.input.minDelayMs, 2_500);
+  assert.equal(restored.task.input.jitterMs, 800);
+  assert.deepEqual(restored.adjustments, ["netease-request-spacing-per-start-v1"]);
 });
 
 test("dashboard reports an empty cross-version task descriptor explicitly", async (context) => {

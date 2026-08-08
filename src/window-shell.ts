@@ -18,6 +18,7 @@ export const DESKTOP_UPDATE_CHANNELS = {
 
 export const DESKTOP_EXPORT_CHANNELS = {
   resultsPdf: "desktop-export:results-pdf",
+  resultsPdfProgress: "desktop-export:results-pdf-progress",
 } as const;
 
 export type DesktopResultExportRequest =

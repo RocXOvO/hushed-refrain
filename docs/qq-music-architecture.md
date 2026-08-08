@@ -57,7 +57,7 @@ Dashboard 的 QQ 两个任务表单共用“EncryptUin 解析实验”入口。�
 
 评论接口每页范围为 `1..25`，新任务默认 `25`；公开喜欢来源每页范围为 `1..500`，默认 `500`。两者属于不同接口，不能互相替代。
 
-评论分页使用 SeqNo：下一页 cursor 必须来自本页最后一条已规范化评论的 SeqNo。Client 会拒绝缺少字段、非十进制 SeqNo、页内非严格递减、跨页不后退、`HasMore` 却没有 cursor，以及任何非零业务码。失败不会推进 cursor。
+评论分页使用 SeqNo：下一页 cursor 必须来自响应原始顺序中最后一条已规范化评论。页内相等或局部乱序会被完整保留；恢复页的每一条 SeqNo 都必须严格小于请求 cursor，`HasMore` 空页或末值不后退则拒绝。此类 comment-page 协议错误只冻结当前歌曲且不推进 cursor，likes 中其他歌曲继续。
 
 歌曲详情只能补充 MID、名称和艺人。Scanner 始终以用户请求的十进制 `requestedSongId` 建立 song 任务；ID 全程使用字符串，不能经过 JavaScript `Number`。
 
@@ -67,7 +67,7 @@ Dashboard 的 QQ 两个任务表单共用“EncryptUin 解析实验”入口。�
 
 所有 Worker 共用一个 `LaneAllocator`。每个成功页重新公平获取健康 Lane，因此全部选中出口可参与轮转；普通故障保留原 cursor，并由健康 Lane 接力。`maxWorkers` 是主机级硬上限，不能通过裁掉后半段 Lane 实现。
 
-每 Lane 的 Governor pacing concurrency 固定为 `1`；多个 Worker 只允许慢请求在不同歌曲间重叠，不会乘倍单 IP 的请求启动频率。全任务还共享一个 QQ TransportGate，但它不再固定为 4：`song` 为 `1` 个在途、启动间隔至少 `250 ms`；`likes` 的总在途上限等于主机 Worker 上限（最大 `32`），启动间隔为 `max(80, ceil(1000 / max(4, 总在途上限))) ms`。这只扩大不同歌曲间已经受 Governor 约束的重叠，不改变每个 Lane 默认 `3000 ms + jitter` 的启动周期。
+每 Lane 的 Governor 把 `minDelayMs` 解释为同一出口相邻远端请求的真实最小启动间隔，Worker 数不会除掉它。QQ 新任务默认 `300 ms + U[0,100) ms`（300–399ms）；多个 Worker 只允许慢请求在不同歌曲间重叠。全任务共享 QQ TransportGate：song 固定一个在途，likes 总在途上限等于主机 Worker 上限（最大32），两者聚合启动间隔均至少50ms。8出口满页理论受20页/秒 Gate限制约500条/秒，4出口受出口节奏限制约286条/秒；实际还乘填充率/成功率并受网络影响。
 
 QQ 扫描不保存或使用 QQ/网易云 Cookie。Dashboard 进入 QQ 工作区时，连接状态固定显示“本地服务”并隐藏网易云二维码登录按钮；已保存的网易云会话只能在网易云工作区呈现。
 

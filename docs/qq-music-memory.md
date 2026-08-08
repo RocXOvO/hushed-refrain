@@ -41,7 +41,7 @@ page 2, cursor B  -> ...
 
 - 输入 cursor、每条评论 SeqNo 和响应 `nextCursor` 都必须是十进制字符串。
 - `HasMore=true` 必须有非空 `nextCursor`；从第二页起，新 cursor 必须严格小于请求 cursor。
-- 下一 cursor 的唯一权威来源是本页最后一条严格规范化评论的 SeqNo。Client 校验整页每条 SeqNo 都是十进制且严格递减，并拒绝首条不老于请求 cursor、末值相等/回跳、缺字段以及业务 code/subcode 失败。
+- 下一 cursor 的唯一权威来源是响应原始顺序中最后一条规范化评论的 SeqNo。页内相等或局部乱序允许且全部保留；恢复页每一条 SeqNo 都必须老于请求 cursor。跨页边界不安全时只隔离当前歌曲，保持 cursor/pageNo 不动，likes 的其他歌曲继续。
 - 同一歌曲最多一个在途评论页。并发只发生在不同歌曲之间；普通失败或 Lane 故障保留原 cursor，只有成功且协议完整的页才能推进 cursor/pageNo。
 - `song` 始终只有一条活动 SeqNo 链，但成功页可以在健康 Lane 间公平轮转。增加出口是轮转和故障切换，不代表同曲并行。
 - 只有明确的歌曲资源 HTTP `404/410` 才将该歌标记 `done + truncated`；QQ 协议、业务、结构或 cursor 错误使任务 `paused`，不得归一化为空页或完整覆盖。
@@ -50,8 +50,8 @@ page 2, cursor B  -> ...
 ## Worker、Lane 与限速
 
 - 一条 `QQCommentLane` 拥有一个 Client、一个 Lane 专属 Governor，并引用任务唯一的 `QQMusicTransportGate`。
-- 生产 Governor 的 pacing concurrency 固定为 `1`。`workersPerLane` 只增加跨歌曲候选并发，不能缩短单出口默认 `3000 ms + jitter` 的启动周期。
-- QQ Gate 按任务 profile 构建：song 固定 `1` 个在途、开始间隔至少 `250 ms`；likes 总在途上限等于 `hostConcurrency`（范围 `1..32`），开始间隔为 `max(80, ceil(1000/max(4, hostConcurrency))) ms`。它不是网易云 AIMD `ProxyTransportGate`；动态总容量不会改变单 Lane Governor concurrency `1` 或默认 `3000 ms + jitter` 的周期。
+- 生产 Governor 的 `minDelayMs` 是同 Lane 相邻请求开始的真实最小间隔；Worker 不会除掉它。QQ 新任务默认 `300 ms + U[0,100) ms`，旧 QQ v2 自定义值原样保留。
+- QQ Gate 按任务 profile 构建：song 固定 `1` 个在途，likes 总在途上限等于 `hostConcurrency`（范围 `1..32`），两者聚合开始间隔均为50ms。Gate 只额外延后，不能弱化单 Lane Governor；song 仍是一条 SeqNo 链。
 - QQ likes 的唯一 GUI Worker 容量是 `hostConcurrency`；选定出口后 Manager 自动派生 `workersPerLane = ceil(hostConcurrency / selectedLanes)`，所以单出口也不会自动降为一个 Worker。QQ song 保留同一主机设置供展示/恢复，但运行时固定一个 Worker/SeqNo 链。
 - Worker ID 是本次调用内的 `worker-N`，不绑定 Lane。每页通过共享 `LaneAllocator` 公平获取 Lane，单 Lane permit 不超过 `workersPerLane`；hard cap 不能通过裁掉后半段 Lane 实现，全部选中健康出口都必须可达。
 - QQ song 无论配置如何只运行一个 Worker/SeqNo 链；likes Worker 才负责跨歌曲并发。
@@ -142,13 +142,13 @@ data/logs/qq-<job-id>.jsonl
 - QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 直接展示主机上限对应的可调度 Worker，并自动显示每出口许可。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。QQ 不保存登录 Cookie；工作区固定显示“本地服务”并隐藏网易云二维码登录按钮，网易云已保存会话不得串入 QQ 展示。
 - `web/platform-wave.js` 用一次性 WebGL2 规则点阵在 760 ms 内从左下向右上移动浪脊，46% 时提交工作区。网格间距约 30 CSS px，限制为 19–58 列、14–36 行（最多 2088 点）；一个静态 buffer/program 与每帧一次 `POINTS` draw 通过 signed-distance Gaussian crest 和衰减尾波局部托举、放大、提亮点阵。业务 DOM 不写 `transform`/`will-change`，页面位置与滚动值不抖动。使用 `low-power`、DPR `1..1.25`、无抗锯齿/深度缓冲；setup/draw/commit/cleanup 均异常安全并释放 RAF、监听器、buffer、program、context、Canvas。提交前取消不改平台，提交后取消保留新平台；reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都安全结算。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=48`、`platform-wave.js?v=4`、`app.js?v=59`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=48`、`platform-wave.js?v=4`、`app.js?v=60`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
-- QQ Manager 写入 resume v2：`platform:"qq" + mode:"song"|"likes"`，并保存非敏感原始参数；旧 v1 `source|parallel` 继续视为 NetEase。`/api/resume` 对旧 QQ `pageSize>25` 返回 `pageSize:25` 和 `adjustments:["qq-comment-page-size-25"]`。Dashboard 按 allowlist 回填、显示迁移提示、将所有 fresh 强制为 false，且不自动启动。
+- 当前 Manager 写入 resume v3 和 `requestIntervalSemantics:"per-start-v1"`。旧 NetEase v1/v2 在文件锁内一次性等价换算节奏并写回 v3；旧 QQ v2 的自定义间隔原样保留，只有 `pageSize>25` 归一为25。Dashboard 显示 adjustment、强制 fresh=false，且不自动启动或改变扫描检查点。
 - QQ GUI 与新 resume 输入只保存 `hostConcurrency`，不再保存 `workersPerProxy`；旧 HTTP 字段只做兼容校验并被忽略。Manager 在选定 Lane 后派生内部 `workersPerLane`，Scanner/快照继续使用该内部字段。
-- `/api/estimate` 显式要求 `platform`。QQ 使用 `pageSize<=25`；song 传单在途/250 ms 的 `serialRequestChain=1`，likes 用 host 和 lane 数自动派生 `workersPerLane`，传 `workersShareLanePacing=1` 并按 host 容量计算总 Gate、启动间隔和同容量 checkpoint slots。估算继续受 `hostConcurrency`、partitions、实测页填充、成功率和网络耗时校准约束。
+- `/api/estimate` 显式要求 `platform`。QQ 使用 `pageSize<=25`；song 传 `serialRequestChain=1`，likes 用 host 和 lane 数自动派生 `workersPerLane`，两者使用50ms总 Gate和同容量 checkpoint slots。Estimator 与 Governor 都按字面每出口启动间隔计算，Worker 只改善网络在途重叠；估算继续受 partitions、填充率、成功率和网络耗时校准约束。
 
 ### 完整交付门禁
 

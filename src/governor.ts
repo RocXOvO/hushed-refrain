@@ -8,9 +8,9 @@ import {
 } from "./errors";
 
 export interface GovernorOptions {
+  /** Minimum time between consecutive remote-request starts on this lane. */
   minDelayMs: number;
   jitterMs: number;
-  concurrency?: number;
   maxRetries: number;
   forbiddenCooldownMs: number;
   requestBudget: number;
@@ -39,26 +39,14 @@ export class RequestGovernor {
   private terminalError?: RunCancelled | CooldownRequired;
   private readonly waitCancellation = new Set<(error: unknown) => void>();
   private slotTail: Promise<void> = Promise.resolve();
-  private readonly concurrency: number;
 
   constructor(
     private readonly options: GovernorOptions,
     private readonly runtime: GovernorRuntime = defaultRuntime,
-  ) {
-    const concurrency = options.concurrency ?? 1;
-    if (!Number.isInteger(concurrency) || concurrency <= 0) {
-      throw new Error("concurrency must be a positive integer.");
-    }
-    this.concurrency = concurrency;
-  }
+  ) {}
 
   get requestsUsed(): number {
     return this.used;
-  }
-
-  /** Number of callers allowed to divide this lane's configured start interval. */
-  get pacingConcurrency(): number {
-    return this.concurrency;
   }
 
   cancel(): void {
@@ -138,8 +126,7 @@ export class RequestGovernor {
       }
       if (this.lastRequestAt !== 0) {
         const jitter = Math.floor(this.runtime.random() * this.options.jitterMs);
-        const workerSpacingMs = Math.ceil((this.options.minDelayMs + jitter) / this.concurrency);
-        const target = this.lastRequestAt + workerSpacingMs;
+        const target = this.lastRequestAt + this.options.minDelayMs + jitter;
         const waitMs = target - this.runtime.now();
         if (waitMs > 0) await this.sleepOrStop(waitMs);
       }

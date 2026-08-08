@@ -1,21 +1,23 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { join } from "node:path";
 import { startDashboard } from "./server";
-import { writeAtomicBuffer } from "./atomic-file";
+import {
+  DesktopResultExportError,
+  runDesktopResultExport,
+  writeDesktopResultPdf,
+  type DesktopResultReportSession,
+} from "./desktop-result-export";
 import {
   DESKTOP_EXPORT_CHANNELS,
   DESKTOP_UPDATE_CHANNELS,
   DESKTOP_WINDOW_CHANNELS,
   desktopDashboardUrl,
-  desktopResultReportIdentityMatches,
-  desktopResultReportLoadError,
   desktopResultReportUrl,
   desktopWindowChrome,
   parseDesktopResultExportRequest,
-  redactDesktopResultExportText,
   resultReportFilename,
 } from "./window-shell";
 import {
@@ -113,38 +115,66 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
   if (resultExportInProgress) throw new Error("已有一份 PDF 正在生成，请稍候。");
   const request = parseDesktopResultExportRequest(rawRequest);
   resultExportInProgress = true;
-  let reportWindow: BrowserWindow | undefined;
   try {
-    const destination = await dialog.showSaveDialog(window, {
-      title: "导出评论检索报告",
-      defaultPath: join(app.getPath("documents"), resultReportFilename(request)),
-      filters: [{ name: "PDF 文档", extensions: ["pdf"] }],
-      properties: ["createDirectory", "showOverwriteConfirmation"],
-    });
-    if (destination.canceled || !destination.filePath) return { status: "cancelled" };
     const reportUrl = desktopResultReportUrl(dashboardUrl, request);
-    reportWindow = new BrowserWindow({
-      show: false,
-      parent: window,
-      backgroundColor: "#ffffff",
-      webPreferences: {
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
+    return await runDesktopResultExport(request, {
+      reportUrl,
+      chooseDestination: async () => {
+        const destination = await dialog.showSaveDialog(window, {
+          title: "导出评论检索报告",
+          defaultPath: join(app.getPath("documents"), resultReportFilename(request)),
+          filters: [{ name: "PDF 文档", extensions: ["pdf"] }],
+          properties: ["createDirectory", "showOverwriteConfirmation"],
+        });
+        return destination.canceled ? undefined : destination.filePath;
+      },
+      createSession: () => createDesktopReportSession(window, reportUrl),
+      write: writeDesktopResultPdf,
+      onProgress: (progress) => {
+        if (!event.sender.isDestroyed()) {
+          event.sender.send(DESKTOP_EXPORT_CHANNELS.resultsPdfProgress, progress);
+        }
       },
     });
-    reportWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-    reportWindow.webContents.on("will-navigate", (navigationEvent, target) => {
-      if (target !== reportUrl) navigationEvent.preventDefault();
-    });
-    await reportWindow.loadURL(reportUrl);
-    const readyReport = await reportWindow.webContents.executeJavaScript(`Promise.resolve(document.fonts?.ready).then(() => ({ platform: document.querySelector('meta[name="result-report-platform"]')?.content, mode: document.querySelector('meta[name="result-report-mode"]')?.content, jobId: document.querySelector('meta[name="result-report-job"]')?.content, targetKind: document.querySelector('meta[name="result-report-target-kind"]')?.content, target: document.querySelector('meta[name="result-report-target"]')?.content, errorText: document.contentType === 'application/json' ? document.body?.innerText : undefined }))`);
-    const reportError = desktopResultReportLoadError(readyReport);
-    if (reportError) throw new Error(reportError);
-    if (!desktopResultReportIdentityMatches(readyReport, request)) {
-      throw new Error("报告数据已过期，请重新点击导出。");
-    }
-    const pdf = await reportWindow.webContents.printToPDF({
+  } catch (error) {
+    const failure = error instanceof DesktopResultExportError ? error : undefined;
+    const stage = failure?.stage ?? "save-dialog";
+    const code = failure?.code ?? "failed";
+    const logPath = writeDesktopLog("pdf-export", `stage=${stage} code=${code}`);
+    return {
+      status: "failed",
+      message: failure?.message ?? "选择保存位置失败，请重试。",
+      logAvailable: Boolean(logPath),
+    };
+  } finally {
+    resultExportInProgress = false;
+  }
+});
+
+function createDesktopReportSession(parent: BrowserWindow, reportUrl: string): DesktopResultReportSession {
+  const reportWindow = new BrowserWindow({
+    show: false,
+    parent,
+    backgroundColor: "#ffffff",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+  reportWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  reportWindow.webContents.on("will-navigate", (navigationEvent, target) => {
+    if (target !== reportUrl) navigationEvent.preventDefault();
+  });
+  let rejectFatal = (_error: unknown): void => {};
+  const fatal = new Promise<never>((_resolve, reject) => { rejectFatal = reject; });
+  reportWindow.webContents.once("render-process-gone", () => rejectFatal(new Error("report-renderer-gone")));
+  reportWindow.once("unresponsive", () => rejectFatal(new Error("report-window-unresponsive")));
+  const guarded = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, fatal]);
+  return {
+    load: (url) => guarded(reportWindow.loadURL(url)),
+    waitForReadyReport: () => guarded(reportWindow.webContents.executeJavaScript(`Promise.resolve(document.fonts?.ready).then(() => ({ platform: document.querySelector('meta[name="result-report-platform"]')?.content, mode: document.querySelector('meta[name="result-report-mode"]')?.content, jobId: document.querySelector('meta[name="result-report-job"]')?.content, targetKind: document.querySelector('meta[name="result-report-target-kind"]')?.content, target: document.querySelector('meta[name="result-report-target"]')?.content, errorText: document.contentType === 'application/json' ? document.body?.innerText : undefined }))`)),
+    print: () => guarded(reportWindow.webContents.printToPDF({
       printBackground: true,
       preferCSSPageSize: true,
       pageSize: "A4",
@@ -152,19 +182,34 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
       headerTemplate: "<span></span>",
       footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>乐评寻踪</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
       margins: { top: 0.4, bottom: 0.55, left: 0.35, right: 0.35 },
-    });
-    await writeAtomicBuffer(destination.filePath, pdf);
-    return { status: "saved", path: destination.filePath };
-  } catch (error) {
-    const logDetail = redactDesktopResultExportText(errorText(error), request);
-    const userDetail = redactDesktopResultExportText(error instanceof Error ? error.message : String(error), request);
-    writeDesktopLog("pdf-export", logDetail);
-    throw new Error(`PDF 导出失败：${userDetail}`);
-  } finally {
-    resultExportInProgress = false;
-    if (reportWindow && !reportWindow.isDestroyed()) reportWindow.destroy();
+    })),
+    close: () => {
+      if (!reportWindow.isDestroyed()) reportWindow.destroy();
+    },
+  };
+}
+
+async function runPackagedPdfSmoke(parent: BrowserWindow, destination: string): Promise<void> {
+  const request = parseDesktopResultExportRequest({
+    platform: "netease",
+    mode: "source",
+    jobId: "00000000-0000-4000-8000-000000000001",
+    target: { kind: "uid", value: "9000000001" },
+  });
+  const html = `<!doctype html><meta name="result-report-platform" content="netease"><meta name="result-report-mode" content="source"><meta name="result-report-job" content="${request.jobId}"><meta name="result-report-target-kind" content="uid"><meta name="result-report-target" content="9000000001"><style>@page{size:A4;margin:15mm}body{font:16px sans-serif}</style><h1>乐评寻踪 PDF smoke</h1><p>Windows packaged Chromium print pipeline.</p>`;
+  const reportUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
+  const result = await runDesktopResultExport(request, {
+    reportUrl,
+    chooseDestination: async () => destination,
+    createSession: () => createDesktopReportSession(parent, reportUrl),
+    write: writeDesktopResultPdf,
+  });
+  if (result.status !== "saved") throw new Error("Packaged PDF smoke did not save a file.");
+  const bytes = readFileSync(destination);
+  if (bytes.length < 5 || bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
+    throw new Error("Packaged PDF smoke output is invalid.");
   }
-});
+}
 
 async function createWindow(): Promise<void> {
   dashboard = await startDashboard({
@@ -235,11 +280,19 @@ async function createWindow(): Promise<void> {
     if (process.platform === "win32" && app.isPackaged && bridge.updateState.supported !== true) {
       throw new Error(`Packaged Windows updater failed to initialize. See ${writeDesktopLog("windows-updater-smoke", windowsUpdateFallbackState?.error ?? "unknown error") ?? "desktop log"}.`);
     }
-    const smokeResult = `DESKTOP_WINDOW_BRIDGE_OK ${bridge.platform}\nDESKTOP_SMOKE_OK ${url}\n`;
+    let pdfSmoke = "";
+    if (process.platform === "win32" && app.isPackaged) {
+      const destination = process.env.NCM_DESKTOP_SMOKE_PDF;
+      if (!destination) throw new Error("Packaged Windows PDF smoke destination is missing.");
+      await runPackagedPdfSmoke(window, destination);
+      pdfSmoke = "DESKTOP_PDF_OK\n";
+    }
+    const smokeResult = `DESKTOP_WINDOW_BRIDGE_OK ${bridge.platform}\n${pdfSmoke}DESKTOP_SMOKE_OK ${url}\n`;
     if (process.env.NCM_DESKTOP_SMOKE_RESULT) {
       writeFileSync(process.env.NCM_DESKTOP_SMOKE_RESULT, smokeResult, "utf8");
     }
     process.stdout.write(`DESKTOP_WINDOW_BRIDGE_OK ${bridge.platform}\n`);
+    if (pdfSmoke) process.stdout.write(pdfSmoke);
     process.stdout.write(`DESKTOP_SMOKE_OK ${url}\n`);
     setTimeout(() => app.quit(), 250);
   }

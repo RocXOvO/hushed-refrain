@@ -11,6 +11,7 @@ import { workerCountForTopology } from "../worker-topology";
 import {
   QQ_MUSIC_COMMENT_PAGE_SIZE_MAX,
   QQMusicApiError,
+  QQMusicCommentPageProtocolError,
   QQMusicProtocolError,
 } from "./client";
 import { QQMusicProxyError } from "./proxy-fetch";
@@ -112,6 +113,7 @@ export async function runQQMusicScan(
   let stopReason: StopReason | undefined;
   let stopNote: string | undefined;
   let persistenceFailed = false;
+  const songProtocolFailures = new Map<string, string>();
   let persistenceError: QQMusicCheckpointError | QQMusicResultPersistenceError | undefined;
   let activeQueue: AsyncWorkQueue<number> | undefined;
   let activeLaneAllocator: LaneAllocator<LaneRuntime> | undefined;
@@ -775,6 +777,12 @@ export async function runQQMusicScan(
             publishSongProgress(options, song);
             requeue = false;
             await persistFailureState(forceCheckpoint, stopForPersistence);
+          } else if (isSongCommentPageProtocolError(error)) {
+            requeue = false;
+            songProtocolFailures.set(song.id, message(error));
+            publishSongProgress(options, song);
+            if (options.mode === "song") stopFor("paused", message(error));
+            await persistFailureState(forceCheckpoint, stopForPersistence);
           } else if (isDeterministicRequestError(error)) {
             requeue = false;
             stopFor("paused", message(error));
@@ -835,6 +843,10 @@ export async function runQQMusicScan(
       }
     }
     if (budgetReached && !stopReason) stopReason = "paused";
+    if (!stopReason && songProtocolFailures.size > 0) {
+      stopReason = "paused";
+      stopNote = `${songProtocolFailures.size} QQ Music song(s) had a resumable comment cursor anomaly; other songs continued.`;
+    }
     if (!persistenceFailed) await forceCheckpoint();
   } catch (error) {
     if (!state) {
@@ -1123,6 +1135,10 @@ function isDeterministicRequestError(error: unknown): boolean {
     && status !== 425
     && status !== 429
     && !(status >= 500 && status <= 599);
+}
+
+function isSongCommentPageProtocolError(error: unknown): boolean {
+  return findQQMusicApiError(error) instanceof QQMusicCommentPageProtocolError;
 }
 
 function isSongResourceUnavailable(error: unknown): boolean {

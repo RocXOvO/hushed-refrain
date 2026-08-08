@@ -9,22 +9,22 @@ import {
 test("QQ transport profile scales likes across independent exits within the host cap", () => {
   assert.deepEqual(qqMusicTransportProfile("likes", 2, 8), {
     maxConcurrent: 8,
-    minStartDelayMs: 125,
+    minStartDelayMs: 50,
     checkpointSlots: 8,
   });
   assert.deepEqual(qqMusicTransportProfile("likes", 8, 32), {
     maxConcurrent: 32,
-    minStartDelayMs: 80,
+    minStartDelayMs: 50,
     checkpointSlots: 32,
   });
   assert.deepEqual(qqMusicTransportProfile("likes", 32, 16), {
     maxConcurrent: 16,
-    minStartDelayMs: 80,
+    minStartDelayMs: 50,
     checkpointSlots: 16,
   });
   assert.deepEqual(qqMusicTransportProfile("song", 32, 32), {
     maxConcurrent: 1,
-    minStartDelayMs: 250,
+    minStartDelayMs: 50,
     checkpointSlots: 1,
   });
 });
@@ -47,26 +47,25 @@ test("QQ transport gate caps aggregate in-flight work", async () => {
   await Promise.all(tasks);
 });
 
-test("QQ transport gate spaces starts through one shared clock", async () => {
+test("QQ transport gate spaces aggregate starts by 50 ms without a Worker burst", async () => {
   let now = 100;
   const sleeps: number[] = [];
   const gate = new QQMusicTransportGate(
-    { maxConcurrent: 2, minStartDelayMs: 250 },
+    { maxConcurrent: 8, minStartDelayMs: 50 },
     {
       now: () => now,
       sleep: async (milliseconds) => {
         sleeps.push(milliseconds);
+        await new Promise<void>((resolve) => setImmediate(resolve));
         now += milliseconds;
       },
     },
   );
   const starts: number[] = [];
-  await Promise.all([
-    gate.run(async () => { starts.push(now); }),
-    gate.run(async () => { starts.push(now); }),
-  ]);
-  assert.equal(starts.length, 2);
-  assert.deepEqual(sleeps, [250]);
+  await Promise.all(Array.from({ length: 8 }, () => gate.run(async () => { starts.push(now); })));
+  assert.equal(starts.length, 8);
+  assert.deepEqual(sleeps, Array(7).fill(50));
+  assert.deepEqual(starts, [100, 150, 200, 250, 300, 350, 400, 450]);
 });
 
 test("cancelling QQ transport wakes a request waiting for start spacing", async () => {
