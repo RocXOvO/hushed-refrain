@@ -543,6 +543,38 @@ test("QQ likes hard-caps Worker loops while keeping every selected Lane reachabl
   assert.deepEqual([...new Set(usedLanes)].sort(), lanes.map((entry) => entry.name).sort());
 });
 
+test("QQ likes can use the full host Worker limit on one selected Lane", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "qq-single-lane-host-workers-"));
+  const options = {
+    ...scanOptions(directory),
+    mode: "likes" as const,
+    songId: undefined,
+    workersPerLane: 32,
+    maxWorkers: 32,
+  };
+  await saveQQMusicScanState(options.statePath, pendingLikesState(
+    Array.from({ length: 32 }, (_unused, index) => String(index + 1)),
+  ));
+  const gate = new QQMusicTransportGate({ maxConcurrent: 32, minStartDelayMs: 0 });
+  let active = 0;
+  let maximumActive = 0;
+  const client = fakeClient({
+    comments: async () => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      active -= 1;
+      return { comments: [], hasMore: false };
+    },
+  });
+
+  const result = await runQQMusicScan([lane(client, governor(0), gate)], options);
+
+  assert.equal(result.status, "complete");
+  assert.equal(result.workers, 32);
+  assert.equal(maximumActive, 32);
+});
+
 test("QQ logical comment-page budget is task-wide instead of multiplying by Lane", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-task-page-budget-"));
   const songIds = Array.from({ length: 10 }, (_unused, index) => String(index + 1));

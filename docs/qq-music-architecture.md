@@ -1,6 +1,6 @@
 # QQ 音乐评论查询架构
 
-本文只描述 `v0.22.0` 源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
+本文只描述当前源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
 
 桌面显示品牌为“乐评寻踪 / MUSIC COMMENT TRACE”，`productName` 为“乐评寻踪”；这不改变 QQ 数据或升级身份。包名 `ncm-comment-finder`、appId `cn.local.ncm.commentfinder`、仓库 `RocXOvO/ncm-comment-finder`、安装包文件名前缀 `NCM-Comment-Finder` 和持久目录 `appData/ncm-comment-finder` 保持不变。
 
@@ -63,11 +63,13 @@ Dashboard 的 QQ 两个任务表单共用“EncryptUin 解析实验”入口。�
 
 ## Worker、Lane 与请求预算
 
-同一歌曲始终只有一条在途 SeqNo 链。`song` 模式固定一个 Worker；`likes` 模式通过 `workerCountForTopology(lanes, workersPerLane, maxWorkers)` 决定 Worker 数，只并行不同歌曲。
+同一歌曲始终只有一条在途 SeqNo 链。`song` 模式固定一个 Worker；顶部保存的 `hostConcurrency` 仍会显示，但不能绕过 SeqNo 依赖。`likes` 模式把 `hostConcurrency` 直接作为任务 Worker 总数，只并行不同歌曲；QQ GUI 和新恢复描述不再提供独立的 `workersPerProxy` 容量。选定出口后，Manager 自动派生 `workersPerLane = ceil(hostConcurrency / selectedLanes)`，因此单出口也能使用完整主机上限，所有选中 Lane 仍由共享分配器公平可达。
 
 所有 Worker 共用一个 `LaneAllocator`。每个成功页重新公平获取健康 Lane，因此全部选中出口可参与轮转；普通故障保留原 cursor，并由健康 Lane 接力。`maxWorkers` 是主机级硬上限，不能通过裁掉后半段 Lane 实现。
 
-每 Lane 的 Governor pacing concurrency 固定为 `1`；多个 Worker 只允许慢请求在不同歌曲间重叠，不会乘倍单 IP 的请求启动频率。全任务还共享一个 QQ TransportGate，但它不再固定为 4：`song` 为 `1` 个在途、启动间隔至少 `250 ms`；`likes` 的总在途上限等于实际有界 Worker 容量（最大 `32`），启动间隔为 `max(80, ceil(1000 / max(4, 总在途上限))) ms`。这只扩大独立出口间已经受 Governor 约束的重叠，不改变每个 Lane 默认 `3000 ms + jitter` 的启动周期。
+每 Lane 的 Governor pacing concurrency 固定为 `1`；多个 Worker 只允许慢请求在不同歌曲间重叠，不会乘倍单 IP 的请求启动频率。全任务还共享一个 QQ TransportGate，但它不再固定为 4：`song` 为 `1` 个在途、启动间隔至少 `250 ms`；`likes` 的总在途上限等于主机 Worker 上限（最大 `32`），启动间隔为 `max(80, ceil(1000 / max(4, 总在途上限))) ms`。这只扩大不同歌曲间已经受 Governor 约束的重叠，不改变每个 Lane 默认 `3000 ms + jitter` 的启动周期。
+
+QQ 扫描不保存或使用 QQ/网易云 Cookie。Dashboard 进入 QQ 工作区时，连接状态固定显示“本地服务”并隐藏网易云二维码登录按钮；已保存的网易云会话只能在网易云工作区呈现。
 
 `requestBudget` 是任务级 logical comment-page 预算。一次逻辑页在失败、重试或换 Lane 后仍只占一个预算单位；身份解析、喜欢来源、歌曲元数据和 Governor 的 retry attempt 不计入该预算。`0` 表示无限。
 

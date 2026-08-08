@@ -135,8 +135,8 @@ QQ HTTP 面：
 
 - 一条 `QQCommentLane` 拥有一个 Client、一个 Lane 专属 Governor，并引用任务唯一的 QQ TransportGate。
 - 生产 Governor pacing concurrency 固定为 `1`；`workersPerLane` 只增加跨歌曲候选工作，不能缩短单出口 `3000 ms + jitter` 周期。
-- QQ Gate 按任务实际有界工作线程构建：`song` 固定 1 个在途且开始间隔至少 250 ms；`likes` 为 1–32 个在途，开始间隔为 `max(80, ceil(1000 / max(4, 容量))) ms`。它与网易云 AIMD `ProxyTransportGate` 是不同策略，且不改变单 Lane Governor 的节奏。
-- QQ likes 的实际 Worker 数为 `workerCountForTopology(lanes, workersPerLane, hostConcurrency)`；`hostConcurrency` 范围沿用主线 1..32。Worker 是 invocation-local `worker-N`，每页通过共享 `LaneAllocator` 公平取得 Lane，单 Lane 同时 permit 不超过 `workersPerLane`。禁止通过裁掉后半段 Lane 实现 hard cap。QQ song 无论配置如何都只有一个活动 Worker/SeqNo 链，但每个成功页仍公平换 Lane。
+- QQ Gate 按主机 Worker 容量构建：`song` 固定 1 个在途且开始间隔至少 250 ms；`likes` 直接采用 `hostConcurrency` 的 1–32 容量，开始间隔为 `max(80, ceil(1000 / max(4, 容量))) ms`。它与网易云 AIMD `ProxyTransportGate` 是不同策略，且不改变单 Lane Governor 的节奏。
+- QQ likes 的唯一 GUI Worker 容量为 `hostConcurrency`；Manager 选定 Lane 后自动派生 `workersPerLane = ceil(hostConcurrency / selectedLanes)`。Worker 是 invocation-local `worker-N`，每页通过共享 `LaneAllocator` 公平取得 Lane，单 Lane permit 不超过派生值。禁止通过裁掉后半段 Lane 实现 hard cap，单 Lane 也不得把主机容量缩成 1。QQ song 无论配置如何都只有一个活动 Worker/SeqNo 链，但每个成功页仍公平换 Lane。
 - 自动出口 `maxProxyLanes=0` 使用全部已验证出口；正数才是本任务上限。现有共享池不因任务选择而缩容或重建。
 - 首发不增加强制 QQ 启动探针：共享池的“已验证”只表示现有出口/网易云检查，UI 不得宣称已验证 QQ 域。每次 QQ 请求仍独立 fail-closed；Lane 连续最终失败达到阈值后在本任务下线，全部 Lane 不可用时明确 `paused` 并保留检查点。未来 QQ capability probe 只能按 pool generation 低频缓存于任务侧，不能回写或缩减共享池。
 - HTTP/HTTPS 代理必须 fail-closed。CONNECT 拒绝、超时、取消或永久代理错误不得回退本机直连。
@@ -220,7 +220,7 @@ data/logs/qq-<job-id>.jsonl
 - QQ likes 的 Worker 是跨歌曲调度 Worker；显示 configured lanes/workers 与本轮实际参与 lanes/workers，不把它们当同时在途峰值。
 - 活动行复用 v0.19 的 keyed/bounded/in-place 更新、64 行工作集和单例计时器；QQ manager 通过请求事件与歌曲进度事件对齐现有行模型，不在 renderer 里另建轮询器。`done/truncated` 必须移除稳定行。
 - 结果表使用平台判别渲染链接和身份；旧视图的 SSE、日志、结果和估算响应不得污染新视图。
-- 估算 API 必须显式平台化；QQ 评论拒绝 `pageSize>25`，song 使用 `serialRequestChain=1`，likes 使用 `workersShareLanePacing=1`，并使用与实际有界工作线程一致的动态 Gate 和检查点槽位。
+- 估算 API 必须显式平台化；QQ 评论拒绝 `pageSize>25`，song 使用 `serialRequestChain=1`，likes 使用 `workersShareLanePacing=1`，按 host/lane 自动派生每 Lane permit，并使用与主机 Worker 上限一致的动态 Gate 和检查点槽位。
 - `latestJobs`、result generation、settlement、REST/SSE/log/estimate guards 全部按完整 viewKey 保存；不能把 qq:song 与 qq:likes 折叠成一个前端 mode。现有 tabSwitchVersion、Inspector、窄屏媒体监听、滚动条、SSE batching 和单飞轮询保持原样。
 
 ## 8. 实施阶段与门禁

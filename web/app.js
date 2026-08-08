@@ -50,6 +50,7 @@ let estimateTimer;
 let estimateRequest = 0;
 let refreshInFlight;
 let authRefreshInFlight;
+let neteaseAuthCookiePresent = false;
 let clashConfigSignature = "";
 let clashConfigSelection;
 let poolEntriesSignature = "";
@@ -482,7 +483,7 @@ async function startQQ(qqMode) {
     value.mode = qqMode;
     value.maxCommentPagesPerSong = value.maxPages;
     delete value.maxPages;
-    value.workersPerProxy = qqMode === "song" ? 1 : Number(value.workersPerProxy || 1);
+    delete value.workersPerProxy;
     value.fresh = $(qqMode === "song" ? "#qqSongFresh" : "#qqLikesFresh").checked;
     value.allowDirect = form.elements.allowDirect.checked;
     value.maxProxyLanes = Number(el.exitLimit.value);
@@ -942,10 +943,11 @@ function renderQQ(job) {
   const songs = Math.max(0, Number(job.songs || 0));
   const songsProcessed = Math.max(0, Number(job.songsProcessed ?? job.songsComplete ?? 0));
   const globalPercent = songs > 0 ? Math.min(100, Math.round(songsProcessed / songs * 100)) : 0;
-  const configuredWorkers = job.mode === "song" ? 1 : Number(job.configuredWorkers || 0);
+  const configuredWorkers = Number(job.configuredWorkers || (job.mode === "song" ? 1 : 0));
+  const hostWorkerLimit = Math.max(1, Number(job.hostConcurrency || el.hostConcurrency.value || 8));
   const topology = job.mode === "song"
-    ? `${fmt(job.configuredLanes || 1)} 个可轮转出口 · 1 条 SeqNo 链`
-    : `${fmt(job.configuredLanes || 1)} 个配置出口 · ${fmt(configuredWorkers)} 个有界工作线程`;
+    ? `${fmt(job.configuredLanes || 1)} 个可轮转出口 · SeqNo 协议链 1 在途 · 主机线程上限 ${fmt(hostWorkerLimit)}`
+    : `${fmt(job.configuredLanes || 1)} 个配置出口 · 主机线程上限 ${fmt(hostWorkerLimit)} · 可调度 ${fmt(configuredWorkers)} 个工作线程`;
   el.taskTitle.textContent = !job.id
     ? job.mode === "song" ? "等待 QQ 单曲任务" : "等待 QQ 喜欢歌曲任务"
     : job.mode === "song"
@@ -1811,7 +1813,6 @@ function allEstimateInputs() {
     el.qqSongForm.elements.proxy,
     el.qqLikesForm.elements.minDelayMs,
     el.qqLikesForm.elements.jitterMs,
-    el.qqLikesForm.elements.workersPerProxy,
     el.qqLikesForm.elements.pageSize,
     el.qqLikesForm.elements.likedPageSize,
     el.qqLikesForm.elements.proxy,
@@ -1835,12 +1836,17 @@ async function refreshEstimate(reportInvalid = true) {
     const form = estimateForm();
     const minDelayMs = Number(form.elements.minDelayMs.value);
     const jitterMs = Number(form.elements.jitterMs.value);
-    const workersPerLane = view.mode === "song" ? 1 : Number(form.elements.workersPerProxy.value);
     const pageSize = Number(form.elements.pageSize.value);
     const proxyTransport = view.platform === "qq" || view.mode === "parallel" || poolRunning || Boolean(form.elements.proxy?.value.trim());
-    const lanes = selectedTaskLaneCount(workersPerLane);
     const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
-    const actualWorkers = view.mode === "song" ? 1 : Math.min(lanes * workersPerLane, hostConcurrency);
+    const configuredWorkersPerLane = Number(form.elements.workersPerProxy?.value || 1);
+    const lanes = selectedTaskLaneCount(configuredWorkersPerLane);
+    const workersPerLane = view.platform === "qq"
+      ? view.mode === "song" ? 1 : Math.max(1, Math.ceil(hostConcurrency / lanes))
+      : configuredWorkersPerLane;
+    const actualWorkers = view.mode === "song"
+      ? 1
+      : view.platform === "qq" ? hostConcurrency : Math.min(lanes * workersPerLane, hostConcurrency);
     const job = latestJobs[requestedView];
     const formTarget = view.platform === "qq"
       ? String((view.mode === "song" ? el.qqSongTarget : el.qqLikesTarget).value || "").trim()
@@ -1923,9 +1929,9 @@ async function refreshEstimate(reportInvalid = true) {
       ? `实况校准 ${fmt(job.pageRequestSamples)} 页 / ${fmt(job.pageRequestAttempts)} 次远端尝试：平均 ${fmt(job.averageCommentsPerPage)} 条/页、${fmt(job.averagePageRequestMs)}ms、成功率 ${(Number(job.pageRequestSuccessRatio || 0) * 100).toFixed(1)}%`
       : `理论模型：节点轻量探测约 ${fmt(poolNetworkMs)}ms；任务产生 3 次页面请求后自动校准`;
     const topology = view.mode === "song"
-      ? `${fmt(value.lanes)} 个出口轮转 · 1 条串行 SeqNo 链`
+      ? `${fmt(value.lanes)} 个出口轮转 · SeqNo 协议链 1 在途 · 主机线程上限 ${fmt(hostConcurrency)}`
       : view.platform === "qq"
-      ? `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 工作线程 · ${fmt(Math.min(value.totalWorkers, hostConcurrency))} 个有界工作线程 · 最多 ${fmt(value.effectiveWorkers)} 个在途`
+      ? `${fmt(value.lanes)} 个出口自动分配 · 主机线程上限 ${fmt(hostConcurrency)} · 可调度 ${fmt(Math.min(value.totalWorkers, hostConcurrency))} 个工作线程 · 最多 ${fmt(value.effectiveWorkers)} 个在途`
       : `${fmt(value.lanes)} 个出口 × 每出口最多 ${fmt(value.workersPerLane)} 工作线程 · 实际 ${fmt(value.effectiveWorkers ?? value.totalWorkers)} 工作线程`;
     const pacing = view.platform === "qq" ? ` · 工作线程共享单出口请求节奏 · 检查点在途槽 ${fmt(value.checkpointSlots)}` : "";
     el.estimateContext.textContent = `${scanMode} · ${fmt(value.partitions)} 个独立分页区间 · ${topology} · 每页上限 ${fmt(pageSize)} 条 · ${calibration}${transport}${pacing} · 预期 ${fmt(value.expectedCommentsPerSecond)} 条/秒`;
@@ -1958,14 +1964,22 @@ function refreshAuth() {
 async function performAuthRefresh() {
   try {
     const auth = await api("/api/auth");
-    const connectionText = auth.cookiePresent ? "已保存登录会话" : "本地服务";
-    if (el.connection.dataset.label !== connectionText) {
-      el.connection.dataset.label = connectionText;
-      el.connection.innerHTML = `<span class="status-dot"></span>${connectionText}`;
-      el.login.querySelector("span").textContent = auth.cookiePresent ? "更新登录" : "二维码登录";
-    }
+    neteaseAuthCookiePresent = Boolean(auth.cookiePresent);
+    syncAuthPresentation();
     if (el.qrDialog.open) renderAuth(auth);
   } catch { /* Connection state is reflected by the main status poll. */ }
+}
+function syncAuthPresentation() {
+  const showNeteaseAuth = platform === "netease" && neteaseAuthCookiePresent;
+  const connectionText = showNeteaseAuth ? "已保存网易云登录" : "本地服务";
+  if (el.connection.dataset.label !== connectionText) {
+    el.connection.dataset.label = connectionText;
+    const dot = document.createElement("span");
+    dot.className = "status-dot";
+    el.connection.replaceChildren(dot, connectionText);
+  }
+  el.login.hidden = platform === "qq";
+  el.login.querySelector("span").textContent = neteaseAuthCookiePresent ? "更新登录" : "二维码登录";
 }
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
@@ -2169,7 +2183,7 @@ async function restoreResumeTask() {
       ? new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"])
       : descriptor.mode === "song"
       ? new Set(["target", "songId", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "allowDirect", "maxProxyLanes", "hostConcurrency"])
-      : new Set(["target", "pageSize", "likedPageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"]);
+      : new Set(["target", "pageSize", "likedPageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "allowDirect", "maxProxyLanes", "hostConcurrency"]);
     for (const [savedName, value] of Object.entries(descriptor.input || {})) {
       if (!allowed.has(savedName)) continue;
       if (savedName === "maxProxyLanes") {
@@ -2286,7 +2300,7 @@ function applyPlatformPresentation() {
   document.body.dataset.platform = platform;
   document.body.dataset.mode = mode;
   el.platformIdentity.textContent = platform === "qq" ? "QQ MUSIC WORKSPACE" : "NETEASE WORKSPACE";
-  el.login.hidden = platform === "qq";
+  syncAuthPresentation();
   for (const item of $$('[data-platform-target]')) {
     const active = item.dataset.platformTarget === platform;
     item.classList.toggle("is-active", active);
@@ -2560,10 +2574,15 @@ function syncToolbarContext() {
   const target = platform === "qq"
     ? (mode === "song" ? el.qqSongTarget : el.qqLikesTarget).value.trim()
     : (mode === "parallel" ? el.parallelUid : el.uid).value.trim();
-  const workers = Number(form.elements.workersPerProxy?.value || 1);
-  const lanes = selectedTaskLaneCount(workers);
+  const configuredWorkersPerLane = Number(form.elements.workersPerProxy?.value || 1);
+  const lanes = selectedTaskLaneCount(configuredWorkersPerLane);
   const hostConcurrency = Math.max(1, Number(el.hostConcurrency.value || 8));
-  const actualWorkers = mode === "song" ? 1 : Math.min(lanes * workers, hostConcurrency);
+  const workersPerLane = platform === "qq" && mode === "likes"
+    ? Math.max(1, Math.ceil(hostConcurrency / lanes))
+    : configuredWorkersPerLane;
+  const actualWorkers = mode === "song"
+    ? 1
+    : platform === "qq" ? hostConcurrency : Math.min(lanes * workersPerLane, hostConcurrency);
   const laneMode = Number(el.exitLimit.value || 0) > 0 ? "手动" : "自动";
   el.toolbarUid.textContent = platform === "qq"
     ? qqToolbarTargetLabel(taskViewKey(), target)
@@ -2573,9 +2592,13 @@ function syncToolbarContext() {
     : mode === "source"
     ? `用户来源 · ${sourceName(form.elements.source?.value)}`
     : view.label;
-  el.toolbarTopology.textContent = poolRunning
-    ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} 工作线程${mode === "song" ? " · 单链轮转" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? ` · 最多 ${fmt(actualWorkers)} 在途` : ""}`
-    : `1 出口 · ${platform === "qq" ? "有界" : "实际"} ${fmt(actualWorkers)} 工作线程${mode === "song" ? " · 单链" : ` · 每出口≤${fmt(workers)}`}${platform === "qq" && mode === "likes" ? ` · 最多 ${fmt(actualWorkers)} 在途` : ""}`;
+  el.toolbarTopology.textContent = platform === "qq"
+    ? mode === "song"
+      ? `${poolRunning ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)}` : "1"} 出口 · 主机上限 ${fmt(hostConcurrency)} · SeqNo 链 1 在途`
+      : `${poolRunning ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)}` : "1"} 出口 · 主机上限 ${fmt(hostConcurrency)} · 可调度 ${fmt(actualWorkers)} 工作线程 · 每出口自动≤${fmt(workersPerLane)}`
+    : poolRunning
+      ? `${laneMode}使用 ${fmt(lanes)}/${fmt(poolLaneCount)} 出口 · 实际 ${fmt(actualWorkers)} 工作线程${mode === "song" ? " · 单链轮转" : ` · 每出口≤${fmt(workersPerLane)}`}`
+      : `1 出口 · 实际 ${fmt(actualWorkers)} 工作线程${mode === "song" ? " · 单链" : ` · 每出口≤${fmt(workersPerLane)}`}`;
 }
 function setActiveNavigation(view) {
   $$('[data-nav-view]').forEach((item) => {

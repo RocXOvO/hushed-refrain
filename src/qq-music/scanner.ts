@@ -1067,7 +1067,7 @@ function validateOptions(options: QQMusicScanOptions): void {
   requireInteger(options.likedPageSize, "likedPageSize", 1, 500);
   requireInteger(options.maxSongs, "maxSongs", 0);
   requireInteger(options.maxCommentPagesPerSong, "maxCommentPagesPerSong", 0);
-  requireInteger(options.workersPerLane, "workersPerLane", 1, 16);
+  requireInteger(options.workersPerLane, "workersPerLane", 1, 32);
   if (options.maxWorkers !== undefined) requireInteger(options.maxWorkers, "maxWorkers", 1, 32);
   requireInteger(options.requestBudget, "requestBudget", 0);
 }

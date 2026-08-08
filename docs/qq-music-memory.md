@@ -2,7 +2,7 @@
 
 本文件只维护当前已实现的 QQ 音乐领域事实、共享边界和安全不变量，不记录旧共享实现、浏览器验收或发布结论。QQ 代码改变身份、上游接口、分页、并发、代理、状态、结果或活动语义时，必须在同一修改阶段更新本文件并删除过时描述。
 
-QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；`v0.22.0` 源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
+QQ 接入以 `docs/qq-music-integration-design.md` 中的 v0.19.0 为迁移基线；当前源码继续继承其 hard-capped Worker、原子文件、检查点、generation、安全报告和低开销 UI 契约。donor `../ncm-comment-finder-main` 只提供 QQ 领域行为样本；不得把它的旧 `server.ts`、`web/*`、共享模块、文档中的 v0.12 事实或交付状态复制到当前主线。共享接线的当前事实只在文末专章维护。
 
 本文件和本地测试只记录实现契约，不代表任何 commit、push、Release 或安装包已经存在；发布状态必须以 Git 与 GitHub Release 的实际记录为准。
 
@@ -51,8 +51,8 @@ page 2, cursor B  -> ...
 
 - 一条 `QQCommentLane` 拥有一个 Client、一个 Lane 专属 Governor，并引用任务唯一的 `QQMusicTransportGate`。
 - 生产 Governor 的 pacing concurrency 固定为 `1`。`workersPerLane` 只增加跨歌曲候选并发，不能缩短单出口默认 `3000 ms + jitter` 的启动周期。
-- QQ Gate 按任务 profile 构建：song 固定 `1` 个在途、开始间隔至少 `250 ms`；likes 总在途上限为 `min(实际有界 Worker 容量, 32)`，开始间隔为 `max(80, ceil(1000/max(4, 总在途上限))) ms`。它不是网易云 AIMD `ProxyTransportGate`；动态总容量不会改变单 Lane Governor concurrency `1` 或默认 `3000 ms + jitter` 的周期。
-- QQ likes 的实际 Worker 数使用 `workerCountForTopology(lanes, workersPerLane, hostConcurrency)`；`hostConcurrency` 沿用共享范围 `1..32`。
+- QQ Gate 按任务 profile 构建：song 固定 `1` 个在途、开始间隔至少 `250 ms`；likes 总在途上限等于 `hostConcurrency`（范围 `1..32`），开始间隔为 `max(80, ceil(1000/max(4, hostConcurrency))) ms`。它不是网易云 AIMD `ProxyTransportGate`；动态总容量不会改变单 Lane Governor concurrency `1` 或默认 `3000 ms + jitter` 的周期。
+- QQ likes 的唯一 GUI Worker 容量是 `hostConcurrency`；选定出口后 Manager 自动派生 `workersPerLane = ceil(hostConcurrency / selectedLanes)`，所以单出口也不会自动降为一个 Worker。QQ song 保留同一主机设置供展示/恢复，但运行时固定一个 Worker/SeqNo 链。
 - Worker ID 是本次调用内的 `worker-N`，不绑定 Lane。每页通过共享 `LaneAllocator` 公平获取 Lane，单 Lane permit 不超过 `workersPerLane`；hard cap 不能通过裁掉后半段 Lane 实现，全部选中健康出口都必须可达。
 - QQ song 无论配置如何只运行一个 Worker/SeqNo 链；likes Worker 才负责跨歌曲并发。
 - 正数 `requestBudget` 是任务级 logical comment-page 预算，不按 Lane 倍增；`0` 表示无限。身份、来源、元数据控制请求和 Governor retry attempt 必须与 logical page 分开计数。
@@ -139,16 +139,16 @@ data/logs/qq-<job-id>.jsonl
 - 顶栏全局 tabs 在网易云与 QQ 两个隔离工作区间切换，不兼作扫描模式。网易云固定拥有 `parallel/source`，QQ 固定拥有 `song/likes`，并各自记忆 mode 与输出 tab；非活动 workbench 同时 `hidden` 和 `inert`。完整 viewKey 仍为 `netease:parallel`、`netease:source`、`qq:song`、`qq:likes`，jobs、generations、settlement 和 REST/SSE/log/estimate 请求均按完整 key 隔离。
 - 平台切换只改变 workbench 内容、主题、模式和请求归属，不改变共享外壳几何。网易云与 QQ 桌面端共用紧凑图标 rail、导航项尺寸和任务抽屉锚点；QQ 不展开 rail 或常驻显示导航文字。横向或纵向缩放不得让顶栏、平台 tabs、窗口按钮、rail、任务栏、drawer 和 inspector 相互碰撞；overlay 模式中的 drawer 与 inspector 互斥，宽表格与长面板在自身容器内滚动。
 - 平台切换同时推进 platform/mode 版本，旧 mode 动画和启动响应只能提交到原 owner/view；mode 改变会立即绘制目标 view 的缓存/空快照。离开平台或从 `parallel/song` 切到兄弟 mode 会取消对应歌曲 lookup，但不取消正式扫描；QQ lookup 的 busy 栅栏不在取消时预先释放，而在请求真正结算的异步 `finally` 中移除 controller。完成的平台过渡若回报 `committed=false` 或激活平台不符，上层会同步应用目标平台、展示、快照与 SSE；重选当前平台也会重绘并刷新。Renderer 只接受匹配 generation；QQ 结果 key 为 `songId:commentId`，SSE 由 route jobId 与事件 generation 双重绑定。
-- QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 展示有界 Worker 与同容量动态总 Gate。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。
-- `web/platform-wave.js` 用一次性 WebGL2 浪峰在 760 ms 内从左下扫向右上，46% 时提交工作区，主内容轻微上浮/倾斜并复位。使用 `low-power`，资源上限为 72 段、桌面 68/窄屏 36 粒子、DPR `1..1.25`，无抗锯齿/深度缓冲。context 获取、shader/program/buffer、setup/draw/commit/cleanup 均有异常兜底；局部资源释放后在初始化失败和正常清理路径显式调用 `WEBGL_lose_context`，promise 必定结算。提交前取消不改平台；提交后取消保留新平台，两者均释放 GPU。reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都走即时/安全完成路径。
+- QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 直接展示主机上限对应的可调度 Worker，并自动显示每出口许可。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。QQ 不保存登录 Cookie；工作区固定显示“本地服务”并隐藏网易云二维码登录按钮，网易云已保存会话不得串入 QQ 展示。
+- `web/platform-wave.js` 用一次性 WebGL2 规则点阵在 760 ms 内从左下向右上移动浪脊，46% 时提交工作区。网格间距约 30 CSS px，限制为 19–58 列、14–36 行（最多 2088 点）；一个静态 buffer/program 与每帧一次 `POINTS` draw 通过 signed-distance Gaussian crest 和衰减尾波局部托举、放大、提亮点阵。业务 DOM 不写 `transform`/`will-change`，页面位置与滚动值不抖动。使用 `low-power`、DPR `1..1.25`、无抗锯齿/深度缓冲；setup/draw/commit/cleanup 均异常安全并释放 RAF、监听器、buffer、program、context、Canvas。提交前取消不改平台，提交后取消保留新平台；reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都安全结算。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=48`、`platform-wave.js?v=3`、`app.js?v=58`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=48`、`platform-wave.js?v=4`、`app.js?v=59`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
 - QQ Manager 写入 resume v2：`platform:"qq" + mode:"song"|"likes"`，并保存非敏感原始参数；旧 v1 `source|parallel` 继续视为 NetEase。`/api/resume` 对旧 QQ `pageSize>25` 返回 `pageSize:25` 和 `adjustments:["qq-comment-page-size-25"]`。Dashboard 按 allowlist 回填、显示迁移提示、将所有 fresh 强制为 false，且不自动启动。
-- HTTP/恢复输入字段是 `workersPerProxy`，Manager/Scanner 内部与快照字段是 `workersPerLane`；不要把两个边界重新接反。
-- `/api/estimate` 显式要求 `platform`。QQ 使用 `pageSize<=25`；song 传单在途/250 ms 的 `serialRequestChain=1`，likes 传 `workersShareLanePacing=1` 并按实际有界 Worker 容量计算总 Gate、启动间隔和同容量 checkpoint slots。估算继续受 `hostConcurrency`、partitions、实测页填充、成功率和网络耗时校准约束。
+- QQ GUI 与新 resume 输入只保存 `hostConcurrency`，不再保存 `workersPerProxy`；旧 HTTP 字段只做兼容校验并被忽略。Manager 在选定 Lane 后派生内部 `workersPerLane`，Scanner/快照继续使用该内部字段。
+- `/api/estimate` 显式要求 `platform`。QQ 使用 `pageSize<=25`；song 传单在途/250 ms 的 `serialRequestChain=1`，likes 用 host 和 lane 数自动派生 `workersPerLane`，传 `workersShareLanePacing=1` 并按 host 容量计算总 Gate、启动间隔和同容量 checkpoint slots。估算继续受 `hostConcurrency`、partitions、实测页填充、成功率和网络耗时校准约束。
 
 ### 完整交付门禁
 

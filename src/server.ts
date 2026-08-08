@@ -1749,7 +1749,12 @@ async function route(
       32,
     );
     const estimateLanes = integer(url.searchParams.get("lanes") ?? 1, "lanes", 1, 256);
-    const estimateWorkersPerLane = integer(url.searchParams.get("workersPerLane") ?? 1, "workersPerLane", 1, 16);
+    const estimateWorkersPerLane = integer(
+      url.searchParams.get("workersPerLane") ?? 1,
+      "workersPerLane",
+      1,
+      estimatePlatform === "qq" ? 32 : 16,
+    );
     const qqTransport = estimatePlatform === "qq"
       ? qqMusicTransportProfile(
         estimateMode as "song" | "likes",

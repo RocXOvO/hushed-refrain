@@ -51,7 +51,6 @@ import type {
 import type { SongSearchResult } from "./types";
 import { taskElapsedMs, type TaskCoordinator, type TaskLease } from "./task-coordinator";
 import { readTaskLog, TaskLogger, type TaskLogEntry } from "./task-log";
-import { workerCountForTopology } from "./worker-topology";
 
 const ACTIVE_SONG_LIMIT = 64;
 const MAX_RESULT_REPORT_BYTES = 64 * 1024 * 1024;
@@ -293,7 +292,6 @@ export class QQJobManager {
       targetLabel: maskTarget(config.target),
       songId: config.songId,
       startedAt,
-      workersPerLane: config.workersPerLane,
       hostConcurrency: config.hostConcurrency,
       pageSize: config.pageSize,
       likedPageSize: config.likedPageSize,
@@ -312,9 +310,8 @@ export class QQJobManager {
       this.snapshotValue = {
         ...this.snapshotValue,
         configuredLanes: this.lanes.length,
-        configuredWorkers: config.mode === "song"
-          ? 1
-          : workerCountForTopology(this.lanes.length, config.workersPerLane, config.hostConcurrency),
+        configuredWorkers: prepared.configuredWorkers,
+        workersPerLane: prepared.workersPerLane,
         laneSelection: prepared.laneSelection,
         proxyEnabled: prepared.proxyEnabled,
         proxyTransportMaxConcurrent: prepared.profile.maxConcurrent,
@@ -364,7 +361,6 @@ export class QQJobManager {
             forbiddenCooldownMs: config.forbiddenCooldownMs,
             maxCommentPagesPerSong: config.maxCommentPagesPerSong,
             maxSongs: config.maxSongs,
-            workersPerProxy: config.workersPerLane,
             maxProxyLanes: config.maxProxyLanes,
             hostConcurrency: config.hostConcurrency,
             allowDirect: config.allowDirect,
@@ -384,7 +380,7 @@ export class QQJobManager {
         likedPageSize: config.likedPageSize,
         maxSongs: config.maxSongs,
         maxCommentPagesPerSong: config.maxCommentPagesPerSong,
-        workersPerLane: config.workersPerLane,
+        workersPerLane: prepared.workersPerLane,
         maxWorkers: config.hostConcurrency,
         requestBudget: config.requestBudget,
         stopAfterFirst: config.stopAfterFirst,
@@ -766,7 +762,6 @@ export class QQJobManager {
         mode: "song",
         proxy: proxyUrl(proxyInput),
         allowDirect: boolean(allowDirectInput),
-        workersPerLane: 1,
         maxProxyLanes: 0,
         hostConcurrency: 1,
         minDelayMs: 3_000,
@@ -792,6 +787,8 @@ export class QQJobManager {
     lanes: QQCommentLane[];
     gate: QQMusicTransportGate;
     profile: ReturnType<typeof qqMusicTransportProfile>;
+    configuredWorkers: number;
+    workersPerLane: number;
     laneSelection?: ProxyLaneSelection;
     proxyEnabled: boolean;
   }> {
@@ -811,17 +808,23 @@ export class QQJobManager {
     const selected = selectProxyLanes(
       available,
       config.maxProxyLanes,
-      config.workersPerLane,
+      1,
       config.hostConcurrency,
     );
     const entries = selected.entries;
     const endpoints = entries.length > 0 ? entries.map((entry) => entry.endpoint) : [config.proxy];
+    // QQ liked-song scans use the shared host limit as their one authoritative
+    // task Worker capacity. Per-lane permits are derived after lane selection so
+    // one direct/static proxy no longer silently collapses an 8-Worker host cap
+    // to a single Worker. Song mode remains one cursor-dependent SeqNo chain.
+    const configuredWorkers = config.mode === "song" ? 1 : config.hostConcurrency;
+    const workersPerLane = config.mode === "song"
+      ? 1
+      : Math.max(1, Math.ceil(configuredWorkers / endpoints.length));
     const profile = qqMusicTransportProfile(
       config.mode,
       endpoints.length,
-      config.mode === "song"
-        ? 1
-        : workerCountForTopology(endpoints.length, config.workersPerLane, config.hostConcurrency),
+      configuredWorkers,
     );
     const gate = new QQMusicTransportGate({
       maxConcurrent: profile.maxConcurrent,
@@ -845,6 +848,8 @@ export class QQJobManager {
       lanes,
       gate,
       profile,
+      configuredWorkers,
+      workersPerLane,
       laneSelection: entries.length > 0 ? selected.selection : undefined,
       proxyEnabled: entries.length > 0 || Boolean(config.proxy),
     };
@@ -1042,7 +1047,6 @@ interface ParsedStartRequest {
   fresh: boolean;
   proxy?: string;
   allowDirect: boolean;
-  workersPerLane: number;
   maxProxyLanes: number;
   hostConcurrency: number;
 }
@@ -1055,7 +1059,6 @@ type LanePreparationConfig = Pick<
   | "forbiddenCooldownMs"
   | "proxy"
   | "allowDirect"
-  | "workersPerLane"
   | "maxProxyLanes"
   | "hostConcurrency"
 >;
@@ -1070,6 +1073,11 @@ function parseStartRequest(input: QQStartRequest): ParsedStartRequest {
     throw new QQJobManagerError(400, "QQ 音乐用户目标格式错误。");
   }
   const songId = mode === "song" ? decimalId(input.songId, "QQ 音乐歌曲 ID") : undefined;
+  // Validate the legacy field when older resume descriptors send it, but QQ
+  // dashboard scheduling is now governed solely by hostConcurrency.
+  if (input.workersPerProxy !== undefined) {
+    integer(input.workersPerProxy, "workersPerProxy", 1, 8);
+  }
   return {
     mode,
     target,
@@ -1086,7 +1094,6 @@ function parseStartRequest(input: QQStartRequest): ParsedStartRequest {
     fresh: boolean(input.fresh),
     proxy: proxyUrl(input.proxy),
     allowDirect: boolean(input.allowDirect),
-    workersPerLane: integer(input.workersPerProxy ?? 1, "workersPerProxy", 1, 8),
     maxProxyLanes: integer(input.maxProxyLanes ?? 0, "maxProxyLanes", 0, 32),
     hostConcurrency: integer(input.hostConcurrency ?? 8, "hostConcurrency", 1, 32),
   };

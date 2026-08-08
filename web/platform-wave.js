@@ -2,7 +2,11 @@
   const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
   const DURATION_MS = 760;
   const COMMIT_POINT = 0.46;
-  const CREST_SEGMENTS = 72;
+  const GRID_SPACING_CSS_PX = 30;
+  const GRID_COLUMNS_MIN = 19;
+  const GRID_COLUMNS_MAX = 58;
+  const GRID_ROWS_MIN = 14;
+  const GRID_ROWS_MAX = 36;
   const COLORS = {
     netease: [0.827, 0.227, 0.255],
     qq: [0.027, 0.549, 0.671],
@@ -93,8 +97,15 @@
 
     const sourceColor = COLORS[options?.sourcePlatform] || COLORS.netease;
     const targetColor = COLORS[options?.targetPlatform] || COLORS.qq;
-    const layers = [...(options?.motionLayers || [])].filter((item) => item instanceof HTMLElement);
-    const particleCount = innerWidth <= 820 ? 36 : 68;
+    const gridColumns = Math.min(
+      GRID_COLUMNS_MAX,
+      Math.max(GRID_COLUMNS_MIN, Math.ceil(innerWidth / GRID_SPACING_CSS_PX) + 1),
+    );
+    const gridRows = Math.min(
+      GRID_ROWS_MAX,
+      Math.max(GRID_ROWS_MIN, Math.ceil(innerHeight / GRID_SPACING_CSS_PX) + 1),
+    );
+    const pointCount = gridColumns * gridRows;
     const dpr = Math.min(1.25, Math.max(1, devicePixelRatio || 1));
     let width = 1;
     let height = 1;
@@ -105,7 +116,7 @@
     let settled = false;
     let contextLost = false;
     let resolveFinished;
-    const startedAt = performance.now();
+    let startedAt;
     const finished = new Promise((resolve) => { resolveFinished = resolve; });
 
     function releaseContext() {
@@ -113,107 +124,74 @@
       safely(() => gl.getExtension?.("WEBGL_lose_context")?.loseContext());
     }
 
-    let crestProgram;
-    let particleProgram;
-    let crestBuffer;
-    let particleBuffer;
-    let crestUniforms;
-    let particleUniforms;
+    let matrixProgram;
+    let matrixBuffer;
+    let matrixUniforms;
     try {
-      crestProgram = program(gl, `#version 300 es
+      matrixProgram = program(gl, `#version 300 es
       precision highp float;
-      layout(location=0) in vec2 a_crest;
+      layout(location=0) in vec2 a_grid;
       uniform float u_progress;
-      out float v_edge;
+      uniform float u_dpr;
+      out float v_colorMix;
+      out float v_alpha;
+      out float v_lift;
       void main() {
         vec2 direction = normalize(vec2(1.0, 1.0));
-        vec2 normal = normalize(vec2(-1.0, 1.0));
-        float eased = 1.0 - pow(1.0 - u_progress, 3.0);
-        vec2 center = mix(vec2(-1.32, -1.32), vec2(1.32, 1.32), eased);
-        float s = a_crest.x;
-        float wave = sin((s * 2.1 + u_progress * 2.8) * 3.1415926) * 0.065;
-        float width = mix(0.018, 0.07, 1.0 - abs(a_crest.y));
-        vec2 position = center + normal * s * 1.45 + direction * (wave + a_crest.y * width);
+        float eased = u_progress * u_progress * (3.0 - 2.0 * u_progress);
+        float front = mix(-1.58, 1.58, eased);
+        float distanceToCrest = dot(a_grid, direction) - front;
+        float crest = exp(-pow(distanceToCrest / 0.16, 2.0));
+        float wakeMask = step(0.0, -distanceToCrest);
+        float wake = wakeMask * exp(distanceToCrest * 5.2) * sin(distanceToCrest * 31.0);
+        float lift = crest * 0.285 + wake * 0.060;
+        vec2 bendDirection = normalize(vec2(a_grid.x * 0.18 - 0.28, 1.0));
+        vec2 position = a_grid + bendDirection * lift;
         gl_Position = vec4(position, 0.0, 1.0);
-        v_edge = 1.0 - abs(a_crest.y);
+        gl_PointSize = (5.2 + crest * 8.6 + abs(wake) * 2.2) * u_dpr;
+        v_colorMix = smoothstep(-0.11, 0.11, front - dot(a_grid, direction));
+        v_alpha = 0.74 + crest * 0.26 + abs(wake) * 0.18;
+        v_lift = crest;
       }
     `, `#version 300 es
       precision highp float;
       uniform vec3 u_sourceColor;
       uniform vec3 u_targetColor;
       uniform float u_envelope;
-      in float v_edge;
-      out vec4 outColor;
-      void main() {
-        vec3 color = mix(u_sourceColor, u_targetColor, 0.72);
-        float alpha = pow(max(v_edge, 0.0), 1.8) * u_envelope * 0.34;
-        outColor = vec4(color * alpha, alpha);
-      }
-    `);
-      particleProgram = program(gl, `#version 300 es
-      precision highp float;
-      layout(location=0) in vec4 a_particle;
-      uniform float u_progress;
-      uniform float u_dpr;
-      out float v_alpha;
-      void main() {
-        vec2 direction = normalize(vec2(1.0, 1.0));
-        vec2 normal = normalize(vec2(-1.0, 1.0));
-        float eased = 1.0 - pow(1.0 - u_progress, 3.0);
-        vec2 center = mix(vec2(-1.32, -1.32), vec2(1.32, 1.32), eased);
-        float s = a_particle.x;
-        float crest = sin((s * 2.1 + u_progress * 2.8) * 3.1415926) * 0.065;
-        float shimmer = sin((a_particle.y + u_progress * 6.0) * 6.2831853) * 0.012;
-        vec2 position = center + normal * (s * 1.45 + shimmer) + direction * (crest + (a_particle.y - 0.5) * 0.055);
-        gl_Position = vec4(position, 0.0, 1.0);
-        gl_PointSize = a_particle.z * u_dpr;
-        v_alpha = a_particle.w;
-      }
-    `, `#version 300 es
-      precision highp float;
-      uniform vec3 u_targetColor;
-      uniform float u_envelope;
+      in float v_colorMix;
       in float v_alpha;
+      in float v_lift;
       out vec4 outColor;
       void main() {
         vec2 point = gl_PointCoord * 2.0 - 1.0;
-        float distanceFromCenter = dot(point, point);
-        if (distanceFromCenter > 1.0) discard;
-        float glow = smoothstep(1.0, 0.05, distanceFromCenter);
-        float alpha = glow * v_alpha * u_envelope;
-        outColor = vec4(u_targetColor * alpha, alpha);
+        float radius = length(point);
+        if (radius > 1.0) discard;
+        float core = 1.0 - smoothstep(0.16, 0.55, radius);
+        float halo = 1.0 - smoothstep(0.30, 1.0, radius);
+        float alpha = (core + halo * 0.38) * v_alpha * u_envelope;
+        vec3 color = mix(u_sourceColor, u_targetColor, v_colorMix);
+        color *= 1.0 + v_lift * 0.38;
+        outColor = vec4(color * alpha, alpha);
       }
     `);
 
-      const crestVertices = new Float32Array((CREST_SEGMENTS + 1) * 4);
-      for (let index = 0; index <= CREST_SEGMENTS; index += 1) {
-        const s = index / CREST_SEGMENTS * 2 - 1;
-        crestVertices[index * 4] = s;
-        crestVertices[index * 4 + 1] = -1;
-        crestVertices[index * 4 + 2] = s;
-        crestVertices[index * 4 + 3] = 1;
+      const matrixPoints = new Float32Array(pointCount * 2);
+      let pointIndex = 0;
+      for (let row = 0; row < gridRows; row += 1) {
+        for (let column = 0; column < gridColumns; column += 1) {
+          matrixPoints[pointIndex] = column / Math.max(1, gridColumns - 1) * 2.08 - 1.04;
+          matrixPoints[pointIndex + 1] = row / Math.max(1, gridRows - 1) * 2.08 - 1.04;
+          pointIndex += 2;
+        }
       }
-      const particles = new Float32Array(particleCount * 4);
-      for (let index = 0; index < particleCount; index += 1) {
-        particles[index * 4] = index / Math.max(1, particleCount - 1) * 2 - 1 + (Math.random() - 0.5) * 0.045;
-        particles[index * 4 + 1] = Math.random();
-        particles[index * 4 + 2] = 2.4 + Math.random() * 5.4;
-        particles[index * 4 + 3] = 0.36 + Math.random() * 0.62;
-      }
-      crestBuffer = gl.createBuffer();
-      particleBuffer = gl.createBuffer();
-      if (!crestBuffer || !particleBuffer) throw new Error("WebGL buffer allocation failed");
-      gl.bindBuffer(gl.ARRAY_BUFFER, crestBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, crestVertices, gl.STATIC_DRAW);
-      gl.bindBuffer(gl.ARRAY_BUFFER, particleBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, particles, gl.STATIC_DRAW);
-      crestUniforms = uniformLocations(gl, crestProgram);
-      particleUniforms = uniformLocations(gl, particleProgram);
+      matrixBuffer = gl.createBuffer();
+      if (!matrixBuffer) throw new Error("WebGL buffer allocation failed");
+      gl.bindBuffer(gl.ARRAY_BUFFER, matrixBuffer);
+      gl.bufferData(gl.ARRAY_BUFFER, matrixPoints, gl.STATIC_DRAW);
+      matrixUniforms = uniformLocations(gl, matrixProgram);
     } catch {
-      if (crestBuffer) safely(() => gl.deleteBuffer(crestBuffer));
-      if (particleBuffer) safely(() => gl.deleteBuffer(particleBuffer));
-      if (crestProgram) safely(() => gl.deleteProgram(crestProgram));
-      if (particleProgram) safely(() => gl.deleteProgram(particleProgram));
+      if (matrixBuffer) safely(() => gl.deleteBuffer(matrixBuffer));
+      if (matrixProgram) safely(() => gl.deleteProgram(matrixProgram));
       releaseContext();
       safely(() => { canvas.width = 1; canvas.height = 1; });
       safely(() => canvas.remove());
@@ -234,17 +212,11 @@
       safely(() => motion.removeEventListener("change", onMotionPreference));
       safely(() => removeEventListener("resize", onResize));
       safely(() => canvas.removeEventListener("webglcontextlost", onContextLost));
-      layers.forEach((layer) => {
-        safely(() => layer.style.removeProperty("transform"));
-        safely(() => layer.style.removeProperty("will-change"));
-      });
       safely(() => document.body.classList.remove("platform-switching"));
       safely(() => document.body.removeAttribute("aria-busy"));
       if (!contextLost) {
-        safely(() => gl.deleteBuffer(crestBuffer));
-        safely(() => gl.deleteBuffer(particleBuffer));
-        safely(() => gl.deleteProgram(crestProgram));
-        safely(() => gl.deleteProgram(particleProgram));
+        safely(() => gl.deleteBuffer(matrixBuffer));
+        safely(() => gl.deleteProgram(matrixProgram));
       }
       releaseContext();
       safely(() => { canvas.width = 1; canvas.height = 1; });
@@ -300,34 +272,22 @@
 
     function drawFrame(now) {
       if (settled) return;
+      if (startedAt === undefined) startedAt = now;
       const progress = Math.min(1, (now - startedAt) / DURATION_MS);
       const envelope = Math.sin(Math.PI * progress);
       if (!commitAttempted && progress >= COMMIT_POINT) invokeCommit();
-      const lift = Math.sin(Math.PI * progress) * -8 + Math.sin(Math.PI * progress * 2) * 2.5;
-      const tilt = Math.sin(Math.PI * progress * 2) * 0.16;
-      layers.forEach((layer) => {
-        layer.style.transform = `translate3d(0, ${lift.toFixed(2)}px, 0) rotate(${tilt.toFixed(3)}deg)`;
-      });
-
-      gl.clearColor(targetColor[0] * envelope * 0.035, targetColor[1] * envelope * 0.035, targetColor[2] * envelope * 0.035, envelope * 0.055);
+      gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.enable(gl.BLEND);
       gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
 
-      gl.useProgram(crestProgram);
-      uniforms(crestUniforms, progress, envelope);
-      gl.bindBuffer(gl.ARRAY_BUFFER, crestBuffer);
+      gl.useProgram(matrixProgram);
+      uniforms(matrixUniforms, progress, envelope);
+      if (matrixUniforms.dpr !== null) gl.uniform1f(matrixUniforms.dpr, dpr);
+      gl.bindBuffer(gl.ARRAY_BUFFER, matrixBuffer);
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
-      gl.drawArrays(gl.TRIANGLE_STRIP, 0, (CREST_SEGMENTS + 1) * 2);
-
-      gl.useProgram(particleProgram);
-      uniforms(particleUniforms, progress, envelope);
-      if (particleUniforms.dpr !== null) gl.uniform1f(particleUniforms.dpr, dpr);
-      gl.bindBuffer(gl.ARRAY_BUFFER, particleBuffer);
-      gl.enableVertexAttribArray(0);
-      gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 0, 0);
-      gl.drawArrays(gl.POINTS, 0, particleCount);
+      gl.drawArrays(gl.POINTS, 0, pointCount);
 
       if (progress >= 1) settle(true);
       else frame = requestAnimationFrame(draw);
@@ -345,7 +305,6 @@
       document.body.append(canvas);
       document.body.classList.add("platform-switching");
       document.body.setAttribute("aria-busy", "true");
-      layers.forEach((layer) => { layer.style.willChange = "transform"; });
       resize();
       addEventListener("resize", onResize, { passive: true });
       document.addEventListener("visibilitychange", onVisibility);

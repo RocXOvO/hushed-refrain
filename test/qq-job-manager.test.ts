@@ -35,6 +35,8 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
   assert.equal(fixture.options.length, 1);
   assert.equal(fixture.options[0].target, "canonical-user");
   assert.equal(fixture.options[0].maxWorkers, 8);
+  assert.equal(fixture.options[0].workersPerLane, 8);
+  assert.equal(first.configuredWorkers, 8);
   assert.equal(fixture.options[0].requestBudget, 0);
   assert.doesNotMatch(basename(fixture.options[0].statePath), /canonical|123456789/);
   assert.doesNotMatch(basename(fixture.options[0].outputPath), /canonical|123456789/);
@@ -117,9 +119,12 @@ test("publishes the actual dynamic QQ transport profile for likes while song sta
   });
 
   const likes = await manager.start({
-    mode: "likes", target: "canonical-user", workersPerProxy: 4, hostConcurrency: 32,
+    mode: "likes", target: "canonical-user", workersPerProxy: 1, hostConcurrency: 32,
   });
   assert.equal(likes.configuredWorkers, 32);
+  assert.equal(likes.workersPerLane, 4);
+  assert.equal(activeOptions?.workersPerLane, 4);
+  assert.equal(activeOptions?.maxWorkers, 32);
   assert.equal(likes.proxyTransportMaxConcurrent, 32);
   assert.equal(likes.proxyTransportStartDelayMs, 80);
   finish(reportFor(activeOptions!));
@@ -133,6 +138,47 @@ test("publishes the actual dynamic QQ transport profile for likes while song sta
   assert.equal(song.proxyTransportStartDelayMs, 250);
   finish(reportFor(activeOptions!));
   while (coordinator.isBusy()) await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("runs the real QQ scanner with all 32 host Workers on one direct Lane", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-single-lane-host-cap-"));
+  const coordinator = new TaskCoordinator();
+  const songs = Array.from({ length: 32 }, (_unused, index) => ({
+    id: String(index + 1),
+    name: `song-${index + 1}`,
+  }));
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    clientFactory: () => fakeClient({
+      getLikedSongsPage: async () => ({
+        songs,
+        hasMore: false,
+        nextOffset: songs.length,
+        total: songs.length,
+      }),
+      getNewComments: async () => ({ comments: [], hasMore: false }),
+    }),
+  });
+
+  const started = await manager.start({
+    mode: "likes",
+    target: "canonical-user",
+    allowDirect: true,
+    hostConcurrency: 32,
+    minDelayMs: 0,
+    jitterMs: 0,
+  });
+  assert.equal(started.configuredLanes, 1);
+  assert.equal(started.configuredWorkers, 32);
+  assert.equal(started.workersPerLane, 32);
+
+  while (coordinator.isBusy()) await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  const completed = await manager.status();
+  assert.equal(completed.status, "complete");
+  assert.equal(completed.configuredWorkers, 32);
+  assert.equal(completed.participatedWorkers, 32);
+  assert.equal(completed.songsProcessed, 32);
 });
 
 test("rejects malformed QQ user targets before creating lanes or clients", async () => {
