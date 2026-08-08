@@ -484,7 +484,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /styles\.css\?v=46/);
   assert.match(pageText, /platform-wave\.js\?v=3/);
-  assert.match(pageText, /app\.js\?v=56/);
+  assert.match(pageText, /app\.js\?v=57/);
   assert.match(pageText, /id="loginButton"[^>]+aria-label="二维码登录"/);
   assert.match(pageText, /id="globalPlatformSwitch"[^>]*role="tablist"/);
   assert.match(pageText, /data-platform-target="netease"[^>]*aria-controls="neteaseWorkbench"/);
@@ -582,6 +582,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /refreshActiveSongRequestAges/);
   assert.match(appText, /个分片请求中/);
   assert.match(appText, /inspectorOverlayQuery\.addEventListener\("change"/);
+  assert.match(appText, /addEventListener\("pageshow", \(event\) => \{[\s\S]*event\.persisted[\s\S]*pageLifecycleSuspended = false/);
+  assert.match(appText, /pageLifecycleSuspended = false[\s\S]*startRuntimeTimer\(\)[\s\S]*scheduleRefreshLoop\(0\)[\s\S]*scheduleAuthRefreshLoop\(0\)[\s\S]*connectResultStream\(\)/);
+  assert.match(appText, /function scheduleRefreshLoop[\s\S]*if \(pageLifecycleSuspended\) return/);
   assert.match(appText, /时间覆盖/);
   assert.match(appText, /topologyCapacityNote/);
   assert.match(appText, /工作线程活跃/);

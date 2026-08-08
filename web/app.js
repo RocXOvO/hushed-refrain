@@ -86,6 +86,8 @@ let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
 let authRefreshTimer;
+let runtimeTimerInterval;
+let pageLifecycleSuspended = false;
 let modeSwitchVersion = 0;
 let platformSwitchVersion = 0;
 let tabSwitchVersion = 0;
@@ -2820,12 +2822,18 @@ void boot().finally(() => {
   scheduleRefreshLoop();
   scheduleAuthRefreshLoop();
 });
-const runtimeTimerInterval = setInterval(() => {
-  renderRuntimeTimer();
-  refreshActiveSongRequestAges();
-}, 1_000);
+startRuntimeTimer();
+
+function startRuntimeTimer() {
+  clearInterval(runtimeTimerInterval);
+  runtimeTimerInterval = setInterval(() => {
+    renderRuntimeTimer();
+    refreshActiveSongRequestAges();
+  }, 1_000);
+}
 
 function scheduleRefreshLoop(delay = document.hidden ? 10_000 : 1_500) {
+  if (pageLifecycleSuspended) return;
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(async () => {
     if (!document.hidden) await refresh();
@@ -2834,6 +2842,7 @@ function scheduleRefreshLoop(delay = document.hidden ? 10_000 : 1_500) {
 }
 
 function scheduleAuthRefreshLoop(delay = el.qrDialog.open ? 1_500 : document.hidden ? 15_000 : 10_000) {
+  if (pageLifecycleSuspended) return;
   clearTimeout(authRefreshTimer);
   authRefreshTimer = setTimeout(async () => {
     if (!document.hidden || el.qrDialog.open) await refreshAuth();
@@ -2851,6 +2860,7 @@ addEventListener("visibilitychange", () => {
   }
 });
 addEventListener("pagehide", () => {
+  pageLifecycleSuspended = true;
   platformTransition?.cancel();
   cancelClassicVerification();
   for (const search of Object.values(SONG_SEARCHES)) {
@@ -2863,6 +2873,17 @@ addEventListener("pagehide", () => {
   clearTimeout(authRefreshTimer);
   clearInterval(runtimeTimerInterval);
   inspectorOverlayQuery.removeEventListener("change", syncInspectorForViewport);
+});
+addEventListener("pageshow", (event) => {
+  if (!event.persisted || !pageLifecycleSuspended) return;
+  pageLifecycleSuspended = false;
+  inspectorOverlayQuery.addEventListener("change", syncInspectorForViewport);
+  syncInspectorForViewport();
+  startRuntimeTimer();
+  scheduleRefreshLoop(0);
+  scheduleAuthRefreshLoop(0);
+  connectResultStream();
+  if (resultsRenderPending) scheduleResultsRender();
 });
 
 async function activateTaskTab(tab) {

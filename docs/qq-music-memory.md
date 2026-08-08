@@ -140,7 +140,8 @@ data/logs/qq-<job-id>.jsonl
 - 平台切换同时推进 platform/mode 版本，旧 mode 动画和启动响应只能提交到原 owner/view；mode 改变会立即绘制目标 view 的缓存/空快照。离开平台或从 `parallel/song` 切到兄弟 mode 会取消对应歌曲 lookup，但不取消正式扫描；QQ lookup 的 busy 栅栏不在取消时预先释放，而在请求真正结算的异步 `finally` 中移除 controller。完成的平台过渡若回报 `committed=false` 或激活平台不符，上层会同步应用目标平台、展示、快照与 SSE；重选当前平台也会重绘并刷新。Renderer 只接受匹配 generation；QQ 结果 key 为 `songId:commentId`，SSE 由 route jobId 与事件 generation 双重绑定。
 - QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 展示有界 Worker 与同容量动态总 Gate。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。
 - `web/platform-wave.js` 用一次性 WebGL2 浪峰在 760 ms 内从左下扫向右上，46% 时提交工作区，主内容轻微上浮/倾斜并复位。使用 `low-power`，资源上限为 72 段、桌面 68/窄屏 36 粒子、DPR `1..1.25`，无抗锯齿/深度缓冲。context 获取、shader/program/buffer、setup/draw/commit/cleanup 均有异常兜底；局部资源释放后在初始化失败和正常清理路径显式调用 `WEBGL_lose_context`，promise 必定结算。提交前取消不改平台；提交后取消保留新平台，两者均释放 GPU。reduced-motion、隐藏页、WebGL 缺失/抛错、初始化/绘制失败或 context loss 都走即时/安全完成路径。
-- 当前缓存版本是 `styles.css?v=46`、`platform-wave.js?v=3`、`app.js?v=56`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
+- 当前缓存版本是 `styles.css?v=46`、`platform-wave.js?v=3`、`app.js?v=57`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
