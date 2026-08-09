@@ -23,36 +23,73 @@ function extractFunction(name: string): string {
   throw new Error(`unterminated ${name}`);
 }
 
-test("deferred platform scroll restoration waits for content and rejects stale generations", () => {
-  const context: Record<string, unknown> = {};
+test("deferred results scroll restoration is scoped, cancellable, and generation safe", () => {
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  const context: Record<string, unknown> = {
+    setTimeout(callback: () => void) {
+      const timer = ++nextTimer;
+      timers.set(timer, callback);
+      return timer;
+    },
+    clearTimeout(timer: number) { timers.delete(timer); },
+  };
   context.globalThis = context;
   vm.runInNewContext(`
     var pendingPlatformScrollRestore;
+    var PLATFORM_SCROLL_RESTORE_TTL_MS = 2500;
     var platformSwitchVersion = 7;
     var platform = "qq";
     var desiredPlatform = "qq";
+    var mode = "song";
+    var resultRequest = 11;
+    var resultGenerationRevisions = { "qq:song": 3, "qq:likes": 0 };
+    function taskViewKey() { return platform + ":" + mode; }
+    ${extractFunction("cancelPendingPlatformScrollRestore")}
     ${extractFunction("armPlatformScrollRestore")}
     ${extractFunction("restorePendingPlatformScroll")}
     globalThis.api = {
+      cancelPendingPlatformScrollRestore,
       armPlatformScrollRestore,
       restorePendingPlatformScroll,
       setVersion(value) { platformSwitchVersion = value; },
+      setMode(value) { mode = value; },
+      setResultRequest(value) { resultRequest = value; },
+      setGenerationRevision(value) { resultGenerationRevisions[taskViewKey()] = value; },
     };
   `, context);
   const api = context.api as {
-    armPlatformScrollRestore(platform: string, version: number, restore: () => void): void;
+    cancelPendingPlatformScrollRestore(): void;
+    armPlatformScrollRestore(platform: string, mode: string, version: number, state: unknown): void;
     restorePendingPlatformScroll(): boolean;
     setVersion(value: number): void;
+    setMode(value: string): void;
+    setResultRequest(value: number): void;
+    setGenerationRevision(value: number): void;
+  };
+
+  const listeners = new Map<string, Set<() => void>>();
+  const resultNode = {
+    addEventListener(type: string, listener: () => void) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type)?.add(listener);
+    },
+    removeEventListener(type: string, listener: () => void) { listeners.get(type)?.delete(listener); },
+    dispatch(type: string) { for (const listener of [...(listeners.get(type) || [])]) listener(); },
   };
 
   let scrollHeight = 0;
   let scrollWidth = 0;
   let scrollTop = 0;
   let scrollLeft = 0;
-  api.armPlatformScrollRestore("qq", 7, () => {
-    scrollTop = Math.min(240, scrollHeight);
-    scrollLeft = Math.min(160, scrollWidth);
-  });
+  const scrollState = {
+    resultNode,
+    restoreResult() {
+      scrollTop = Math.min(240, scrollHeight);
+      scrollLeft = Math.min(160, scrollWidth);
+    },
+  };
+  api.armPlatformScrollRestore("qq", "song", 7, scrollState);
   assert.equal(scrollTop, 0, "arming must not restore against the empty table");
   assert.equal(scrollLeft, 0);
   scrollHeight = 600;
@@ -63,10 +100,42 @@ test("deferred platform scroll restoration waits for content and rejects stale g
   assert.equal(api.restorePendingPlatformScroll(), false, "the restoration is one-shot");
 
   let staleRestores = 0;
-  api.armPlatformScrollRestore("qq", 7, () => { staleRestores += 1; });
+  const staleState = { resultNode, restoreResult() { staleRestores += 1; } };
+  api.armPlatformScrollRestore("qq", "song", 7, staleState);
   api.setVersion(8);
   assert.equal(api.restorePendingPlatformScroll(), false);
   assert.equal(staleRestores, 0, "a stale platform generation must never move the current view");
+
+  api.setVersion(7);
+  api.armPlatformScrollRestore("qq", "song", 7, staleState);
+  api.setMode("likes");
+  assert.equal(api.restorePendingPlatformScroll(), false);
+  assert.equal(staleRestores, 0, "changing mode invalidates deferred movement");
+
+  api.setMode("song");
+  let refreshRestores = 0;
+  const refreshState = { resultNode, restoreResult() { refreshRestores += 1; } };
+  api.armPlatformScrollRestore("qq", "song", 7, refreshState);
+  api.setResultRequest(12);
+  assert.equal(api.restorePendingPlatformScroll(), true);
+  assert.equal(refreshRestores, 1, "ordinary result refresh requests preserve deferred restoration");
+
+  api.armPlatformScrollRestore("qq", "song", 7, staleState);
+  api.setGenerationRevision(4);
+  assert.equal(api.restorePendingPlatformScroll(), false);
+  assert.equal(staleRestores, 0, "a new result job generation cannot inherit the previous table offset");
+
+  api.setResultRequest(11);
+  api.setGenerationRevision(3);
+  api.armPlatformScrollRestore("qq", "song", 7, staleState);
+  resultNode.dispatch("wheel");
+  assert.equal(api.restorePendingPlatformScroll(), false);
+  assert.equal(staleRestores, 0, "direct user interaction owns the new scroll position");
+
+  api.armPlatformScrollRestore("qq", "song", 7, staleState);
+  for (const callback of [...timers.values()]) callback();
+  assert.equal(api.restorePendingPlatformScroll(), false, "expired restoration cannot surprise the user later");
+  assert.equal(staleRestores, 0);
 });
 
 test("platform switching makes new WAAPI and disclosure motion settle immediately", async () => {

@@ -64,6 +64,7 @@ let resultStream;
 let resultView = "netease:parallel";
 let resultRequest = 0;
 const resultGenerations = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
+const resultGenerationRevisions = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, 0]));
 const latestJobs = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
 const localRequestedTargets = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, undefined]));
 let resultExportInProgress = false;
@@ -84,6 +85,7 @@ let classicVerificationController;
 let desiredPlatform = platform;
 let platformTransition;
 let pendingPlatformScrollRestore;
+const PLATFORM_SCROLL_RESTORE_TTL_MS = 2_500;
 let runtimeClock;
 let runtimeClockText = "";
 let refreshTimer;
@@ -1450,7 +1452,9 @@ function syncResultGeneration(viewKey, generation) {
   const previous = resultGenerations[viewKey];
   resultGenerations[viewKey] = generation;
   syncResultExportAvailability();
-  if (sameGeneration(previous, generation) || viewKey !== taskViewKey()) return;
+  if (sameGeneration(previous, generation)) return;
+  resultGenerationRevisions[viewKey] += 1;
+  if (viewKey !== taskViewKey()) return;
   knownMatches = -1;
   resetVisibleResults();
   connectResultStream();
@@ -2264,6 +2268,7 @@ async function switchMode(value) {
     return;
   }
   if (value === mode || !TASK_VIEWS[`${platform}:${value}`]) return;
+  cancelPendingPlatformScrollRestore();
   const ownerPlatform = platform;
   const switchVersion = ++modeSwitchVersion;
   const previousMode = mode;
@@ -2375,20 +2380,56 @@ function capturePlatformScrollState() {
     ...$$('.table-wrap'),
   ].filter(Boolean))];
   const positions = nodes.map((node) => ({ node, left: node.scrollLeft, top: node.scrollTop }));
+  const resultNode = $('#resultsPanel .table-wrap');
+  const resultPosition = positions.find((entry) => entry.node === resultNode);
   const pageLeft = scrollX;
   const pageTop = scrollY;
-  return () => {
-    for (const entry of positions) {
-      entry.node.scrollLeft = entry.left;
-      entry.node.scrollTop = entry.top;
-    }
-    scrollTo(pageLeft, pageTop);
+  return {
+    resultNode,
+    restoreImmediate() {
+      for (const entry of positions) {
+        entry.node.scrollLeft = entry.left;
+        entry.node.scrollTop = entry.top;
+      }
+      scrollTo(pageLeft, pageTop);
+    },
+    restoreResult() {
+      if (!resultPosition) return;
+      resultPosition.node.scrollLeft = resultPosition.left;
+      resultPosition.node.scrollTop = resultPosition.top;
+    },
   };
 }
 
-function armPlatformScrollRestore(targetPlatform, switchVersion, restore) {
-  if (typeof restore !== "function") return;
-  pendingPlatformScrollRestore = { targetPlatform, switchVersion, restore };
+function cancelPendingPlatformScrollRestore() {
+  const pending = pendingPlatformScrollRestore;
+  if (!pending) return;
+  pendingPlatformScrollRestore = undefined;
+  clearTimeout(pending.timer);
+  for (const type of pending.cancelEvents) pending.node.removeEventListener(type, pending.cancel);
+}
+
+function armPlatformScrollRestore(targetPlatform, targetMode, switchVersion, scrollState) {
+  cancelPendingPlatformScrollRestore();
+  if (!scrollState?.resultNode || typeof scrollState.restoreResult !== "function") return;
+  const pending = {
+    targetPlatform,
+    targetMode,
+    targetViewKey: taskViewKey(),
+    switchVersion,
+    generationRevision: resultGenerationRevisions[taskViewKey()],
+    node: scrollState.resultNode,
+    restore: scrollState.restoreResult,
+    cancelEvents: ["wheel", "touchstart", "pointerdown", "keydown"],
+    timer: undefined,
+    cancel: undefined,
+  };
+  pending.cancel = () => {
+    if (pendingPlatformScrollRestore === pending) cancelPendingPlatformScrollRestore();
+  };
+  pendingPlatformScrollRestore = pending;
+  for (const type of pending.cancelEvents) pending.node.addEventListener(type, pending.cancel, { once: true, passive: type !== "keydown" });
+  pending.timer = setTimeout(pending.cancel, PLATFORM_SCROLL_RESTORE_TTL_MS);
 }
 
 function restorePendingPlatformScroll() {
@@ -2396,11 +2437,14 @@ function restorePendingPlatformScroll() {
   if (!pending) return false;
   if (pending.switchVersion !== platformSwitchVersion
     || pending.targetPlatform !== platform
-    || pending.targetPlatform !== desiredPlatform) {
-    pendingPlatformScrollRestore = undefined;
+    || pending.targetPlatform !== desiredPlatform
+    || pending.targetMode !== mode
+    || pending.targetViewKey !== taskViewKey()
+    || pending.generationRevision !== resultGenerationRevisions[taskViewKey()]) {
+    cancelPendingPlatformScrollRestore();
     return false;
   }
-  pendingPlatformScrollRestore = undefined;
+  cancelPendingPlatformScrollRestore();
   pending.restore();
   return true;
 }
@@ -2476,9 +2520,9 @@ function commitPlatformSelection(value, switchVersion, options = {}) {
     if (restoreFocus && changed) $(`[data-platform-target="${platform}"]`)?.focus({ preventScroll: true });
     return true;
   } finally {
-    options.restoreScroll?.();
-    if (changed && options.deferScrollRestore) {
-      armPlatformScrollRestore(value, switchVersion, options.restoreScroll);
+    options.restoreScroll?.restoreImmediate?.();
+    if (changed && options.deferScrollRestore && $('.tab.active')?.dataset.tab === "results") {
+      armPlatformScrollRestore(value, mode, switchVersion, options.restoreScroll);
     }
   }
 }
@@ -2490,7 +2534,7 @@ async function switchPlatform(value) {
   modeSwitchVersion += 1;
   platformTransition?.cancel();
   platformTransition = undefined;
-  pendingPlatformScrollRestore = undefined;
+  cancelPendingPlatformScrollRestore();
   cancelInterfaceMotions();
   if (value === platform) {
     applyPlatformPresentation();
@@ -3049,6 +3093,7 @@ addEventListener("visibilitychange", () => {
 });
 addEventListener("pagehide", () => {
   pageLifecycleSuspended = true;
+  cancelPendingPlatformScrollRestore();
   platformTransition?.cancel();
   platformTransition = undefined;
   cancelInterfaceMotions();
@@ -3094,6 +3139,7 @@ addEventListener("pageshow", (event) => {
 async function activateTaskTab(tab) {
   const switchVersion = ++tabSwitchVersion;
   selectedTabs[platform] = tab.dataset.tab;
+  if (tab.dataset.tab !== "results") cancelPendingPlatformScrollRestore();
   setTaskPanelCollapsed(true);
   const current = $('.tab.active');
   if (current === tab) {

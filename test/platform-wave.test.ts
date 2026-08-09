@@ -6,7 +6,7 @@ import vm from "node:vm";
 
 const waveSource = readFileSync(join(process.cwd(), "web", "platform-wave.js"), "utf8");
 
-test("particle wave transition honors reduced motion without requesting WebGL", async () => {
+test("obsidian silk transition honors reduced motion without requesting WebGL", async () => {
   const runtime = waveRuntime(fakeGl(), { reducedMotion: true });
   load(runtime);
   let commits = 0;
@@ -24,7 +24,7 @@ test("particle wave transition honors reduced motion without requesting WebGL", 
   assertClean(runtime);
 });
 
-test("particle wave transition uses one backing pass and one bounded instanced field", async () => {
+test("obsidian silk transition uses one fullscreen triangle and no particle geometry", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -35,7 +35,7 @@ test("particle wave transition uses one backing pass and one bounded instanced f
     options: {
       alpha: true,
       antialias: false,
-      depth: true,
+      depth: false,
       stencil: false,
       preserveDrawingBuffer: false,
       premultipliedAlpha: true,
@@ -45,24 +45,20 @@ test("particle wave transition uses one backing pass and one bounded instanced f
   runtime.runFrame(0);
   assert.deepEqual(gl.drawCalls, [
     { kind: "arrays", mode: gl.TRIANGLES, first: 0, count: 3 },
-    { kind: "instanced", mode: gl.TRIANGLES, first: 0, count: 6, instances: 4_388 },
   ]);
   assert.equal(gl.createdPrograms, 1);
   assert.equal(gl.createdVertexArrays, 1);
   assert.equal(gl.forbiddenCalls.length, 0);
   assert.ok(gl.uniformPairs.some(({ name, x, y }) => name === "u_resolution" && x === 1_200 && y === 800));
   assert.match(gl.shaderSources.join("\n"), /gl_VertexID/);
-  assert.match(gl.shaderSources.join("\n"), /gl_InstanceID/);
-  assert.match(gl.shaderSources.join("\n"), /lemniscateDistance/);
-  assert.match(gl.shaderSources.join("\n"), /particleCorner/);
-  assert.match(gl.shaderSources.join("\n"), /vec3 camera = vec3\(0\.0, 3\.34, 3\.66\)/);
-  assert.match(gl.shaderSources.join("\n"), /fwidth\(distanceToBar\)/);
-  assert.match(gl.shaderSources.join("\n"), /if \(alpha <= 0\.001\) discard/);
-  assert.match(waveSource, /MAX_PARTICLES = MAX_GRID_COLUMNS \* MAX_GRID_ROWS \+ RING_PARTICLES/);
-  assert.match(gl.shaderSources.join("\n"), /ringParticle = instance >= floorCount/);
-  assert.match(gl.shaderSources.join("\n"), /1\.98 \* sin\(ringPhase\), 1\.60 \* sin\(ringPhase\) \* cos\(ringPhase\)/);
-  assert.match(waveSource, /gl\.drawArraysInstanced\(gl\.TRIANGLES, 0, 6, particleCount\)/);
-  assert.doesNotMatch(gl.shaderSources.join("\n"), /u_pattern|blockOrder|blockMask|blockFace/);
+  assert.doesNotMatch(gl.shaderSources.join("\n"), /gl_InstanceID/);
+  assert.match(gl.shaderSources.join("\n"), /float silkPleat/);
+  assert.match(gl.shaderSources.join("\n"), /float foldedEdge/);
+  assert.match(gl.shaderSources.join("\n"), /float engravedContour/);
+  assert.match(gl.shaderSources.join("\n"), /frontLine = 1\.0 - smoothstep\(0\.0, 0\.075/);
+  assert.match(waveSource, /gl\.drawArrays\(gl\.TRIANGLES, 0, 3\)/);
+  assert.doesNotMatch(waveSource, /drawArraysInstanced|createBuffer|createTexture|createFramebuffer|readPixels/);
+  assert.doesNotMatch(gl.shaderSources.join("\n"), /lemniscate|ringParticle|particleGrain|u_pattern/);
   assert.equal(waveSource.includes("Math.random"), false);
   assert.equal(/\.style\.(?:transform|opacity|filter|willChange)\s*=/.test(waveSource), false);
 
@@ -73,7 +69,7 @@ test("particle wave transition uses one backing pass and one bounded instanced f
   assertClean(runtime);
 });
 
-test("particle wave mirrors only its travel direction and keeps a deterministic perspective field", async () => {
+test("obsidian silk mirrors only its travel direction and keeps deterministic fold shading", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, { innerWidth: 390, innerHeight: 844 });
   load(runtime);
@@ -81,20 +77,14 @@ test("particle wave mirrors only its travel direction and keeps a deterministic 
   runtime.runFrame(0);
 
   assert.ok(gl.uniformScalars.some(({ name, value }) => name === "u_direction" && value === -1));
-  assert.ok(gl.uniformPairs.some(({ name, x, y }) => name === "u_grid" && x === 28 && y === 47));
-  assert.deepEqual(gl.drawCalls.at(-1), {
-    kind: "instanced",
-    mode: gl.TRIANGLES,
-    first: 0,
-    count: 6,
-    instances: 2_756,
-  });
+  assert.ok(gl.uniformPairs.some(({ name, x, y }) => name === "u_resolution" && x === 390 && y === 844));
+  assert.deepEqual(gl.drawCalls.at(-1), { kind: "arrays", mode: gl.TRIANGLES, first: 0, count: 3 });
   const shader = gl.shaderSources.join("\n");
-  assert.match(shader, /radiusSquared \* radiusSquared - aSquared \* \(p\.x \* p\.x - p\.y \* p\.y\)/);
-  assert.match(shader, /if \(ringParticle\) height = 0\.18 \+ grain \* 0\.040/);
-  assert.match(shader, /sceneScaleX = min\(1\.0, aspect \/ 1\.35\)/);
-  assert.match(shader, /view\.x \* focalLength \/ aspect/);
-  assert.match(shader, /mix\(u_sourceAccent, u_targetAccent, v_themeMix\)/);
+  assert.match(shader, /return u_direction > 0\.0 \? uv\.x : 1\.0 - uv\.x/);
+  assert.match(shader, /float warp = 0\.115 \* sin/);
+  assert.match(shader, /crease = ridge8 \* ridge8 \* ridge2/);
+  assert.doesNotMatch(shader, /\bpow\(|\bexp\(/);
+  assert.match(shader, /mix\(u_sourceAccent, u_targetAccent, themeMix\)/);
   assert.equal(waveSource.includes("Math.random"), false);
   assert.equal(/\.style\.(?:transform|opacity|filter|willChange)\s*=/.test(waveSource), false);
 
@@ -103,29 +93,19 @@ test("particle wave mirrors only its travel direction and keeps a deterministic 
   assertClean(runtime);
 });
 
-test("particle wave backing is fully opaque across the atomic handoff", () => {
-  const easeInOut = (value: number) => {
-    const bounded = Math.min(1, Math.max(0, value));
-    return bounded * bounded * (3 - 2 * bounded);
-  };
-  const alpha = (elapsedMs: number) => elapsedMs <= 326
-    ? easeInOut(elapsedMs / 205)
-    : 1 - easeInOut((elapsedMs - 420) / (680 - 420));
-  assert.equal(alpha(0), 0);
-  assert.ok(alpha(204) < 1);
-  assert.equal(alpha(205), 1);
-  assert.equal(alpha(325), 1);
-  assert.equal(alpha(326), 1);
-  assert.equal(alpha(420), 1);
-  assert.ok(alpha(421) < 1);
-  assert.equal(alpha(680), 0);
-  assert.match(waveSource, /if \(u_elapsedMs <= COVER_END\) return easeInOut\(u_elapsedMs \/ 205\.0\)/);
-  assert.match(waveSource, /return 1\.0 - easeInOut\(\(u_elapsedMs - 420\.0\) \/ \(RELEASE_END - 420\.0\)\)/);
+test("obsidian silk is fully opaque across the atomic handoff", () => {
+  assert.match(waveSource, /const FULLY_COVERED_MS = 244/);
+  assert.match(waveSource, /const REVEAL_START_MS = 404/);
+  assert.match(waveSource, /elapsedMs >= COVER_AT && elapsedMs <= REVEAL_AT[\s\S]*return 1\.0/);
+  assert.match(waveSource, /float front = mix\(-0\.12, 1\.12, progress\)/);
+  assert.match(waveSource, /if \(elapsedMs <= COMMIT_AT\)[\s\S]*1\.0 - smoothstep/);
+  assert.match(waveSource, /float progress = smoother\(\(elapsedMs - REVEAL_AT\)/);
+  assert.match(waveSource, /return smoothstep\(-aa \* 1\.8, aa \* 1\.8, signedFrontDistance\)/);
   assert.match(waveSource, /drawAt\(COMMIT_MS\);\s*invokeCommit\(\)/);
-  assert.doesNotMatch(waveSource, /diagonal|ripple|u_pattern|blockGrid|blockFace/);
+  assert.doesNotMatch(waveSource, /lemniscate|particleCount|u_grid|u_pass/);
 });
 
-test("particle wave transition commits once at the 326ms fully opaque handoff", async () => {
+test("obsidian silk transition commits once at the 326ms fully opaque handoff", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -147,14 +127,13 @@ test("particle wave transition commits once at the 326ms fully opaque handoff", 
   assert.equal(commits, 1);
   assert.deepEqual(plain(outcome), { committed: true, completed: true, renderer: "webgl2" });
   assert.ok(gl.uniformScalars.some(({ name, value }) => name === "u_elapsedMs" && value === 326));
-  assert.match(gl.shaderSources.join("\n"), /float backdropAlpha\(\)/);
-  assert.match(gl.shaderSources.join("\n"), /easeInOut\(u_elapsedMs \/ 205\.0\)/);
-  assert.match(gl.shaderSources.join("\n"), /vec3 matte = mix\(u_sourceMatte, u_targetMatte, v_themeMix\)/);
-  assert.match(gl.shaderSources.join("\n"), /vec3 glow = mix\(u_sourceGlow, u_targetGlow, v_themeMix\)/);
+  assert.match(gl.shaderSources.join("\n"), /float curtainAlpha\(/);
+  assert.match(gl.shaderSources.join("\n"), /vec3 matte = mix\(u_sourceMatte, u_targetMatte, themeMix\)/);
+  assert.match(gl.shaderSources.join("\n"), /handoffNeutral/);
   assertClean(runtime);
 });
 
-test("particle wave transition cancel before commit preserves source and after commit preserves target", async () => {
+test("obsidian silk transition cancel before commit preserves source and after commit preserves target", async () => {
   {
     const runtime = waveRuntime(fakeGl());
     load(runtime);
@@ -190,7 +169,7 @@ test("particle wave transition cancel before commit preserves source and after c
   }
 });
 
-test("particle wave transition preserves commit false and commit errors without hanging", async () => {
+test("obsidian silk transition preserves commit false and commit errors without hanging", async () => {
   {
     const runtime = waveRuntime(fakeGl());
     load(runtime);
@@ -224,7 +203,7 @@ test("particle wave transition preserves commit false and commit errors without 
   }
 });
 
-test("particle wave transition immediately commits and releases every partial setup failure", async (t) => {
+test("obsidian silk transition immediately commits and releases every partial setup failure", async (t) => {
   const cases: Array<[string, GlFailure | RuntimeFailure]> = [
     ["getContext throw", { runtime: "getContext" }],
     ["getContext null", { runtime: "nullContext" }],
@@ -233,6 +212,7 @@ test("particle wave transition immediately commits and releases every partial se
     ["program allocation", { gl: "program" }],
     ["program link", { gl: "link" }],
     ["VAO allocation", { gl: "vao" }],
+    ["required uniform", { gl: "uniform" }],
     ["append", { runtime: "append" }],
     ["initial resize", { gl: "viewport" }],
   ];
@@ -252,8 +232,8 @@ test("particle wave transition immediately commits and releases every partial se
   }
 });
 
-test("particle wave transition converts both draw-pass and resize exceptions into an immediate committed settlement", async (t) => {
-  for (const failure of ["draw", "drawInstanced", "viewport"] as const) {
+test("obsidian silk transition converts draw and resize exceptions into an immediate committed settlement", async (t) => {
+  for (const failure of ["draw", "viewport"] as const) {
     await t.test(failure, async () => {
       const gl = fakeGl(failure === "viewport" ? undefined : failure);
       const runtime = waveRuntime(gl);
@@ -276,7 +256,7 @@ test("particle wave transition converts both draw-pass and resize exceptions int
   }
 });
 
-test("particle wave transition releases a fully initialized renderer when the first RAF request throws", async () => {
+test("obsidian silk transition releases a fully initialized renderer when the first RAF request throws", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, { failRuntime: "initialRaf" });
   load(runtime);
@@ -293,7 +273,7 @@ test("particle wave transition releases a fully initialized renderer when the fi
   assertClean(runtime);
 });
 
-test("particle wave transition responds to context loss before and after handoff exactly once", async () => {
+test("obsidian silk transition responds to context loss before and after handoff exactly once", async () => {
   for (const afterCommit of [false, true]) {
     const gl = fakeGl();
     const runtime = waveRuntime(gl);
@@ -317,7 +297,7 @@ test("particle wave transition responds to context loss before and after handoff
   }
 });
 
-test("particle wave transition settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
+test("obsidian silk transition settles on dynamic reduced motion, hidden state, and pagehide", async (t) => {
   for (const trigger of ["motion", "hidden"] as const) {
     await t.test(trigger, async () => {
       const runtime = waveRuntime(fakeGl());
@@ -364,7 +344,7 @@ test("particle wave transition settles on dynamic reduced motion, hidden state, 
   });
 });
 
-test("particle wave transition resize preserves its clock, commit count, particle cap, DPR cap, and pixel budget", async () => {
+test("obsidian silk transition resize preserves its clock, commit count, DPR cap, and pixel budget", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl, {
     innerWidth: 3_840,
@@ -388,18 +368,16 @@ test("particle wave transition resize preserves its clock, commit count, particl
   await transition.finished;
 
   for (const [width, height] of runtime.canvasSizes) {
-    assert.ok(width * height <= 1_600_000);
+    assert.ok(width * height <= 1_200_000);
   }
-  for (const call of gl.drawCalls.filter((entry) => entry.kind === "instanced")) {
-    assert.ok((call.instances ?? 0) <= 5_920);
-  }
+  assert.ok(gl.drawCalls.every((entry) => entry.kind === "arrays" && entry.count === 3));
   assert.ok(runtime.firstCanvasSize.width < Math.round(3_840 * 1.25));
   assert.ok(runtime.firstCanvasSize.height < Math.round(2_160 * 1.25));
   assert.equal(commits, 1);
   assertClean(runtime);
 });
 
-test("particle wave transition fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
+test("obsidian silk transition fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
@@ -418,7 +396,7 @@ test("particle wave transition fully releases RAF, listeners, GPU state, canvas,
 });
 
 type RuntimeFailure = { runtime: "getContext" | "nullContext" | "append" };
-type GlFailure = { gl: "shader" | "compile" | "program" | "link" | "vao" | "viewport" | "draw" | "drawInstanced" };
+type GlFailure = { gl: "shader" | "compile" | "program" | "link" | "vao" | "uniform" | "viewport" | "draw" };
 
 function createTransition(runtime: ReturnType<typeof waveRuntime>, overrides: Record<string, unknown> = {}) {
   return runtime.context.PlatformWaveTransition.create({
@@ -556,7 +534,7 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
   };
 }
 
-function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "viewport" | "draw" | "drawInstanced") {
+function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "uniform" | "viewport" | "draw") {
   let programCount = 0;
   let vaoCount = 0;
   let lostContexts = 0;
@@ -627,7 +605,7 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
     },
     bindVertexArray() {},
     deleteVertexArray(value: object) { deletedVertexArrays.push(value); },
-    getUniformLocation: (_program: object, name: string) => ({ name }),
+    getUniformLocation: (_program: object, name: string) => failure === "uniform" && name === "u_elapsedMs" ? null : ({ name }),
     viewport() {
       if (failure === "viewport" || gl.failViewport) throw new Error("synthetic viewport failure");
     },
@@ -649,9 +627,8 @@ function fakeGl(failure?: "shader" | "compile" | "program" | "link" | "vao" | "v
       if (failure === "draw") throw new Error("synthetic draw failure");
     },
     drawArraysInstanced(mode: number, first: number, count: number, instances: number) {
-      events.push("draw");
+      forbiddenCalls.push("drawArraysInstanced");
       drawCalls.push({ kind: "instanced", mode, first, count, instances });
-      if (failure === "drawInstanced") throw new Error("synthetic instanced draw failure");
     },
     createBuffer() { forbiddenCalls.push("createBuffer"); return {}; },
     bindBuffer() { forbiddenCalls.push("bindBuffer"); },
