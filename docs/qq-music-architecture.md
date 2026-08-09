@@ -13,7 +13,7 @@ QQ 音乐当前支持两种任务：
 
 领域实现位于 `src/qq-music/**`。`src/qq-cli.ts` 是独立命令行入口；桌面端由共享 `QQJobManager` 组装 Lane、任务路径和展示事件。QQ Scanner 不依赖 Server 或 DOM。
 
-歌曲搜索属于 lookup-only 控制请求，不是第三种扫描模式。`QQMusicClient.searchSongs` 优先使用公开桌面搜索 CGI 并严格校验 `data.body.song.list`；仅当该列表结构合法且为空时，才通过同一 fetch 和取消 signal 回退到官方 Smartbox 的 `data.song.itemlist`，非空畸形主结果不得被回退掩盖。两条路径都把歌曲 ID/MID 原样保留为字符串。Dashboard 的歌名/数字歌曲普通查询始终走一条本机直连 Lane，不读代理池或扫描表单里的手动代理；Manager 仍用 `TaskCoordinator` lease、Governor、Gate、取消和 4 秒超时路径，不创建或改写扫描 generation、结果或检查点。前端同关键词单飞、60 秒/24 项小缓存，并在请求期间显示加载/失败状态。
+歌曲搜索属于 lookup-only 控制请求，不是第三种扫描模式。`QQMusicClient.searchSongs` 优先使用公开桌面搜索 CGI 并严格校验 `data.body.song.list`；仅当该列表结构合法且为空时，才通过同一 fetch 和取消 signal 回退到官方 Smartbox 的 `data.song.itemlist`，非空畸形主结果不得被回退掩盖。两条路径都把歌曲 ID/MID 原样保留为字符串。Dashboard 的歌名/数字歌曲普通查询始终走一条本机直连 Lane，不读代理池或扫描表单里的手动代理；Manager 仍用 `TaskCoordinator` lease、Governor、Gate、取消和 4 秒超时路径，不创建或改写扫描 generation、结果或检查点。`QQJobManager` 把 lookup/search 返回的精确元数据缓存为最多 32 项；启动 song 扫描时只把 ID 完全等于 `requestedSongId` 的缓存项传入，Scanner 不再为可选元数据另发请求。前端同关键词单飞、60 秒/24 项小缓存，并在请求期间显示加载/失败状态。
 
 ## 数据流
 
@@ -32,7 +32,7 @@ QQ 音乐当前支持两种任务：
    跨歌曲 Worker 队列
             |
             v
-  shared LaneAllocator --> Lane Governor --> QQ TransportGate --> QQ CGI
+  shared LaneAllocator --> QQ TransportGate gap --> Lane Governor slot --> QQ CGI
             |
             v
   严格校验整页 SeqNo / 业务码 / cursor
@@ -53,7 +53,7 @@ Dashboard 的 QQ 两个任务表单共用生产目标预览和“EncryptUin 解�
 
 本地解码只支持冻结字符表中的两类严格格式：8/12/16 字符的经典 QQ 短格式必须解码为 5..12 位、非 `0` 开头数字，内部标为 `qq-number-candidate` 并显示完整 QQ；28 字符格式必须解码为恰好 19 位、非 `0` 开头数字，内部标为 `wxuin-candidate`，但界面只显示“微信用户”。后者既不显示内部 ID，也不称为微信号或 QQ 号；公开资料不提供到 `wxid/openid/unionid` 的转换。逆替换必须是规范标准 Base64 且只产生 ASCII 数字；未知字符、非规范 Base64、32 位新式 ID 和其他 opaque token 会被实验拒绝，但符合生产 parser 的 established opaque 值仍可作为扫描目标。
 
-官方 URL allowlist 固定为 `https://y.qq.com/n/ryqq/profile/<identity>`、`https://y.qq.com/n/ryqq_v2/profile?uin=<identity>` 和 `https://y.qq.com/portal/profile.html?uin=<identity>`。解析器在 WHATWG 规范化前拒绝原始 authority 中的任何端口语义和原始路径中的 dot-segment（含编码变体），不访问 URL、不跟随重定向，并拒绝 HTTP、非精确 `y.qq.com` host、userinfo、fragment、非 profile path、缺失/空/重复 `uin`、任意 `id` 身份参数、额外查询参数和非法百分号编码。URL 中直接携带 EncryptUin 时 `resolution=local`，不获取 lease、Lane 或网络；直接数字或 URL 数字时 `resolution=network`，用户显式点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经一条本机直连 Lane 的 lookup lease、Governor、TransportGate、4 秒超时与取消只访问固定 QQ 公开资料端点，获得 canonical EncryptUin 后用同一严格解码器对账。QQ Client 对这些请求设置 `redirect:"error"`，不会访问用户提供的 URL 或跟转到外域/私网。生产扫描使用独立 parser，可安全提取同一 allowlist URL 中的数字或 established opaque EncryptUin，但不要求 opaque 值可被本实验解码；正式评论/来源分页仍按任务配置使用代理池/静态代理并 fail-closed。scanner promise 建立后，普通 QQ/opaque 目标通过另一条独立 4 秒本机直连辅助 Lane 后台补全昵称和受信头像，补全失败或长期未返回都不阻塞评论扫描；`微信用户` 跳过补全，固定显示该称谓、元信息和默认头像。
+官方 URL allowlist 固定为 `https://y.qq.com/n/ryqq/profile/<identity>`、`https://y.qq.com/n/ryqq_v2/profile?uin=<identity>` 和 `https://y.qq.com/portal/profile.html?uin=<identity>`。解析器在 WHATWG 规范化前拒绝原始 authority 中的任何端口语义和原始路径中的 dot-segment（含编码变体），不访问 URL、不跟随重定向，并拒绝 HTTP、非精确 `y.qq.com` host、userinfo、fragment、非 profile path、缺失/空/重复 `uin`、任意 `id` 身份参数、额外查询参数和非法百分号编码。URL 中直接携带 EncryptUin 时 `resolution=local`，不获取 lease、Lane 或网络；直接数字或 URL 数字时 `resolution=network`，用户显式点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经一条本机直连 Lane 的 lookup lease、Governor、TransportGate、4 秒超时与取消只访问固定 QQ 公开资料端点，获得 canonical EncryptUin 后用同一严格解码器对账。没有这项明确证据时，不得把输入 UID/数字候选臆测为其他身份或别名。QQ Client 对这些请求设置 `redirect:"error"`，不会访问用户提供的 URL 或跟转到外域/私网。生产扫描使用独立 parser，可安全提取同一 allowlist URL 中的数字或 established opaque EncryptUin，但不要求 opaque 值可被本实验解码；正式评论/来源分页仍按任务配置使用代理池/静态代理并 fail-closed。scanner promise 建立后，普通 QQ/opaque 目标通过另一条独立 4 秒本机直连辅助 Lane 后台补全昵称和受信头像，补全失败或长期未返回都不阻塞评论扫描；`微信用户` 跳过补全，固定显示该称谓、元信息和默认头像。
 
 用户可另行点击“在线正向验证”。loopback-only 的 `POST /api/qq/encrypt-uin/verify` 使用一条 4 秒有界的本机直连 Lane，分别以上一步得到的 canonical EncryptUin 和解码候选访问官方公开资料，同时比较 canonical EncryptUin、昵称和头像。三项全部一致才是 `match`，任一差异是 `mismatch`，缺失昵称/头像是不可验证的上游响应。响应只返回 `{format,identityKind,status,maskedIdentifier,checks}`，不返回完整候选值。解析和验证都不创建/修改扫描 generation；匹配只证明当次公开响应一致，不证明账号所有权或任何私密数据访问权。完整目标可按上述规则出现在可信本地界面，但不得进入日志、错误、诊断、导出文件名、真实文档示例或 Release 说明；测试只用合成数据。
 
@@ -63,7 +63,7 @@ Dashboard 的 QQ 两个任务表单共用生产目标预览和“EncryptUin 解�
 
 评论分页使用 SeqNo：下一页 cursor 必须来自响应原始顺序中最后一条已规范化评论。页内相等或局部乱序会被完整保留；恢复页的每一条 SeqNo 都必须严格小于请求 cursor，`HasMore` 空页或末值不后退则拒绝。此类 comment-page 协议错误只冻结当前歌曲且不推进 cursor，likes 中其他歌曲继续。
 
-歌曲详情只能补充 MID、名称和艺人。Scanner 始终以用户请求的十进制 `requestedSongId` 建立 song 任务；ID 全程使用字符串，不能经过 JavaScript `Number`。
+歌曲详情只能补充 MID、名称和艺人。Scanner 始终以用户请求的十进制 `requestedSongId` 建立 song 任务；ID 全程使用字符串，不能经过 JavaScript `Number`。可选元数据只能来自 Manager 已完成的 lookup/search 缓存且 ID 必须精确相等；缺失或不匹配时直接以 requestedSongId 扫描，不触发额外元数据 I/O。
 
 ## Worker、Lane 与请求预算
 
@@ -71,7 +71,7 @@ Dashboard 的 QQ 两个任务表单共用生产目标预览和“EncryptUin 解�
 
 所有 Worker 共用一个 `LaneAllocator`。每个成功页重新公平获取健康 Lane，因此全部选中出口可参与轮转；普通故障保留原 cursor，并由健康 Lane 接力。`maxWorkers` 是主机级硬上限，不能通过裁掉后半段 Lane 实现。
 
-每 Lane 的 Governor 把 `minDelayMs` 解释为同一出口相邻远端请求的真实最小启动间隔，Worker 数不会除掉它。QQ 新任务默认 `300 ms + U[0,100) ms`（300–399ms）；多个 Worker 只允许慢请求在不同歌曲间重叠。全任务共享 QQ TransportGate：song 固定一个在途，likes 总在途上限等于主机 Worker 上限（最大32），两者聚合启动间隔均至少50ms。8出口满页理论受20页/秒 Gate限制约500条/秒，4出口受出口节奏限制约286条/秒；实际还乘填充率/成功率并受网络影响。
+每 Lane 的 Governor 把 `minDelayMs` 解释为同一出口相邻远端请求的真实最小启动间隔，Worker 数不会除掉它。QQ 新任务默认 `300 ms + U[0,100) ms`（300–399ms）；多个 Worker 只允许慢请求在不同歌曲间重叠。全任务共享 QQ TransportGate：song 固定一个在途，likes 总在途上限等于主机 Worker 上限（最大32），两者聚合启动间隔均至少50ms。每个实际远端 attempt 先取得 Gate 容量并等待聚合间隔，再在同一启动边界执行所选 Lane Governor 的 `reserveSlot`，随后立即发请求；重试也走这条路径，因此 Gate 和出口节奏都约束真实开始时间。8出口满页理论受20页/秒 Gate限制约500条/秒，4出口受出口节奏限制约286条/秒；实际还乘填充率/成功率并受网络影响。
 
 QQ 扫描不保存或使用 QQ/网易云 Cookie。Dashboard 进入 QQ 工作区时，连接状态固定显示“本地服务”并隐藏网易云二维码登录按钮；已保存的网易云会话只能在网易云工作区呈现。
 
@@ -79,7 +79,7 @@ QQ 扫描不保存或使用 QQ/网易云 Cookie。Dashboard 进入 QQ 工作区�
 
 ## 代理与故障边界
 
-代理请求由 `proxy-fetch.ts` 通过 HTTP 转发或 HTTPS CONNECT 发出。代理拒绝、超时、取消或永久错误均 fail-closed，绝不回退本机直连。共享代理池的现有探测不等价于 QQ 域探测；QQ 的每个实际请求仍独立验证成败。
+代理请求由 `proxy-fetch.ts` 通过 HTTP 转发或 HTTPS CONNECT 发出。代理拒绝、超时、取消或永久错误均 fail-closed，绝不回退本机直连。共享代理池的现有探测不等价于 QQ 域探测；QQ 的每个实际请求仍独立验证成败。HTTPS Agent 为每个逻辑请求分配 token，pending CONNECT 按 token 跟踪；取消或失败只销毁当前 CONNECT、请求和 socket，不得连带销毁同 Lane 的其他健康隧道，只有 Lane/fetch 关闭才整体销毁 Agent。
 
 可重试网络或上游错误进入 LaneRecovery；永久代理错误只下线该 Lane。`403/429` 按冷却语义保留任务；全部 Lane 不可用时任务暂停。只有明确属于歌曲资源的 HTTP `404/410` 才把该歌曲标记为 `done + truncated`，协议或业务错误不能伪装成空结果。
 
@@ -87,7 +87,7 @@ QQ 扫描不保存或使用 QQ/网易云 Cookie。Dashboard 进入 QQ 工作区�
 
 命中去重域是 `(songId, commentId)`，状态字段为 `seenCommentKeys`。QQ `CmId` 不被假定为跨歌曲全局唯一。
 
-结果 writer 初始化时流式读取既有 JSONL，长期持有 append FileHandle，并串行执行：
+结果 writer 初始化时流式读取既有 JSONL，长期持有 append FileHandle。Scanner 将一个逻辑评论页的全部新命中一次性交给 `appendBatch`；它先按复合 key 去重，再以一次 write 和一次 sync 持久化整批，最后发布结果：
 
 ```text
 write(JSONL) -> sync() -> 登记结果 key -> onMatch（最佳努力）
@@ -101,7 +101,7 @@ write(JSONL) -> sync() -> 登记结果 key -> onMatch（最佳努力）
 
 若取消发生在 JSONL 同步后、状态提交前，JSONL 可以领先状态，但 cursor 不能推进；恢复时重读原页，以复合 key 去重并补齐状态所有权。
 
-`song` 每个成功页立即原子 checkpoint。`likes` 在 400 ms 或 4 个脏页先到时合并保存，并用与本任务动态 Gate 总在途上限相同数量的 pre-request 槽位限制尚未持久化的页面；停止、冷却、失败和终态强制 flush。JSONL `write/sync` 错误由 `QQMusicResultPersistenceError` 锁存为全局持久化故障，不能误算成代理 Lane 故障或在本次运行换 Lane 重写；首次持久化失败会暂停任务并取消后续工作，下次恢复再从 JSONL 复合 key 对账。清理阶段必须等待当时已经开始的 checkpoint flush 完全结束，旧任务不能在返回后继续写状态并覆盖紧接着启动的恢复任务。
+`song` 与 `likes` 都在 400 ms 或 4 个脏页先到时合并保存。likes Worker 等待每个 revision，并用与本任务动态 Gate 总在途上限相同数量的 pre-request 槽位严格限制尚未 checkpoint 的页面；song 是单一串行 SeqNo 链，可在四页阈值前继续，崩溃时最多重放四个已经 JSONL 耐久的页。停止、冷却、失败和终态强制 flush。JSONL `write/sync` 错误由 `QQMusicResultPersistenceError` 锁存为全局持久化故障，不能误算成代理 Lane 故障或在本次运行换 Lane 重写；首次持久化失败会暂停任务并取消后续工作，下次恢复再从 JSONL 复合 key 对账。清理阶段必须等待当时已经开始的 checkpoint flush 完全结束，旧任务不能在返回后继续写状态并覆盖紧接着启动的恢复任务。
 
 ## 歌曲搜索 HTTP 契约
 

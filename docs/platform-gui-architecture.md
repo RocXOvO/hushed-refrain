@@ -19,7 +19,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 交互几何使用角色 token：微小 6 px、控件 10 px、表面 14 px、浮层 18 px，标签/状态使用 pill。所有普通 `button`/`.button` 用 `--motion-control` 约 150 ms 统一颜色、背景、边框和阴影反馈，按下的 `scale(.987)` 由实际使用的 `--motion-press` 约 80 ms 控制；disabled/`aria-disabled` 降低对比并禁止 hover、位移和阴影，reduced-motion 关闭过渡和缩放。Windows 原生窗口控制按钮保留系统手感，按下不缩放。
 
-桌面 PDF 在保存对话框返回路径后打开持久进度浮层，持续显示读取、字体、生成、写入阶段与累计耗时，并提供显式取消；终态必须关闭隐藏报告窗口、移除进度监听并恢复导出按钮。保存对话框本身允许用户决定等待时间，选定路径后的阶段则全部有界。
+桌面 PDF 从导出开始发出 `save-dialog` 进度，`elapsedMs` 是包含保存对话框等待的单调累计耗时，不是独立阶段耗时。选定路径后打开持久进度浮层，持续显示读取、字体、生成、写入阶段与累计耗时，并提供显式取消；`showModal()` 暂不可用时回退到 `show()`，展示接口都失败也不能中断实际导出。终态必须关闭隐藏报告窗口、移除进度监听并恢复导出按钮；选定路径后的阶段全部有界。打包冒烟必须从 renderer 的 `window.ncmDesktop` 穿过 preload/IPC，再完成隐藏 Chromium 加载、字体、打印与原子写入，并验证完整进度序列、目标路径和 `%PDF-` 文件头。
 
 ### Obsidian Silk Aperture 交接
 
@@ -33,9 +33,14 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 ### 主工作区绢缎鼠标尾迹
 
-- `PointerSilkTrail.create({ host, platform, enabled })` 仅在 `#mainWorkspace` 内惰性创建一张 `pointer-events:none` 的 Canvas2D，返回 `setEnabled` / `setPlatform` / `suspend(reason)` / `resume(reason)` / `destroy`。它只接受 `pointer:fine` 的 mouse 移动，不捕获指针、不阻断业务交互，也不覆盖导航、顶栏、右侧 Inspector 或弹窗。两平台分别使用克制的红/绿调色板，每帧只绘制三条确定性低对比绢线和一层微弱预制柔光；不读取、截图或纹理化业务 DOM。
+- `PointerSilkTrail.create({ host, platform, enabled })` 仅在 `#mainWorkspace` 内惰性创建一张 `pointer-events:none` 的 Canvas2D，返回 `setEnabled` / `setPlatform` / `suspend(reason)` / `resume(reason)` / `destroy`。它只接受 `pointer:fine` 的 mouse 移动，不捕获指针、不阻断业务交互，也不覆盖导航、顶栏、右侧 Inspector 或弹窗。两平台分别使用克制的红/绿调色板；每帧绘制三条确定性低对比切向绢线，并复用 148 px 环境光 sprite 与 88 px 方向环 sprite。速度与法线保存在预分配 `Float32Array`，法线每帧只计算一次；不读取、截图或纹理化业务 DOM。
 - 热路径使用 28 点 `Float32Array`/`Float64Array` 环形采样，单点寿命 260 ms；最后一次移动后保持 72 ms，再用 348 ms 淡出，到 420 ms 立即清空并将空闲 RAF 降为 0。渲染 DPR 不超过 1.25，颜色缓冲不超过 800,000 像素；Canvas 与 ResizeObserver 只在首次合格移动后分配，绘制/RAF 异常会立即释放表面。
 - 关闭开关、reduced-motion 或粗指针会立即释放表面；任意弹窗打开、平台切换、页面 hidden/blur 则通过可叠加 reason 停止 RAF 并清空采样/画面，可保留已惰性分配的空 Canvas。恢复时不重放旧轨迹，只等新移动。`pagehide` 彻底 `destroy()`；BFCache `pageshow` 重建单例。桌面 `desktop-settings.json` v2 持久化 `closeBehavior` 与默认开启的 `cursorTrailEnabled`，v1 迁移保留关闭行为并补默认值，partial update 不重置未提交字段。无 Electron bridge 的浏览器模式只修改当前会话内存，刷新后默认开启，不写 localStorage/sessionStorage 或调用服务端偏好 API。
+
+### 折叠 Inspector 的代理池提示
+
+- Inspector 收起时，代理池 `starting` 或 `running + refreshing` 在主界面显示一个显式、可点击的全局提示；点击后切到代理池视图并展开 Inspector。Inspector 已展开、池稳定运行或停止时提示必须隐藏。
+- 提示以 `building | refreshing | hidden` 签名去重，轮询同一状态不得重复写 live-region 文本或重播入场动画；平台切换期间也不播放提示入场。`aria-live`/`aria-atomic` 只属于内部状态文本，不让整个按钮反复播报。
 
 ## 歌曲搜索
 
@@ -62,7 +67,8 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 ## 验收不变量
 
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
-- 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，28 点/260 ms/420 ms 与 DPR/像素上限不可回归；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
+- 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，148 px 环境光、88 px 方向环、三绢线、28 点/260 ms/420 ms 与 DPR/像素上限不可回归；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
+- 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。
 - 搜索的旧响应不能覆盖新查询；平台、查询和选中 ID 必须同代。

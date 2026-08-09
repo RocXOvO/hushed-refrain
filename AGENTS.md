@@ -4,10 +4,10 @@ This is the compact, durable map for `ncm-comment-finder`. It records current co
 
 ## Current baseline and authorities
 
-- Current release line: `v1.0.0`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must be checked separately when publication state matters.
+- Current release line: `v1.1.1`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
 - Display brand: `乐评寻踪 / MUSIC COMMENT TRACE`; `productName=乐评寻踪`.
 - Stable technical identity: package `ncm-comment-finder`, appId `cn.local.ncm.commentfinder`, repository `RocXOvO/ncm-comment-finder`, artifact stem `NCM-Comment-Finder`, Electron data directory `appData/ncm-comment-finder`. Do not change these as part of a visual rename.
-- Current web cache-busters are `styles.css?v=59`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=1`, and `app.js?v=70`; keep them synchronized with `web/index.html`.
+- Current web cache-busters are `styles.css?v=60`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=2`, and `app.js?v=71`; keep them synchronized with `web/index.html`.
 - Current unresolved findings and acceptance boundaries live in `docs/code-audit.md`. Detailed QQ truth lives in `docs/qq-music-architecture.md`; QQ performance in `docs/qq-music-performance-review.md`; GUI/search/transition truth in `docs/platform-gui-architecture.md`. `docs/qq-music-integration-design.md` is historical only.
 
 ## Product and runtime shapes
@@ -30,9 +30,10 @@ The three engines share infrastructure, not pagination or state semantics.
 
 Entry points: `scan`, `/api/job`, `runPooledCommentFinder`.
 
-- Candidate sources are listening rank, the target UID's owned `specialType=5` liked playlist, or their record-first song-ID union.
-- Never use `likelist` for another user. List `user_playlist(uid)`, require exact owner and `specialType=5`, then load `playlist_detail` and validate owner again. Listing and detail are separate governed requests.
-- Liked catalogs are strict: `trackIds` must be an explicit array of valid, unique positive-decimal IDs. A present list/detail `trackCount` must be a non-negative integer; null/empty is unknown, not zero. The two declarations are separate snapshots and need not agree, but each may trail the validated ID vector by at most one song. Fewer IDs than either declaration proves truncation; a declaration lag over one, a duplicate/invalid ID, a missing vector, or an owner mismatch is a source error and is not checkpointed as complete.
+- `source` is `record | likes | playlists | both | all`: `both` remains rank + liked songs, while `all` adds the target UID's owned public non-liked playlists. `recordScope` is `all | week | both`; dual scope retains distinct `record` and `record-week` evidence.
+- Never use `likelist` for another user. Page `user_playlist(uid)`, accept a playlist only when `creator.userId` explicitly equals the target UID, split owned `specialType=5` into likes, and ignore subscriptions or entries with absent/mismatched owner evidence. Revalidate the owner on every `playlist_detail`; a requested UID is never an evidence-free alias for a playlist creator.
+- Liked and ordinary playlist catalogs are strict: `trackIds` must be an explicit array of valid, unique positive-decimal IDs. A present list/detail `trackCount` must be a non-negative integer; null/empty is unknown, not zero. The two declarations are separate snapshots and need not agree, but each may trail the validated ID vector by at most one song. Fewer IDs than either declaration proves truncation; a declaration lag over one, a duplicate/invalid ID, a missing vector, an owner mismatch, a duplicate/nonadvancing list page, or `more=true` with no entries is a source error and is not checkpointed as complete.
+- Merge all successful selected catalogs by song ID and scan one copy. Preserve the union in `sources[]` and per-source rank/play-count/score evidence in `memberships[]`; legacy state without memberships is synthesized during reconciliation. A failed record scope or playlist detail may retain other successful sources plus a source error, but an independently selected source that wholly fails must fail the scan.
 - Page `comment_new` with a strictly descending time cursor, default page size 1000, accepted range 1..2000. A `hasMore` page must advance; an empty advancing page is valid.
 - Work is page-granular and fairly requeued. Pooled scans pre-shard unfinished song ranges to available Worker/transport capacity, then adaptively split unread half-open ranges when Workers wait.
 - `pageInSong` and `maxCommentPagesPerSong` are aggregate across a song's cursor and all shards. In-flight permits count toward the cap; failed requests release their permit. Natural completion wins over truncation on the last allowed page.
@@ -57,12 +58,14 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 - The raw final normalized row is the next SeqNo cursor. Equal/local disorder inside a page is retained, but every resumed-page row must be older than the requested cursor. An unsafe page leaves that song unadvanced while other liked songs may continue.
 - `song` always has one in-flight SeqNo chain. `likes` parallelizes different songs only.
 - QQ results de-duplicate by `(songId,commentId)`. The writer completes `write + fsync` before match publication and state ownership; cancellation is checked again before cursor/checkpoint commit.
+- One logical comment page is passed to `appendBatch`, which de-duplicates its composite keys and persists the page with one write and one fsync before publication. Both modes checkpoint after 400 ms or 4 dirty pages; likes Workers await every revision to keep the checkpoint-slot bound hard, while the serial song chain may replay at most four already-durable JSONL pages after a crash. Final, stop, cooldown, and failure paths force the outstanding flush.
+- `QQJobManager` caches exact metadata returned by lookup/search (bounded to 32 entries). Song scans consume it only when its ID exactly equals `requestedSongId`; Scanner never performs an optional metadata request and never replaces the requested decimal-string primary key.
 - Canonical identity and presentation are separate. Numeric and reversible classic QQ forms may display full `QQ <number>`; a reversible 28-character WeChat-login token displays only `微信用户`; accepted opaque targets display `EncryptUin <value>`. Logs, diagnostics, filenames, fixtures, and release examples stay redacted/synthetic.
 
 ## Lookup and proxy boundary
 
 - Ordinary dashboard lookups are low-frequency control traffic and always use a bounded local direct Lane: NetEase `/api/user`, `/api/user/profile`, `/api/song`, `/api/song/search`; QQ `/api/qq/user`, `/api/qq/song`, `/api/qq/song/search`, numeric canonical resolution, verification, and optional nickname/avatar enrichment.
-- These routes ignore the running pool, manual-proxy fields, and forged proxy query inputs. QQ ordinary queries use a 4-second bound; NetEase UID preview overlaps profile/record/likes through one 100 ms Governor with two-second per-request bounds. Only confirmed liked-playlist privacy renders `已开启隐私`; an inconclusive ordinary preflight failure renders `暂时无法确认`, and cooldown remains separate.
+- These routes ignore the running pool, manual-proxy fields, and forged proxy query inputs. QQ ordinary queries use a 4-second bound; NetEase UID preview overlaps profile, record, likes, and a shared first playlist page through one 100 ms Governor with two-second per-request bounds. Only confirmed liked-playlist privacy renders `已开启隐私`; an inconclusive ordinary preflight failure renders `暂时无法确认`, and cooldown remains separate.
 - Opaque QQ canonical targets remain local. `微信用户` performs no profile enrichment and keeps fixed metadata/default avatar.
 - Only formal high-volume comment/source pagination consumes the configured pool/static proxy. When a proxy path is selected it is fail-closed and never silently falls back to direct.
 - Dashboard parallel requires a running verified pool. Source requires a verified pool, explicit static proxy, or explicit `allowDirect`. The shared pool proves egress and NetEase reachability, not QQ-domain reachability.
@@ -74,7 +77,7 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 - NetEase `workersPerLane` is a per-exit permit bound. Actual Worker loops are `min(lanes * workersPerLane, hostConcurrency)`; `hostConcurrency` is 1..32, default 8.
 - QQ `song` has one Worker. QQ `likes` uses `hostConcurrency` Workers and derives `workersPerLane = ceil(hostConcurrency / selectedLanes)`.
 - All page Workers acquire a Lane from one fair round-robin `LaneAllocator`; a host cap must not be implemented by slicing away selected exits.
-- Proxy-backed tasks also share one task transport gate. Healthy aggregate starts are separated by at least 50 ms, a real ceiling of about 20 starts/second before per-Lane/network limits. NetEase AIMD halves effective transport capacity after clustered transient failures and gradually restores it; it does not destroy Worker loops. QQ keeps its profile-derived Gate and one-chain rule.
+- Proxy-backed tasks also share one task transport gate. Healthy aggregate starts are separated by at least 50 ms, a real ceiling of about 20 starts/second before per-Lane/network limits. For QQ, a request first acquires Gate capacity and its aggregate start gap, then reserves the selected Lane Governor slot at the actual remote-start boundary; retries use the same path. NetEase AIMD halves effective transport capacity after clustered transient failures and gradually restores it; it does not destroy Worker loops.
 - Pool build/import/verify/refresh uses a separate 4-request/80-ms gate.
 - Final ordinary Lane failures requeue unchanged work and enter cancellable exponential recovery. Five consecutive final failures mark that invocation's Lane unavailable; a late in-flight success may revive it. Do not declare exhaustion while a request can still restore a Lane.
 - Each Manager owns an `AbortController`. Stop closes queues, aborts Governors/gates, cancels LaneRecovery and allocator/checkpoint waiters, prevents new remote starts, then forces the final checkpoint before releasing the lease.
@@ -84,11 +87,12 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 
 - `src/atomic-file.ts` owns unique same-directory temporary files, fsync, bounded Windows rename retry, and newest-complete recovery. Once a JSON candidate parses, schema/decode failure is authoritative and must not fall back to older state.
 - NetEase source state is version 3 with `commentPagination:"cursor-v1"`, page-size compatibility, per-song cursors/shards, source catalog version 3, totals, cooldown, truncation, and coverage. Dashboard paths are target-v3 per UID/source; sources share only the canonical per-UID JSONL and coverage ledger.
+- Scoped record paths include non-default `recordScope`. The one legacy weekly checkpoint that occupied an all-time path is migrated under a shared file lock: accept only exact UID/source/week identity, atomically establish or preserve the matching scoped target, reread it for durable verification, then remove only the conflicting legacy document and its owned recovery files. Identity conflict leaves the legacy file intact and fails safely.
 - Parallel state is version 1 and binds immutable range/configured-shard/page-size identity. Adaptive child shards are persisted and resumed.
 - QQ state is version 1, `kind:"qq-comment-scan"`, `commentPagination:"seqno-v1"`, in `data/qq/`; its result writer has the stronger current fsync/repair ordering.
 - `data/resume-task.json` is an atomically written private version-3 form descriptor with `requestIntervalSemantics:"per-start-v1"`. It never replaces checkpoint compatibility, stores no credentials, restores with `fresh=false`, and never auto-starts.
 - Generation-bound REST/SSE/log/report reads must validate platform, mode, UUID, canonical target, and owned paths before and after asynchronous reads. UI snapshots/progress are presentation, never completion authority. NetEase source reports expose `catalogLoaded` from durable `sourcesLoaded`: `false` with zero means the catalog has not been read and its size is unknown; only `true` with zero is a confirmed empty catalog.
-- `web/pointer-silk-trail.js` is optional presentation only: `PointerSilkTrail.create({host,platform,enabled})` owns one lazy Canvas2D surface inside `#mainWorkspace`, accepts fine mouse input only, and exposes `setEnabled`, `setPlatform`, reason-based `suspend`/`resume`, and `destroy`. It keeps 28 typed samples, stops all RAF work 420 ms after idle, caps DPR at 1.25 and the color buffer at 800,000 pixels, and must clear/suspend for dialogs, platform transitions, hidden/blur/pagehide and reduced motion; BFCache restore rebuilds it. Desktop settings v2 persist `cursorTrailEnabled` (default true), migrate v1 without losing `closeBehavior`, and accept partial updates; browser mode is session-only and never uses localStorage or a preferences API.
+- `web/pointer-silk-trail.js` is optional presentation only: `PointerSilkTrail.create({host,platform,enabled})` owns one lazy Canvas2D surface inside `#mainWorkspace`, accepts fine mouse input only, and exposes `setEnabled`, `setPlatform`, reason-based `suspend`/`resume`, and `destroy`. It draws three deterministic ribbons plus a prebuilt 148 px ambient-light sprite and 88 px directional ring; 28 typed samples live 260 ms and all RAF stops after the 72+348=420 ms idle tail. DPR stays at or below 1.25 and the color buffer at or below 800,000 pixels. Dialogs, platform transitions, hidden/blur/pagehide and reduced motion clear or release it; BFCache restore rebuilds it. Desktop settings v2 persist `cursorTrailEnabled` (default true), migrate v1 without losing `closeBehavior`, and accept partial updates; browser mode is session-only and never uses localStorage or a preferences API.
 - Match/logger/UI callbacks are best effort. They must not alter scheduling, results, checkpoint advancement, coverage, or task terminal status.
 - Current NetEase result durability is an unresolved P1: `src/results.ts` still uses append-only writes without the QQ writer's fsync/tail-repair contract. Do not describe NetEase result/checkpoint durability as solved.
 
@@ -98,9 +102,11 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 - Verification requires public egress plus a real NetEase comment probe. Select one fastest entry per IPv4 `/24` or IPv6 `/48`; only distinct verified egresses are scan Lanes.
 - Managed replacement is new-before-old and descriptor-atomic. Killing/stopping a PID requires full executable plus exact generation-config identity. The frequent `/api/pool` status poll uses cheap liveness only and is not connectivity proof; task start re-verifies.
 - Default pool sizing is 8 selected exits from 48 candidates. `maxProxyLanes=0` selects all verified exits for one task; a positive value caps only that task and never shrinks the shared pool.
+- When Inspector is collapsed, pool `starting` or background `refreshing` has one explicit global notice that opens the pool view. A stable building/refreshing/hidden signature prevents repeated live-region writes or replayed arrival animation during polling; expanded Inspector keeps the notice hidden.
 - Electron keeps `contextIsolation:true`, `nodeIntegration:false`, `sandbox:true`, a narrow preload bridge, and a single-instance lock. Single-instance UX does not protect CLI/Web processes from sharing a logical scan root; that cross-process lease remains open audit work.
 - Windows update installation first blocks new work, stops the real globally active task, waits up to 45 seconds for terminal status/final checkpoint, and installs only after QQ lookup/pool barriers settle. Timeout or stop/status failure cancels installation.
 - Native Windows auto-update needs one matching `.exe`, `.exe.blockmap`, and `latest.yml`. Generic GitHub update checking and `electron-updater` are separate paths.
+- Desktop PDF export reports a monotonic cumulative `elapsedMs` from the start of export, including save-dialog time; stage-to-stage deltas may be derived but are not stored as independent durations. Packaged smoke must traverse renderer `window.ncmDesktop` → preload → IPC → hidden Chromium load/fonts/print → atomic write and observe `save-dialog, load-report, fonts, print, write, saved`, then verify the selected path and `%PDF-` header.
 
 ## Key module index
 
@@ -124,12 +130,14 @@ npm run build
 npm run bench:qq
 node --check web/app.js
 node --check web/platform-wave.js
+node --check web/pointer-silk-trail.js
 npm run desktop:smoke:mac
 git diff --check
 ```
 
 - Before handoff, run at least check, test, build, and diff-check; add the focused tests for changed behavior. Desktop/preload/updater/build changes also require the relevant desktop smoke/package path. Tests currently lack a strict `check:test` TypeScript gate; do not treat transpile-only execution as type coverage.
 - Routine tests use stubs and loopback services. Real NetEase/QQ/proxy traffic must be explicit, bounded, and never a default gate.
+- The `v1.1.1` release baseline is 517/517 tests with check, build, benchmark, the three renderer syntax checks, macOS desktop smoke, and diff-check passing; a later code change invalidates that count until the full gate is rerun.
 - Windows packaging is a manual `workflow_dispatch`: it checks/tests, builds unpacked and NSIS forms, runs packaged startup/PDF smoke, and uploads a seven-day Actions artifact. It does not publish a GitHub Release.
 - Release from one exact final commit/version. Verify tag, `origin/main`, workflow `headSha`, manifests, and assets all agree. Validate `latest.yml` version/path/size/SHA-512 against the installer; build both macOS architectures from the same commit.
 - Publish only exact current-version files from a clean staging set. Local `release/` is non-authoritative and may contain historical files.
