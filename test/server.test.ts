@@ -576,10 +576,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=53/);
-  assert.match(pageText, /platform-wave\.js\?v=14/);
+  assert.match(pageText, /styles\.css\?v=55/);
+  assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /app\.js\?v=66/);
   assert.match(pageText, /id="liveTaskIdentity"/);
+  assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
   assert.match(pageText, /id="pdfExportDialog"/);
   assert.match(pageText, /id="cancelPdfExportButton"/);
@@ -851,6 +852,24 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /transition:\s*grid-template-columns 260ms/);
   assert.match(styleText, /@media \(max-width:\s*1280px\)/);
   assert.match(styleText, /body\[data-platform="qq"\]/);
+  const qqTheme = styleText.match(/body\[data-platform="qq"\]\s*\{([^}]+)\}/s)?.[1] ?? "";
+  const qqToken = (name: string): string => {
+    const value = qqTheme.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`))?.[1];
+    assert.ok(value, `missing QQ color token --${name}`);
+    return value;
+  };
+  const luminance = (hex: string): number => {
+    const components = [1, 3, 5].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16) / 255)
+      .map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+    return components[0] * 0.2126 + components[1] * 0.7152 + components[2] * 0.0722;
+  };
+  const contrast = (foreground: string, background: string): number => {
+    const values = [luminance(foreground), luminance(background)].sort((left, right) => right - left);
+    return (values[0] + 0.05) / (values[1] + 0.05);
+  };
+  assert.ok(contrast(qqToken("muted"), qqToken("surface")) >= 4.5);
+  assert.ok(contrast(qqToken("muted"), qqToken("surface-subtle")) >= 4.5);
+  assert.ok(contrast(qqToken("accent"), qqToken("accent-soft")) >= 4.5);
   assert.match(styleText, /\.platform-transition-canvas/);
   assert.match(styleText, /\.platform-portal/);
   assert.doesNotMatch(styleText, /body\[data-platform="qq"\] \.app-shell\s*\{/s);

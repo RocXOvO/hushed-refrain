@@ -139,10 +139,10 @@ data/logs/qq-<job-id>.jsonl
 - 顶栏全局 tabs 在网易云与 QQ 两个隔离工作区间切换，不兼作扫描模式。网易云固定拥有 `parallel/source`，QQ 固定拥有 `song/likes`，并各自记忆 mode 与输出 tab；非活动 workbench 同时 `hidden` 和 `inert`。完整 viewKey 仍为 `netease:parallel`、`netease:source`、`qq:song`、`qq:likes`，jobs、generations、settlement 和 REST/SSE/log/estimate 请求均按完整 key 隔离。
 - 平台切换只改变 workbench 内容、主题、模式和请求归属，不改变共享外壳几何。网易云与 QQ 桌面端共用紧凑图标 rail、导航项尺寸和任务抽屉锚点；QQ 不展开 rail 或常驻显示导航文字。横向或纵向缩放不得让顶栏、平台 tabs、窗口按钮、rail、任务栏、drawer 和 inspector 相互碰撞；overlay 模式中的 drawer 与 inspector 互斥，宽表格与长面板在自身容器内滚动。
 - 平台切换同时推进 platform/mode 版本，旧 mode 动画和启动响应只能提交到原 owner/view；mode 改变会立即绘制目标 view 的缓存/空快照。离开平台或从 `parallel/song` 切到兄弟 mode 会取消对应歌曲 lookup，但不取消正式扫描；QQ lookup 的 busy 栅栏不在取消时预先释放，而在请求真正结算的异步 `finally` 中移除 controller。完成的平台过渡若回报 `committed=false` 或激活平台不符，上层会同步应用目标平台、展示、快照与 SSE；重选当前平台也会重绘并刷新。Renderer 只接受匹配 generation；QQ 结果 key 为 `songId:commentId`，SSE 由 route jobId 与事件 generation 双重绑定。
-- QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 直接展示主机上限对应的可调度 Worker，并自动显示每出口许可。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。QQ 不保存登录 Cookie；工作区固定显示“本地服务”并隐藏网易云二维码登录按钮，网易云已保存会话不得串入 QQ 展示。
+- QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 直接展示主机上限对应的可调度 Worker，并自动显示每出口许可。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。QQ 工作区以中性黑灰/白灰为主体，品牌绿只用于平台标识/关键强调，正文使用更深绿色；导航没有孤立装饰绿点，顶部服务徽章和代理池状态灯仍反映真实状态。QQ 不保存登录 Cookie；工作区固定显示“本地服务”并隐藏网易云二维码登录按钮，网易云已保存会话不得串入 QQ 展示。
 - `web/platform-wave.js` 只提供一种约 680 ms 的 WebGL2 Obsidian Silk Aperture；顶栏没有动效按钮，旧 `data/ui-preferences.json` 不再读取。五条确定性绢缎褶皱/等高线按切换方向从源平台色收拢到中性黑曜色，244–404 ms 显式保持全屏 alpha 1，约 326 ms/48% 唯一提交目标工作区，然后再以目标色揭幕。渲染器使用一个 program/VAO、`depth:false` 和每帧一次 fullscreen TRIANGLES draw，不创建 instance、VBO、纹理、FBO 或 readback；高光不用 `pow`/`exp`，grain 不用 sine hash，DPR 不超过 1.25，颜色缓冲不超过 1,200,000 像素，resize 沿 `lastElapsed` 立即重绘但不改变时钟/commit。正常 680 ms 先移除 Canvas 和 busy 标记，下一 compositor RAF 再释放 GPU/监听器并 resolve，避免结束闪屏；异常路径立即完整清理。业务 DOM 和身份/评论数据不进入 Canvas/GPU；提交后所有滚动坐标立即恢复，只有 results table 允许在同 platform/mode/view/switch version 与当前 view 的 result generation revision 下延迟补偿，普通 refresh 不取消，新 generation、2.5 s 超时或用户 wheel/touch/pointer/key 操作即取消。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=53`、`platform-wave.js?v=14`、`app.js?v=66`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=55`、`platform-wave.js?v=15`、`app.js?v=66`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 

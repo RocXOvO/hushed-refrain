@@ -93,6 +93,13 @@ test("obsidian silk mirrors only its travel direction and keeps deterministic fo
   assertClean(runtime);
 });
 
+test("obsidian silk uses the restrained QQ brand-green palette", () => {
+  assert.match(waveSource, /qq:\s*\{\s*accent: new Float32Array\(\[0\.192, 0\.761, 0\.486\]\)/);
+  assert.match(waveSource, /sheen: new Float32Array\(\[0\.663, 0\.898, 0\.773\]\)/);
+  assert.match(waveSource, /matte: new Float32Array\(\[0\.094, 0\.133, 0\.114\]\)/);
+  assert.doesNotMatch(waveSource, /0\.055, 0\.865, 0\.730|0\.690, 0\.950, 1\.000/);
+});
+
 test("obsidian silk is fully opaque across the atomic handoff", () => {
   assert.match(waveSource, /const FULLY_COVERED_MS = 244/);
   assert.match(waveSource, /const REVEAL_START_MS = 404/);

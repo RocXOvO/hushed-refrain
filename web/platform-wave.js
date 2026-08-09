@@ -13,9 +13,9 @@
       matte: new Float32Array([0.035, 0.022, 0.028]),
     },
     qq: {
-      accent: new Float32Array([0.055, 0.865, 0.730]),
-      sheen: new Float32Array([0.690, 0.950, 1.000]),
-      matte: new Float32Array([0.014, 0.036, 0.046]),
+      accent: new Float32Array([0.192, 0.761, 0.486]),
+      sheen: new Float32Array([0.663, 0.898, 0.773]),
+      matte: new Float32Array([0.094, 0.133, 0.114]),
     },
   };
   const NEUTRAL_VOID = new Float32Array([0.010, 0.014, 0.021]);
