@@ -38,6 +38,7 @@ let windowsUpdateFallbackState: WindowsUpdateState | undefined;
 let mainWindow: BrowserWindow | undefined;
 let dashboardUrl: string | undefined;
 let resultExportInProgress = false;
+let resultExportAbortController: AbortController | undefined;
 
 function currentUpdateState() {
   return windowsUpdater?.getState() ?? windowsUpdateFallbackState ?? unsupportedWindowsUpdateState(app.getVersion());
@@ -114,7 +115,9 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
   if (!window || window !== mainWindow || !dashboardUrl) throw new Error("当前窗口不能导出报告。");
   if (resultExportInProgress) throw new Error("已有一份 PDF 正在生成，请稍候。");
   const request = parseDesktopResultExportRequest(rawRequest);
+  const exportAbort = new AbortController();
   resultExportInProgress = true;
+  resultExportAbortController = exportAbort;
   try {
     const reportUrl = desktopResultReportUrl(dashboardUrl, request);
     return await runDesktopResultExport(request, {
@@ -130,6 +133,7 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
       },
       createSession: () => createDesktopReportSession(window, reportUrl),
       write: writeDesktopResultPdf,
+      signal: exportAbort.signal,
       onProgress: (progress) => {
         if (!event.sender.isDestroyed()) {
           event.sender.send(DESKTOP_EXPORT_CHANNELS.resultsPdfProgress, progress);
@@ -140,15 +144,23 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
     const failure = error instanceof DesktopResultExportError ? error : undefined;
     const stage = failure?.stage ?? "save-dialog";
     const code = failure?.code ?? "failed";
-    const logPath = writeDesktopLog("pdf-export", `stage=${stage} code=${code}`);
+    const category = desktopExportFailureCategory(failure?.cause ?? error);
+    const logPath = writeDesktopLog("pdf-export", `stage=${stage} code=${code} category=${category}`);
     return {
       status: "failed",
       message: failure?.message ?? "选择保存位置失败，请重试。",
       logAvailable: Boolean(logPath),
     };
   } finally {
+    if (resultExportAbortController === exportAbort) resultExportAbortController = undefined;
     resultExportInProgress = false;
   }
+});
+ipcMain.handle(DESKTOP_EXPORT_CHANNELS.cancelResultsPdf, (event) => {
+  const window = senderWindow(event);
+  if (!window || window !== mainWindow) throw new Error("当前窗口不能取消报告导出。");
+  resultExportAbortController?.abort(new Error("user-cancelled-pdf-export"));
+  return { cancelling: Boolean(resultExportAbortController) };
 });
 
 function createDesktopReportSession(parent: BrowserWindow, reportUrl: string): DesktopResultReportSession {
@@ -166,10 +178,14 @@ function createDesktopReportSession(parent: BrowserWindow, reportUrl: string): D
   reportWindow.webContents.on("will-navigate", (navigationEvent, target) => {
     if (target !== reportUrl) navigationEvent.preventDefault();
   });
+  let closing = false;
   let rejectFatal = (_error: unknown): void => {};
   const fatal = new Promise<never>((_resolve, reject) => { rejectFatal = reject; });
   reportWindow.webContents.once("render-process-gone", () => rejectFatal(new Error("report-renderer-gone")));
   reportWindow.once("unresponsive", () => rejectFatal(new Error("report-window-unresponsive")));
+  reportWindow.once("closed", () => {
+    if (!closing) rejectFatal(new Error("report-window-closed"));
+  });
   const guarded = <T>(operation: Promise<T>): Promise<T> => Promise.race([operation, fatal]);
   return {
     load: (url) => guarded(reportWindow.loadURL(url)),
@@ -184,19 +200,22 @@ function createDesktopReportSession(parent: BrowserWindow, reportUrl: string): D
       margins: { top: 0.4, bottom: 0.55, left: 0.35, right: 0.35 },
     })),
     close: () => {
-      if (!reportWindow.isDestroyed()) reportWindow.destroy();
+      if (!reportWindow.isDestroyed()) {
+        closing = true;
+        reportWindow.destroy();
+      }
     },
   };
 }
 
-async function runPackagedPdfSmoke(parent: BrowserWindow, destination: string): Promise<void> {
+async function runDesktopPdfSmoke(parent: BrowserWindow, destination: string): Promise<void> {
   const request = parseDesktopResultExportRequest({
     platform: "netease",
     mode: "source",
     jobId: "00000000-0000-4000-8000-000000000001",
     target: { kind: "uid", value: "9000000001" },
   });
-  const html = `<!doctype html><meta name="result-report-platform" content="netease"><meta name="result-report-mode" content="source"><meta name="result-report-job" content="${request.jobId}"><meta name="result-report-target-kind" content="uid"><meta name="result-report-target" content="9000000001"><style>@page{size:A4;margin:15mm}body{font:16px sans-serif}</style><h1>乐评寻踪 PDF smoke</h1><p>Windows packaged Chromium print pipeline.</p>`;
+  const html = `<!doctype html><meta name="result-report-platform" content="netease"><meta name="result-report-mode" content="source"><meta name="result-report-job" content="${request.jobId}"><meta name="result-report-target-kind" content="uid"><meta name="result-report-target" content="9000000001"><style>@page{size:A4;margin:15mm}body{font:16px sans-serif}</style><h1>乐评寻踪 PDF smoke</h1><p>Chromium hidden report print pipeline.</p>`;
   const reportUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
   const result = await runDesktopResultExport(request, {
     reportUrl,
@@ -281,10 +300,12 @@ async function createWindow(): Promise<void> {
       throw new Error(`Packaged Windows updater failed to initialize. See ${writeDesktopLog("windows-updater-smoke", windowsUpdateFallbackState?.error ?? "unknown error") ?? "desktop log"}.`);
     }
     let pdfSmoke = "";
-    if (process.platform === "win32" && app.isPackaged) {
-      const destination = process.env.NCM_DESKTOP_SMOKE_PDF;
-      if (!destination) throw new Error("Packaged Windows PDF smoke destination is missing.");
-      await runPackagedPdfSmoke(window, destination);
+    const destination = process.env.NCM_DESKTOP_SMOKE_PDF;
+    if (process.platform === "win32" && app.isPackaged && !destination) {
+      throw new Error("Packaged Windows PDF smoke destination is missing.");
+    }
+    if (destination) {
+      await runDesktopPdfSmoke(window, destination);
       pdfSmoke = "DESKTOP_PDF_OK\n";
     }
     const smokeResult = `DESKTOP_WINDOW_BRIDGE_OK ${bridge.platform}\n${pdfSmoke}DESKTOP_SMOKE_OK ${url}\n`;
@@ -310,6 +331,8 @@ app.whenReady().then(createWindow).catch((error) => {
 
 app.on("window-all-closed", () => app.quit());
 app.on("before-quit", () => {
+  resultExportAbortController?.abort(new Error("application-quit"));
+  resultExportAbortController = undefined;
   dashboard?.close();
   dashboard = undefined;
   dashboardUrl = undefined;
@@ -317,3 +340,20 @@ app.on("before-quit", () => {
   windowsUpdater = undefined;
   windowsUpdateFallbackState = undefined;
 });
+
+function desktopExportFailureCategory(error: unknown): string {
+  const candidate = error as { code?: unknown; message?: unknown; name?: unknown } | undefined;
+  const code = typeof candidate?.code === "string" && /^[A-Z0-9_]{2,40}$/.test(candidate.code)
+    ? candidate.code
+    : undefined;
+  if (code) return `os-${code}`;
+  const message = String(candidate?.message ?? "").toLowerCase();
+  if (message.includes("renderer-gone")) return "renderer-gone";
+  if (message.includes("window-unresponsive")) return "window-unresponsive";
+  if (message.includes("window-closed") || message.includes("object has been destroyed")) return "window-closed";
+  if (message.includes("print")) return "print-pipeline";
+  if (message.includes("load")) return "report-load";
+  return typeof candidate?.name === "string" && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(candidate.name)
+    ? `error-${candidate.name}`
+    : "unknown";
+}

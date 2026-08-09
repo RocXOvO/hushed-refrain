@@ -55,6 +55,41 @@ test("desktop PDF export reports cancellation without creating a hidden session"
   assert.equal(created, 0);
 });
 
+test("desktop PDF export cancels a stuck hidden stage, closes it, and releases progress", async () => {
+  const controller = new AbortController();
+  let closed = 0;
+  const progress: string[] = [];
+  const exporting = runDesktopResultExport(request, runtime({
+    print: async () => new Promise<Buffer>(() => {}),
+    close: () => { closed += 1; },
+  }, {
+    signal: controller.signal,
+    onProgress: ({ stage }) => {
+      progress.push(stage);
+      if (stage === "print") controller.abort(new Error("synthetic user cancellation"));
+    },
+  }));
+
+  assert.deepEqual(await exporting, { status: "cancelled" });
+  assert.equal(closed, 1);
+  assert.deepEqual(progress, ["save-dialog", "load-report", "fonts", "print", "cancelled"]);
+});
+
+test("desktop PDF export classifies hidden-session construction after destination selection as load-report", async () => {
+  const cause = new Error("synthetic hidden window failure");
+  await assert.rejects(
+    runDesktopResultExport(request, runtime({}, {
+      createSession: () => { throw cause; },
+    })),
+    (error: unknown) => {
+      assert.equal(error instanceof DesktopResultExportError, true);
+      assert.equal((error as DesktopResultExportError).stage, "load-report");
+      assert.equal((error as DesktopResultExportError).cause, cause);
+      return true;
+    },
+  );
+});
+
 for (const stage of ["load-report", "fonts", "print", "write"] as DesktopResultExportStage[]) {
   test(`desktop PDF export bounds the ${stage} stage and closes the session`, async () => {
     let closed = 0;

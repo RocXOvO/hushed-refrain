@@ -25,6 +25,7 @@ export interface EnhancedNcmClientOptions {
 export interface NcmUserProfile {
   userId: string;
   nickname: string;
+  avatarUrl?: string;
   signature?: string;
   level?: number;
   listenSongs?: number;
@@ -94,6 +95,7 @@ export class EnhancedNcmClient implements NcmClient {
     return {
       userId,
       nickname,
+      avatarUrl: trustedNeteaseAvatarUrl(profile.avatarUrl),
       signature: text(profile.signature),
       level: numberOrUndefined(body.level ?? profile.level),
       listenSongs: numberOrUndefined(body.listenSongs ?? profile.listenSongs),
@@ -323,6 +325,21 @@ export class EnhancedNcmClient implements NcmClient {
       proxy: this.options.proxy,
       timeout: this.options.requestTimeoutMs ?? 30_000,
     };
+  }
+}
+
+function trustedNeteaseAvatarUrl(value: unknown): string | undefined {
+  const candidate = text(value);
+  if (!candidate) return undefined;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol === "http:") url.protocol = "https:";
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || url.username || url.password || url.port
+      || (host !== "126.net" && !host.endsWith(".126.net"))) return undefined;
+    return url.toString();
+  } catch {
+    return undefined;
   }
 }
 

@@ -17,6 +17,7 @@ export const DESKTOP_UPDATE_CHANNELS = {
 } as const;
 
 export const DESKTOP_EXPORT_CHANNELS = {
+  cancelResultsPdf: "desktop-export:cancel-results-pdf",
   resultsPdf: "desktop-export:results-pdf",
   resultsPdfProgress: "desktop-export:results-pdf-progress",
 } as const;

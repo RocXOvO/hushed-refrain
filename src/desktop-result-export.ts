@@ -42,6 +42,7 @@ export interface DesktopResultExportRuntime {
   createSession(): DesktopResultReportSession;
   write(destination: string, pdf: Buffer, signal: AbortSignal): Promise<void>;
   onProgress?: (progress: DesktopResultExportProgress) => void;
+  signal?: AbortSignal;
   timeouts?: Partial<Record<DesktopResultExportStage, number>>;
 }
 
@@ -56,8 +57,9 @@ export class DesktopResultExportError extends Error {
   constructor(
     public readonly stage: DesktopResultExportStage,
     public readonly code: "timeout" | "report-error" | "identity-mismatch" | "invalid-pdf" | "failed",
+    cause?: unknown,
   ) {
-    super(desktopResultExportFailureMessage(stage, code));
+    super(desktopResultExportFailureMessage(stage, code), { cause });
     this.name = "DesktopResultExportError";
   }
 }
@@ -100,11 +102,13 @@ export async function runDesktopResultExport(
     return { status: "cancelled" };
   }
 
-  const session = runtime.createSession();
   let stage: DesktopResultExportStage = "load-report";
+  let session: DesktopResultReportSession | undefined;
   try {
+    runtime.signal?.throwIfAborted();
+    session = runtime.createSession();
     runtime.onProgress?.({ stage });
-    await bounded(session.load(runtime.reportUrl), timeoutFor(runtime, stage), stage);
+    await bounded(session.load(runtime.reportUrl), timeoutFor(runtime, stage), stage, undefined, runtime.signal);
 
     stage = "fonts";
     runtime.onProgress?.({ stage });
@@ -112,6 +116,8 @@ export async function runDesktopResultExport(
       session.waitForReadyReport(),
       timeoutFor(runtime, stage),
       stage,
+      undefined,
+      runtime.signal,
     );
     if (desktopResultReportLoadError(readyReport)) {
       throw new DesktopResultExportError("load-report", "report-error");
@@ -122,7 +128,7 @@ export async function runDesktopResultExport(
 
     stage = "print";
     runtime.onProgress?.({ stage });
-    const pdf = await bounded(session.print(), timeoutFor(runtime, stage), stage);
+    const pdf = await bounded(session.print(), timeoutFor(runtime, stage), stage, undefined, runtime.signal);
     if (pdf.length < 5 || pdf.subarray(0, 5).toString("ascii") !== "%PDF-") {
       throw new DesktopResultExportError("print", "invalid-pdf");
     }
@@ -135,15 +141,21 @@ export async function runDesktopResultExport(
       timeoutFor(runtime, stage),
       stage,
       () => writeAbort.abort(new DesktopResultExportError(stage, "timeout")),
+      runtime.signal,
+      () => writeAbort.abort(runtime.signal?.reason),
     );
     runtime.onProgress?.({ stage: "saved" });
     return { status: "saved", path: destination };
   } catch (error) {
+    if (runtime.signal?.aborted) {
+      runtime.onProgress?.({ stage: "cancelled" });
+      return { status: "cancelled" };
+    }
     runtime.onProgress?.({ stage: "failed" });
     if (error instanceof DesktopResultExportError) throw error;
-    throw new DesktopResultExportError(stage, "failed");
+    throw new DesktopResultExportError(stage, "failed", error);
   } finally {
-    session.close();
+    session?.close();
   }
 }
 
@@ -172,15 +184,34 @@ function bounded<T>(
   milliseconds: number,
   stage: DesktopResultExportStage,
   onTimeout?: () => void,
+  signal?: AbortSignal,
+  onAbort?: () => void,
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (operation: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      operation();
+    };
+    const abort = (): void => {
+      onAbort?.();
+      finish(() => reject(signal?.reason ?? new Error("cancelled")));
+    };
     const timer = setTimeout(() => {
       onTimeout?.();
-      reject(new DesktopResultExportError(stage, "timeout"));
+      finish(() => reject(new DesktopResultExportError(stage, "timeout")));
     }, milliseconds);
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) {
+      abort();
+      return;
+    }
     promise.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error); },
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
     );
   });
 }

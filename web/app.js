@@ -12,10 +12,12 @@ const el = {
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), qqSongStart: $("#qqSongStartButton"), qqLikesStart: $("#qqLikesStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
+  liveTaskIdentity: $("#liveTaskIdentity"), liveTaskAvatar: $("#liveTaskAvatar"), liveTaskNickname: $("#liveTaskNickname"), liveTaskMeta: $("#liveTaskMeta"),
   matches: $("#matchesMetric"), requests: $("#requestsMetric"), speed: $("#speedMetric"), globalContext: $("#globalProgressContext"), percent: $("#progressPercent"), bar: $("#progressBar"), note: $("#taskNote"), results: $("#resultsBody"), exportResults: $("#exportResultsButton"),
   logs: $("#logsBody"), logPath: $("#logPath"),
   connection: $("#connectionBadge"), login: $("#loginButton"), uidHelpDialog: $("#uidHelpDialog"), parameterHelpDialog: $("#parameterHelpDialog"), parameterHelpTitle: $("#parameterHelpTitle"), parameterHelpDescription: $("#parameterHelpDescription"), qrDialog: $("#qrDialog"), qrImage: $("#qrImage"), qrStatus: $("#qrStatus"), toast: $("#toast"),
   classicDialog: $("#classicEncryptUinDialog"), classicInput: $("#classicEncryptUinInput"), classicDecode: $("#classicDecodeButton"), classicResult: $("#classicDecodeResult"), classicIdentityKind: $("#classicIdentityKind"), classicMaskedIdentifier: $("#classicMaskedIdentifier"), classicIdentifierWarning: $("#classicIdentifierWarning"), classicReveal: $("#classicRevealButton"), classicCopy: $("#classicCopyButton"), classicVerify: $("#classicVerifyButton"), classicDecodeStatus: $("#classicDecodeStatus"), classicVerifyStatus: $("#classicVerifyStatus"),
+  pdfExportDialog: $("#pdfExportDialog"), pdfExportStage: $("#pdfExportStage"), pdfExportElapsed: $("#pdfExportElapsed"), cancelPdfExport: $("#cancelPdfExportButton"),
   settlementDialog: $("#settlementDialog"), settlementTitle: $("#settlementTitle"), settlementStatus: $("#settlementStatus"), settlementContext: $("#settlementContext"), settlementElapsed: $("#settlementElapsed"), settlementMatches: $("#settlementMatches"), settlementPages: $("#settlementPages"), settlementRequests: $("#settlementRequests"), settlementCoverage: $("#settlementCoverage"), settlementNote: $("#settlementNote"), settlementLogPath: $("#settlementLogPath"), settlementFootnote: $("#settlementFootnote"),
   updateButton: $("#updateButton"), updateButtonLabel: $("#updateButtonLabel"), updateIndicator: $("#updateIndicator"), updateDialog: $("#updateDialog"),
   updateReleaseName: $("#updateReleaseName"), updatePublishedAt: $("#updatePublishedAt"), currentVersion: $("#currentVersionLabel"), latestVersion: $("#latestVersionLabel"), updateNotes: $("#updateNotes"), updateAsset: $("#updateAsset"), updateDownload: $("#downloadUpdateButton"),
@@ -67,7 +69,15 @@ const resultGenerations = Object.fromEntries(["netease:parallel", "netease:sourc
 const resultGenerationRevisions = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, 0]));
 const latestJobs = Object.fromEntries(["netease:parallel", "netease:source", "qq:song", "qq:likes"].map((key) => [key, undefined]));
 const localRequestedTargets = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, undefined]));
+const qqTargetPreviews = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, undefined]));
+const qqTargetPreviewVersions = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, 0]));
+const qqTargetPreviewTimers = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, undefined]));
+const liveIdentityCache = new Map();
+const LIVE_IDENTITY_CACHE_LIMIT = 128;
+let liveIdentityRequestVersion = 0;
 let resultExportInProgress = false;
+let resultExportStartedAt = 0;
+let resultExportElapsedTimer;
 let resultRenderTimer;
 let pendingLiveCommentId;
 let resultsRenderPending = false;
@@ -300,19 +310,21 @@ async function decodeClassicEncryptUin() {
       identifier: decoded.identifier,
       maskedIdentifier: decoded.maskedIdentifier,
     };
+    const isWechatUser = decoded.identityKind === "wxuin-candidate";
     el.classicIdentityKind.textContent = identityLabel;
-    el.classicMaskedIdentifier.textContent = decoded.maskedIdentifier;
+    el.classicMaskedIdentifier.textContent = isWechatUser ? "微信用户" : decoded.identifier;
     el.classicIdentifierWarning.textContent = decoded.identityKind === "wxuin-candidate"
-      ? "这是 QQ 音乐微信内部ID（wxuin候选），不是微信号，也不能公开转换为微信号。完整值属于个人标识符；只有明确显示或复制后才会进入可见界面或剪贴板。在线验证会把原 EncryptUin 与候选 ID 经当前代理发送到 QQ 官方公开资料接口。"
-      : "这是 QQ号候选，不代表账号所有权。完整值属于个人标识符；只有明确显示或复制后才会进入可见界面或剪贴板。在线验证会把原 EncryptUin 与候选 QQ 经当前代理发送到 QQ 官方公开资料接口。";
+      ? "该身份来自 QQ 音乐的微信登录体系，界面只标记为“微信用户”，不把内部 ID 误称为微信号或 QQ 号。在线验证会经当前代理请求 QQ 官方公开资料接口。"
+      : "这是 QQ号候选，不代表账号所有权。按当前显示设置直接显示完整 QQ 号；复制仍只在你明确点击后写入剪贴板。在线验证会经当前代理请求 QQ 官方公开资料接口。";
     el.classicResult.hidden = false;
-    el.classicReveal.disabled = false;
-    el.classicCopy.disabled = false;
+    el.classicReveal.disabled = isWechatUser;
+    el.classicReveal.textContent = isWechatUser ? "微信用户" : "隐藏完整标识";
+    el.classicCopy.disabled = isWechatUser;
     el.classicVerify.disabled = false;
     const completedStage = decoded.resolution === "network"
       ? "联网解析完成"
       : decoded.inputKind === "profile-url-encrypt-uin" ? "本地提取与离线解码完成" : "本地离线解码完成";
-    setClassicStatus(el.classicDecodeStatus, `${completedStage}：${identityLabel} ${decoded.maskedIdentifier}。完整值默认保持隐藏。`, "success");
+    setClassicStatus(el.classicDecodeStatus, `${completedStage}：${isWechatUser ? "微信用户" : `${identityLabel} ${decoded.identifier}`}。`, "success");
     return classicDecoded;
   } catch (error) {
     if (controller.signal.aborted || version !== classicDecodeVersion) return undefined;
@@ -888,6 +900,7 @@ function renderParallel(job) {
   latestJobs[viewKey] = job;
   syncResultGeneration(viewKey, generationFromJob(viewKey, job));
   if (viewKey !== taskViewKey() || !shouldRenderJob(viewKey, job)) return;
+  renderNeteaseLiveIdentity(job, "parallel");
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "分片进度"; el.progress.textContent = `${fmt(job.shardsComplete)} / ${fmt(job.shards)}`;
@@ -916,6 +929,7 @@ function renderSource(job) {
   latestJobs[viewKey] = job;
   syncResultGeneration(viewKey, generationFromJob(viewKey, job));
   if (viewKey !== taskViewKey() || !shouldRenderJob(viewKey, job)) return;
+  renderNeteaseLiveIdentity(job, "source");
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.uid ? `UID ${job.uid} · ${sourceName(job.source)}` : "等待来源任务";
   el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "歌曲进度"; el.progress.textContent = `${fmt(job.songsProcessed)} / ${fmt(job.songs)}`;
@@ -944,6 +958,7 @@ function renderQQ(job) {
   latestJobs[viewKey] = job;
   syncResultGeneration(viewKey, generationFromJob(viewKey, job));
   if (viewKey !== taskViewKey() || !shouldRenderJob(viewKey, job)) return;
+  renderQQLiveIdentity(job);
   const active = ["running", "stopping"].includes(job.status);
   const target = job.targetLabel || "QQ 目标";
   const songs = Math.max(0, Number(job.songs || 0));
@@ -979,6 +994,106 @@ function renderQQ(job) {
   );
   el.stop.disabled = !active;
   syncTaskStartAvailability();
+}
+
+function renderQQLiveIdentity(job) {
+  if (!job?.id) {
+    hideLiveTaskIdentity();
+    return;
+  }
+  const identity = job.targetIdentity || {};
+  const label = identity.label || job.targetLabel || "QQ 音乐用户";
+  renderLiveTaskIdentity({
+    nickname: identity.nickname || (identity.kind === "wechat-user" ? "微信用户" : "QQ 音乐用户"),
+    meta: label,
+    avatarUrl: identity.avatarUrl,
+    platform: "qq",
+  });
+}
+
+function renderNeteaseLiveIdentity(job, taskMode) {
+  const uid = String(job?.uid || "").trim();
+  if (!job?.id || !uid) {
+    hideLiveTaskIdentity();
+    return;
+  }
+  const jobId = String(job.id);
+  const key = `netease:${taskMode}:${jobId}:${uid}`;
+  const cached = liveIdentityCache.get(key)?.profile;
+  renderLiveTaskIdentity({
+    nickname: cached?.nickname || "网易云用户",
+    meta: [
+      `UID ${uid}`,
+      cached?.level === undefined ? undefined : `Lv.${cached.level}`,
+      cached?.listenSongs === undefined ? undefined : `听歌 ${fmt(cached.listenSongs)} 首`,
+    ].filter(Boolean).join(" · "),
+    avatarUrl: cached?.avatarUrl,
+    platform: "netease",
+  });
+  if (!cached) void ensureNeteaseLiveIdentity(uid, taskMode, jobId);
+}
+
+async function ensureNeteaseLiveIdentity(uid, taskMode, jobId) {
+  const key = `netease:${taskMode}:${jobId}:${uid}`;
+  const existing = liveIdentityCache.get(key);
+  if (existing?.pending || existing?.profile || (existing?.failedAt && Date.now() - existing.failedAt < 30_000)) return;
+  const requestVersion = ++liveIdentityRequestVersion;
+  setLiveIdentityCache(key, { pending: true, requestVersion });
+  try {
+    const result = await api(`/api/user/profile?uid=${encodeURIComponent(uid)}&mode=${encodeURIComponent(taskMode)}&jobId=${encodeURIComponent(jobId)}`);
+    if (liveIdentityCache.get(key)?.requestVersion !== requestVersion
+      || String(result?.profile?.userId || "") !== uid) return;
+    setLiveIdentityCache(key, { profile: result.profile, requestVersion });
+    const current = latestJobs[taskViewKey()];
+    if (platform === "netease"
+      && current?.id === jobId
+      && String(current?.uid || "") === uid
+      && taskViewKey() === `netease:${taskMode}`) {
+      renderNeteaseLiveIdentity(current, taskMode);
+    }
+  } catch {
+    if (liveIdentityCache.get(key)?.requestVersion === requestVersion) {
+      setLiveIdentityCache(key, { failedAt: Date.now(), requestVersion });
+    }
+  }
+}
+
+function setLiveIdentityCache(key, value) {
+  if (!liveIdentityCache.has(key) && liveIdentityCache.size >= LIVE_IDENTITY_CACHE_LIMIT) {
+    liveIdentityCache.delete(liveIdentityCache.keys().next().value);
+  }
+  liveIdentityCache.set(key, value);
+}
+
+function renderLiveTaskIdentity({ nickname, meta, avatarUrl, platform: identityPlatform }) {
+  el.liveTaskIdentity.hidden = false;
+  el.liveTaskIdentity.dataset.platform = identityPlatform;
+  el.liveTaskNickname.textContent = nickname;
+  el.liveTaskMeta.textContent = meta;
+  el.liveTaskAvatar.src = trustedAvatarUrl(avatarUrl, identityPlatform) || "/icons/user-round.svg";
+}
+
+function hideLiveTaskIdentity() {
+  el.liveTaskIdentity.hidden = true;
+  el.liveTaskIdentity.removeAttribute("data-platform");
+  el.liveTaskNickname.textContent = "-";
+  el.liveTaskMeta.textContent = "-";
+  el.liveTaskAvatar.src = "/icons/user-round.svg";
+}
+
+function trustedAvatarUrl(value, identityPlatform) {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  try {
+    const url = new URL(value);
+    const host = url.hostname.toLowerCase();
+    if (url.protocol !== "https:" || url.username || url.password || url.port) return undefined;
+    if (identityPlatform === "netease") return host === "126.net" || host.endsWith(".126.net") ? url.toString() : undefined;
+    return ["qq.com", "gtimg.cn", "qlogo.cn"].some((suffix) => host === suffix || host.endsWith(`.${suffix}`))
+      ? url.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function invalidateQQSibling(viewKey, activeJobId) {
@@ -1635,6 +1750,52 @@ function syncResultExportAvailability() {
   el.exportResults.disabled = resultExportInProgress || !validExportGeneration(current);
 }
 
+const PDF_EXPORT_STAGE_LABELS = {
+  "load-report": "正在读取全部已保存结果…",
+  fonts: "正在准备字体与排版…",
+  print: "正在生成 PDF 页面…",
+  write: "正在写入你选择的位置…",
+  saved: "PDF 已保存",
+  cancelled: "正在取消导出…",
+  failed: "PDF 导出失败",
+};
+
+function showPdfExportProgress(stage) {
+  const label = PDF_EXPORT_STAGE_LABELS[stage];
+  if (!label) return;
+  if (!resultExportStartedAt) resultExportStartedAt = Date.now();
+  el.pdfExportStage.textContent = label;
+  el.cancelPdfExport.disabled = stage === "saved" || stage === "cancelled" || stage === "failed";
+  if (!el.pdfExportDialog.open) el.pdfExportDialog.showModal();
+  clearInterval(resultExportElapsedTimer);
+  const renderElapsed = () => {
+    el.pdfExportElapsed.textContent = `已用时 ${Math.max(0, Math.floor((Date.now() - resultExportStartedAt) / 1000))} 秒`;
+  };
+  renderElapsed();
+  resultExportElapsedTimer = setInterval(renderElapsed, 1_000);
+}
+
+function closePdfExportProgress() {
+  clearInterval(resultExportElapsedTimer);
+  resultExportElapsedTimer = undefined;
+  resultExportStartedAt = 0;
+  el.cancelPdfExport.disabled = false;
+  el.cancelPdfExport.textContent = "取消导出";
+  if (el.pdfExportDialog.open) el.pdfExportDialog.close();
+}
+
+async function cancelPdfExport() {
+  if (!resultExportInProgress || typeof window.ncmDesktop?.cancelResultsPdf !== "function") return;
+  el.cancelPdfExport.disabled = true;
+  el.cancelPdfExport.textContent = "正在取消…";
+  el.pdfExportStage.textContent = "正在停止隐藏报告生成器…";
+  try {
+    await window.ncmDesktop.cancelResultsPdf();
+  } catch (error) {
+    toast(error.message || "取消 PDF 导出失败。");
+  }
+}
+
 async function exportCurrentResults() {
   const exportView = taskViewKey();
   const current = resultGenerations[exportView];
@@ -1646,6 +1807,7 @@ async function exportCurrentResults() {
     target: { ...current.target },
   };
   resultExportInProgress = true;
+  resultExportStartedAt = 0;
   syncResultExportAvailability();
   el.exportResults.setAttribute("aria-busy", "true");
   el.exportResults.querySelector("span").textContent = "正在生成…";
@@ -1663,6 +1825,7 @@ async function exportCurrentResults() {
         removeProgressListener = window.ncmDesktop.onResultsPdfProgress((progress) => {
           const label = labels[progress?.stage];
           if (label) el.exportResults.querySelector("span").textContent = label;
+          if (progress?.stage !== "save-dialog") showPdfExportProgress(progress?.stage);
         });
       }
       const result = await window.ncmDesktop.exportResultsPdf(request);
@@ -1690,6 +1853,7 @@ async function exportCurrentResults() {
     resultExportInProgress = false;
     el.exportResults.removeAttribute("aria-busy");
     el.exportResults.querySelector("span").textContent = "导出 PDF";
+    closePdfExportProgress();
     syncResultExportAvailability();
   }
 }
@@ -2240,6 +2404,9 @@ async function restoreResumeTask() {
     desiredPlatform = platform;
     selectedModes[platform] = mode;
     applyPlatformPresentation();
+    if (platform === "qq") {
+      scheduleQQTargetPreview(taskViewKey(), (mode === "song" ? el.qqSongTarget : el.qqLikesTarget).value);
+    }
     restoreSongSearchSelection(SONG_SEARCHES.netease);
     restoreSongSearchSelection(SONG_SEARCHES.qq);
     $("#parallelFresh").checked = false;
@@ -2768,8 +2935,38 @@ function qqToolbarTargetLabel(viewKey, rawTarget) {
   const locallyStarted = localRequestedTargets[viewKey];
   const managerOwnsVisibleTarget = activeTaskViewKey === viewKey
     || (job?.id && locallyStarted?.jobId === String(job.id) && locallyStarted.value === rawTarget);
-  if (managerOwnsVisibleTarget && job?.targetLabel) return `QQ ${job.targetLabel}`;
+  if (managerOwnsVisibleTarget && job?.targetLabel) return job.targetLabel;
+  const preview = qqTargetPreviews[viewKey];
+  if (preview?.input === rawTarget && preview.label) return preview.label;
   return rawTarget ? "QQ 目标已填写" : "QQ 目标待填写";
+}
+
+function scheduleQQTargetPreview(viewKey, input) {
+  const normalized = String(input || "").trim();
+  const version = ++qqTargetPreviewVersions[viewKey];
+  clearTimeout(qqTargetPreviewTimers[viewKey]);
+  qqTargetPreviews[viewKey] = undefined;
+  if (!normalized) {
+    syncToolbarContext();
+    return;
+  }
+  qqTargetPreviewTimers[viewKey] = setTimeout(async () => {
+    try {
+      const preview = await api("/api/qq/target/display", {
+        method: "POST",
+        body: JSON.stringify({ input: normalized }),
+      });
+      if (qqTargetPreviewVersions[viewKey] !== version) return;
+      const currentInput = (viewKey === "qq:song" ? el.qqSongTarget : el.qqLikesTarget).value.trim();
+      if (currentInput !== normalized || !["qq-number", "wechat-user", "encrypt-uin"].includes(preview?.kind)
+        || typeof preview?.label !== "string") return;
+      qqTargetPreviews[viewKey] = { input: normalized, kind: preview.kind, label: preview.label };
+    } catch {
+      if (qqTargetPreviewVersions[viewKey] === version) qqTargetPreviews[viewKey] = undefined;
+    } finally {
+      if (qqTargetPreviewVersions[viewKey] === version) syncToolbarContext();
+    }
+  }, 180);
 }
 function syncToolbarContext() {
   const view = currentView();
@@ -2967,8 +3164,18 @@ el.taskPanelOpen.addEventListener("click", () => {
 el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(true));
 el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
 el.exportResults.addEventListener("click", () => void exportCurrentResults());
+el.cancelPdfExport.addEventListener("click", () => void cancelPdfExport());
+el.pdfExportDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  void cancelPdfExport();
+});
+el.liveTaskAvatar.addEventListener("error", () => {
+  if (!el.liveTaskAvatar.src.endsWith("/icons/user-round.svg")) el.liveTaskAvatar.src = "/icons/user-round.svg";
+});
 $$('[data-nav-view]').forEach((item) => item.addEventListener("click", () => void activateNavigation(item.dataset.navView)));
 $$('#parallelForm input, #sourceForm input, #qqSongForm input, #qqLikesForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
+el.qqSongTarget.addEventListener("input", () => scheduleQQTargetPreview("qq:song", el.qqSongTarget.value));
+el.qqLikesTarget.addEventListener("input", () => scheduleQQTargetPreview("qq:likes", el.qqLikesTarget.value));
 el.exitLimit.addEventListener("input", syncToolbarContext);
 el.hostConcurrency.addEventListener("input", syncToolbarContext);
 el.estimateButton.addEventListener("click", () => void refreshEstimate());

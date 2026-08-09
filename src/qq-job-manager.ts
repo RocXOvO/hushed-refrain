@@ -26,12 +26,15 @@ import {
   QQMusicTransportGate,
   ClassicEncryptUinError,
   decodeClassicEncryptUin,
+  describeQQMusicTarget,
   normalizeUserInput,
   parseClassicEncryptUinExperimentInput,
   type ClassicEncryptUinFormat,
   type ClassicEncryptUinIdentityKind,
   type ClassicEncryptUinInputKind,
   type ClassicEncryptUinResolution,
+  type QQMusicTargetDisplay,
+  type QQMusicTargetDisplayKind,
 } from "./qq-music";
 import {
   DEFAULT_QQ_TRANSPORT_MAX_CONCURRENT,
@@ -47,6 +50,7 @@ import type {
   QQMusicScanOptions,
   QQMusicScanReport,
   QQMusicSongActivity,
+  QQMusicUser,
 } from "./qq-music/types";
 import type { SongSearchResult } from "./types";
 import { taskElapsedMs, type TaskCoordinator, type TaskLease } from "./task-coordinator";
@@ -116,6 +120,7 @@ export interface QQJobSnapshot extends PagePerformanceSnapshot {
   mode?: "song" | "likes";
   generation?: QQJobGeneration;
   targetLabel?: string;
+  targetIdentity?: QQTargetIdentitySnapshot;
   songId?: string;
   songName?: string;
   startedAt?: string;
@@ -148,6 +153,13 @@ export interface QQJobSnapshot extends PagePerformanceSnapshot {
   logPath?: string;
   error?: string;
   note?: string;
+}
+
+export interface QQTargetIdentitySnapshot {
+  kind: QQMusicTargetDisplayKind;
+  label: string;
+  nickname?: string;
+  avatarUrl?: string;
 }
 
 export interface QQResultSnapshot {
@@ -273,6 +285,7 @@ export class QQJobManager {
 
   async start(input: QQStartRequest): Promise<QQJobSnapshot> {
     const config = parseStartRequest(input);
+    const requestedDisplay = describeQQMusicTarget(config.target);
     const lease = this.coordinator.acquire("qq");
     if (!lease) throw new QQJobManagerError(409, "已有其他任务运行，请先停止当前任务。");
     const previousSnapshot = cloneSnapshot(this.snapshotValue);
@@ -289,7 +302,8 @@ export class QQJobManager {
       id: activeId,
       status: "running",
       mode: config.mode,
-      targetLabel: maskTarget(config.target),
+      targetLabel: requestedDisplay.label,
+      targetIdentity: identitySnapshot(requestedDisplay),
       songId: config.songId,
       startedAt,
       hostConcurrency: config.hostConcurrency,
@@ -319,6 +333,11 @@ export class QQJobManager {
       };
       const target = await this.resolveCanonicalTarget(config.target);
       this.throwIfStopped();
+      const targetIdentity = identitySnapshot(
+        requestedDisplay,
+        target.nickname?.trim() || undefined,
+        safeAvatarUrl(target.avatarUrl),
+      );
       const taskPaths = qqTaskPaths(this.paths.data, config.mode, target.encryptUin, config.songId);
       const generation: InternalGeneration = {
         platform: "qq",
@@ -331,7 +350,8 @@ export class QQJobManager {
       this.snapshotValue = {
         ...this.snapshotValue,
         generation: publicGeneration(generation),
-        targetLabel: maskTarget(target.encryptUin),
+        targetLabel: targetIdentity.label,
+        targetIdentity,
       };
       generationCommitted = true;
       await logger.write("info", "task_started", "QQ 音乐评论扫描已启动。", {
@@ -414,6 +434,16 @@ export class QQJobManager {
         onSongProgress: (activity) => this.trackSong(activeId, activity),
       };
       const running = this.runner(this.lanes, scanOptions);
+      void this.resolveTargetIdentity(requestedDisplay, target).then((identity) => {
+        if (!this.isCurrent(activeId) || this.generation?.jobId !== activeId) return;
+        this.snapshotValue = {
+          ...this.snapshotValue,
+          targetLabel: identity.label,
+          targetIdentity: identity,
+        };
+      }).catch(() => {
+        // Public nickname/avatar enrichment is presentation-only and may never block the scan.
+      });
       void running.then(async (report) => {
         if (!this.isCurrent(activeId)) return;
         this.snapshotValue = {
@@ -564,7 +594,7 @@ export class QQJobManager {
       mode: generation.mode,
       jobId: generation.jobId,
       target: { ...generation.target },
-      targetLabel: snapshotAfter.targetLabel ?? maskTarget(generation.target.value),
+      targetLabel: snapshotAfter.targetLabel ?? `EncryptUin ${generation.target.value}`,
       status: snapshotAfter.status,
       songId: snapshotAfter.songId,
       songName: snapshotAfter.songName,
@@ -859,10 +889,34 @@ export class QQJobManager {
   }
 
   private async resolveCanonicalTarget(input: string) {
+    const normalized = normalizeUserInput(input);
+    if (normalized.kind === "encrypt-uin"
+      && this.lanes.length > 0
+      && this.lanes.every((lane) => lane.client.resolvesOpaqueLocally === true)) {
+      return { input: input.trim(), encryptUin: canonicalEncryptUin(normalized.value) };
+    }
     const resolved = await executeControlAcrossLanes(this.lanes, "qq_resolve_user", (lane) =>
       lane.client.resolveUser(input, lane.transportGate.signal)
     );
     return { ...resolved, encryptUin: canonicalEncryptUin(resolved.encryptUin) };
+  }
+
+  private async resolveTargetIdentity(
+    display: QQMusicTargetDisplay,
+    target: QQMusicUser,
+  ): Promise<QQTargetIdentitySnapshot> {
+    let nickname = target.nickname?.trim() || undefined;
+    let avatarUrl = safeAvatarUrl(target.avatarUrl);
+    if ((!nickname || !avatarUrl) && this.lanes.some((lane) => lane.client.getPublicUserProfile)) {
+      const profile = await optionalTargetProfile(
+        this.lanes,
+        display.profileLookup,
+        target.encryptUin,
+      );
+      nickname ??= profile?.nickname?.trim() || undefined;
+      avatarUrl ??= safeAvatarUrl(profile?.avatarUrl);
+    }
+    return identitySnapshot(display, nickname, avatarUrl);
   }
 
   private trackRequest(activeId: string, activity: QQMusicRequestActivity): void {
@@ -1126,6 +1180,7 @@ function cloneInternalGeneration(generation: InternalGeneration): InternalGenera
 function cloneSnapshot(snapshot: QQJobSnapshot): QQJobSnapshot {
   return {
     ...snapshot,
+    targetIdentity: snapshot.targetIdentity ? { ...snapshot.targetIdentity } : undefined,
     generation: snapshot.generation
       ? { ...snapshot.generation, target: { ...snapshot.generation.target } }
       : undefined,
@@ -1170,10 +1225,53 @@ function staleGenerationError(): QQJobManagerError {
   return new QQJobManagerError(409, "当前 QQ 音乐任务已经切换，请重新加载。");
 }
 
-function maskTarget(value: string): string {
-  if (value.length > 8) return `${value.slice(0, 4)}****${value.slice(-4)}`;
-  if (value.length > 4) return `${value.slice(0, 2)}****${value.slice(-2)}`;
-  return `${value.slice(0, 1)}***${value.slice(-1)}`;
+function identitySnapshot(
+  display: QQMusicTargetDisplay,
+  nickname?: string,
+  avatarUrl?: string,
+): QQTargetIdentitySnapshot {
+  return {
+    kind: display.kind,
+    label: display.label,
+    ...(nickname ? { nickname } : {}),
+    ...(avatarUrl ? { avatarUrl } : {}),
+  };
+}
+
+function safeAvatarUrl(value: unknown): string | undefined {
+  const candidate = String(value ?? "").trim();
+  if (!candidate) return undefined;
+  try {
+    const url = new URL(candidate);
+    if (url.protocol === "http:") url.protocol = "https:";
+    const host = url.hostname.toLowerCase();
+    const trusted = ["qq.com", "gtimg.cn", "qlogo.cn"].some((suffix) => host === suffix || host.endsWith(`.${suffix}`));
+    return url.protocol === "https:" && !url.username && !url.password && !url.port && trusted
+      ? url.toString()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function optionalTargetProfile(
+  lanes: QQCommentLane[],
+  lookup: string,
+  expectedEncryptUin: string,
+): Promise<QQMusicUser | undefined> {
+  for (const lane of lanes.slice(0, 3)) {
+    if (!lane.client.getPublicUserProfile) continue;
+    try {
+      const profile = await lane.governor.executeBestEffort("qq_target_profile", () =>
+        lane.transportGate.run(() => lane.client.getPublicUserProfile!(lookup, lane.transportGate.signal))
+      );
+      if (canonicalEncryptUin(profile.encryptUin) === expectedEncryptUin) return profile;
+    } catch (error) {
+      if (error instanceof RunCancelled) throw error;
+      // Target presentation is best-effort and cannot block a valid scan.
+    }
+  }
+  return undefined;
 }
 
 function oneOf<const T extends readonly string[]>(value: unknown, allowed: T, name: string): T[number] {

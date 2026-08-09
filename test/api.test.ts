@@ -294,6 +294,7 @@ test("normalizes a UID profile from user_detail", async () => {
       profile: {
         userId: 42,
         nickname: "target",
+        avatarUrl: "http://p1.music.126.net/synthetic-avatar",
         signature: "hello",
         playlistCount: 12,
         follows: 3,
@@ -308,6 +309,7 @@ test("normalizes a UID profile from user_detail", async () => {
     assert.deepEqual(profile, {
       userId: "42",
       nickname: "target",
+      avatarUrl: "https://p1.music.126.net/synthetic-avatar",
       signature: "hello",
       level: 9,
       listenSongs: 456,

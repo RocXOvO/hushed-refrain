@@ -45,6 +45,8 @@ export interface QQMusicSongPage {
 }
 
 export interface QQMusicPlatformClient {
+  /** True only when opaque EncryptUin normalization is guaranteed not to perform I/O. */
+  readonly resolvesOpaqueLocally?: boolean;
   close?(): void;
   searchSongs?(query: string, limit: number, signal?: AbortSignal): Promise<SongSearchResult[]>;
   resolveUser(input: string, signal?: AbortSignal): Promise<QQMusicUser>;

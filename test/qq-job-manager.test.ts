@@ -32,6 +32,13 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
   });
   assert.equal(first.status, "running");
   assert.deepEqual(first.generation?.target, { kind: "encryptUin", value: "canonical-user" });
+  assert.equal(first.targetLabel, "QQ 123456789");
+  const enrichedFirst = await waitForJob(fixture.manager, (job) => job.targetIdentity?.nickname === "synthetic-profile");
+  assert.deepEqual(enrichedFirst.targetIdentity, {
+    kind: "qq-number",
+    label: "QQ 123456789",
+    nickname: "synthetic-profile",
+  });
   assert.equal(fixture.options.length, 1);
   assert.equal(fixture.options[0].target, "canonical-user");
   assert.equal(fixture.options[0].maxWorkers, 8);
@@ -58,6 +65,106 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
     firstPaths,
   );
   fixture.finish(reportFor(fixture.options[1]));
+  await fixture.settled();
+});
+
+test("publishes full QQ, WeChat-user, and opaque target presentation without changing canonical task keys", async () => {
+  const qq = "123456789012";
+  const qqToken = encodeClassicEncryptUin(qq);
+  const wxIdentifier = "1150000000000000472";
+  const wxToken = encodeClassicEncryptUin(wxIdentifier);
+  const opaque = "opaque-user_1234";
+  const fixture = await managerFixture({
+    clientFactory: () => fakeClient({
+      resolveUser: async (input) => ({ input, encryptUin: normalizeUserInput(input).value }),
+      getPublicUserProfile: async (input) => ({
+        input,
+        encryptUin: input === qq ? qqToken : input === wxIdentifier ? wxToken : opaque,
+        nickname: input === wxIdentifier ? "synthetic-wechat-user" : "synthetic-qq-user",
+        avatarUrl: "https://thirdqq.qlogo.cn/synthetic-avatar",
+      }),
+    }),
+  });
+
+  const qqJob = await fixture.manager.start({ mode: "likes", target: qqToken, allowDirect: true, minDelayMs: 0, jitterMs: 0 });
+  assert.equal(qqJob.targetLabel, `QQ ${qq}`);
+  const enrichedQqJob = await waitForJob(fixture.manager, (job) => job.targetIdentity?.nickname === "synthetic-qq-user");
+  assert.deepEqual(enrichedQqJob.targetIdentity, {
+    kind: "qq-number",
+    label: `QQ ${qq}`,
+    nickname: "synthetic-qq-user",
+    avatarUrl: "https://thirdqq.qlogo.cn/synthetic-avatar",
+  });
+  assert.equal(qqJob.generation?.target.value, qqToken);
+  fixture.finish(reportFor(fixture.options[0]));
+  await fixture.settled();
+
+  const wxJob = await fixture.manager.start({ mode: "likes", target: wxToken, allowDirect: true, minDelayMs: 0, jitterMs: 0 });
+  assert.equal(wxJob.targetLabel, "微信用户");
+  const enrichedWxJob = await waitForJob(fixture.manager, (job) => job.targetIdentity?.nickname === "synthetic-wechat-user");
+  assert.equal(enrichedWxJob.targetIdentity?.nickname, "synthetic-wechat-user");
+  assert.doesNotMatch(wxJob.targetLabel ?? "", /QQ|微信号/);
+  assert.equal(wxJob.generation?.target.value, wxToken);
+  fixture.finish(reportFor(fixture.options[1]));
+  await fixture.settled();
+
+  const opaqueJob = await fixture.manager.start({ mode: "likes", target: opaque, allowDirect: true, minDelayMs: 0, jitterMs: 0 });
+  assert.equal(opaqueJob.targetLabel, `EncryptUin ${opaque}`);
+  assert.equal(opaqueJob.targetIdentity?.kind, "encrypt-uin");
+  assert.equal(opaqueJob.generation?.target.value, opaque);
+  fixture.finish(reportFor(fixture.options[2]));
+  await fixture.settled();
+
+  assert.equal(new Set(fixture.options.map((options) => options.statePath)).size, 3);
+});
+
+test("keeps optional QQ profile failure from poisoning the scan lane", async () => {
+  const target = "opaque-user_1234";
+  const fixture = await managerFixture({
+    clientFactory: () => fakeClient({
+      resolveUser: async (input) => ({ input, encryptUin: target }),
+      getPublicUserProfile: async () => {
+        throw new QQMusicApiError("synthetic optional profile block", 403, undefined, false);
+      },
+    }),
+  });
+
+  const job = await fixture.manager.start({
+    mode: "likes",
+    target,
+    allowDirect: true,
+    minDelayMs: 0,
+    jitterMs: 0,
+  });
+  assert.equal(job.status, "running");
+  assert.equal(job.targetLabel, `EncryptUin ${target}`);
+  assert.equal(fixture.options.length, 1);
+  fixture.finish(reportFor(fixture.options[0]));
+  await fixture.settled();
+});
+
+test("starts the QQ scanner without waiting for a stalled optional profile", async () => {
+  const target = "opaque-user_1234";
+  let scannerStarted = false;
+  const fixture = await managerFixture({
+    clientFactory: () => fakeClient({
+      resolvesOpaqueLocally: true,
+      getPublicUserProfile: async () => new Promise(() => {}),
+    }),
+    runner: async (_lanes, options) => {
+      scannerStarted = true;
+      fixture.options.push(options);
+      return new Promise<QQMusicScanReport>((resolve) => {
+        fixture.finish = resolve;
+      });
+    },
+  });
+
+  const job = await fixture.manager.start({ mode: "likes", target, allowDirect: true });
+  assert.equal(job.status, "running");
+  assert.equal(job.targetLabel, `EncryptUin ${target}`);
+  assert.equal(scannerStarted, true);
+  fixture.finish(reportFor(fixture.options[0]));
   await fixture.settled();
 });
 
@@ -1069,6 +1176,18 @@ function reportFor(options: QQMusicScanOptions): QQMusicScanReport {
     statePath: options.statePath,
     outputPath: options.outputPath,
   };
+}
+
+async function waitForJob(
+  manager: QQJobManager,
+  predicate: (job: Awaited<ReturnType<QQJobManager["status"]>>) => boolean,
+): Promise<Awaited<ReturnType<QQJobManager["status"]>>> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const job = await manager.status();
+    if (predicate(job)) return job;
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Timed out waiting for QQ presentation enrichment.");
 }
 
 function foundComment(): QQMusicFoundComment {

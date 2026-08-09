@@ -26,6 +26,8 @@ export {
   parseOfficialQQMusicProfileIdentity,
 } from "./user-input";
 export type { QQMusicNormalizedUserInput } from "./user-input";
+export { describeQQMusicTarget } from "./target-display";
+export type { QQMusicTargetDisplay, QQMusicTargetDisplayKind } from "./target-display";
 export type {
   QQMusicBenchmarkInput,
   QQMusicBenchmarkMode,

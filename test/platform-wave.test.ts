@@ -113,6 +113,8 @@ test("obsidian silk transition commits once at the 326ms fully opaque handoff", 
   const transition = createTransition(runtime, {
     commit: () => { gl.events.push("commit"); commits += 1; return true; },
   });
+  let finished = false;
+  void transition.finished.then(() => { finished = true; });
 
   runtime.runFrame(1_000);
   runtime.runFrame(1_325);
@@ -122,6 +124,10 @@ test("obsidian silk transition commits once at the 326ms fully opaque handoff", 
   assert.deepEqual(gl.events.filter((event) => event === "draw" || event === "commit").slice(-2), ["draw", "commit"]);
   runtime.runFrame(1_500);
   runtime.runFrame(1_680);
+  assert.equal(runtime.canvas.removed, true);
+  assert.equal(gl.lostContexts, 0);
+  assert.equal(finished, false);
+  runtime.runFrame(1_696);
   const outcome = await transition.finished;
 
   assert.equal(commits, 1);
@@ -365,6 +371,7 @@ test("obsidian silk transition resize preserves its clock, commit count, DPR cap
   assert.equal(commits, 1);
   runtime.triggerWindow("resize");
   runtime.runFrame(10_680);
+  runtime.runFrame(10_696);
   await transition.finished;
 
   for (const [width, height] of runtime.canvasSizes) {
@@ -377,21 +384,92 @@ test("obsidian silk transition resize preserves its clock, commit count, DPR cap
   assertClean(runtime);
 });
 
-test("obsidian silk transition fully releases RAF, listeners, GPU state, canvas, and busy markers", async () => {
+test("obsidian silk transition detaches before retiring GPU state on the following compositor frame", async () => {
+  const gl = fakeGl();
+  const runtime = waveRuntime(gl);
+  load(runtime);
+  const transition = createTransition(runtime);
+  let finished = false;
+  void transition.finished.then(() => { finished = true; });
+  runtime.runFrame(0);
+  runtime.runFrame(680);
+
+  assert.equal(runtime.canvas.removed, true);
+  assert.equal(runtime.bodyClasses.has("platform-switching"), false);
+  assert.equal(runtime.bodyAttributes.has("aria-busy"), false);
+  assert.equal(runtime.canvas.width, runtime.firstCanvasSize.width);
+  assert.equal(runtime.canvas.height, runtime.firstCanvasSize.height);
+  assert.equal(gl.deletedPrograms.length, 0);
+  assert.equal(gl.deletedVertexArrays.length, 0);
+  assert.equal(gl.lostContexts, 0);
+  assert.equal(finished, false);
+
+  runtime.runFrame(696);
+  await transition.finished;
+
+  assert.equal(runtime.cancelledFrames.length, 2);
+  assert.equal(gl.deletedPrograms.length, 1);
+  assert.equal(gl.deletedVertexArrays.length, 1);
+  assert.equal(gl.lostContexts, 1);
+  assert.equal(runtime.canvas.width, 1);
+  assert.equal(runtime.canvas.height, 1);
+  assertClean(runtime);
+});
+
+test("retiring an old renderer cannot clear a newer transition busy state", async () => {
+  const firstGl = fakeGl();
+  const runtime = waveRuntime(firstGl);
+  load(runtime);
+  const first = createTransition(runtime);
+  runtime.runFrame(0);
+  runtime.runFrame(680);
+
+  // A new transition may add the shared markers before the detached renderer
+  // reaches its GPU-only retirement callback.
+  runtime.bodyClasses.add("platform-switching");
+  runtime.bodyAttributes.set("aria-busy", "true");
+  assert.equal(runtime.bodyClasses.has("platform-switching"), true);
+  assert.equal(runtime.bodyAttributes.get("aria-busy"), "true");
+
+  runtime.runFrame(696);
+  await first.finished;
+  assert.equal(runtime.bodyClasses.has("platform-switching"), true);
+  assert.equal(runtime.bodyAttributes.get("aria-busy"), "true");
+
+  runtime.bodyClasses.delete("platform-switching");
+  runtime.bodyAttributes.delete("aria-busy");
+  assertClean(runtime);
+});
+
+test("pagehide during compositor retirement releases synchronously exactly once", async () => {
   const gl = fakeGl();
   const runtime = waveRuntime(gl);
   load(runtime);
   const transition = createTransition(runtime);
   runtime.runFrame(0);
   runtime.runFrame(680);
-  await transition.finished;
+  runtime.triggerWindow("pagehide");
 
-  assert.equal(runtime.cancelledFrames.length, 1);
-  assert.equal(gl.deletedPrograms.length, 1);
-  assert.equal(gl.deletedVertexArrays.length, 1);
+  assert.deepEqual(plain(await transition.finished), {
+    committed: true,
+    completed: true,
+    renderer: "webgl2",
+  });
   assert.equal(gl.lostContexts, 1);
-  assert.equal(runtime.canvas.width, 1);
-  assert.equal(runtime.canvas.height, 1);
+  assertClean(runtime);
+});
+
+test("a failed compositor-retirement RAF still releases and resolves", async () => {
+  const gl = fakeGl();
+  const runtime = waveRuntime(gl, { failRuntime: "retirementRaf" });
+  load(runtime);
+  const transition = createTransition(runtime);
+  runtime.runFrame(0);
+  runtime.runFrame(680);
+
+  assert.equal((await transition.finished).completed, true);
+  assert.equal(gl.lostContexts, 1);
+  assert.equal(gl.deletedPrograms.length, 1);
   assertClean(runtime);
 });
 
@@ -417,7 +495,7 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
   innerWidth?: number;
   innerHeight?: number;
   devicePixelRatio?: number;
-  failRuntime?: "getContext" | "nullContext" | "append" | "initialRaf";
+  failRuntime?: "getContext" | "nullContext" | "append" | "initialRaf" | "retirementRaf";
 } = {}) {
   const bodyClasses = new Set<string>();
   const bodyAttributes = new Map<string, string>();
@@ -476,6 +554,7 @@ function waveRuntime(gl: ReturnType<typeof fakeGl>, options: {
     matchMedia: () => motion,
     requestAnimationFrame(callback: (now: number) => void) {
       if (options.failRuntime === "initialRaf" && frameId === 0) throw new Error("synthetic RAF failure");
+      if (options.failRuntime === "retirementRaf" && frameId === 2) throw new Error("synthetic retirement RAF failure");
       frame = callback;
       frameId += 1;
       return frameId;

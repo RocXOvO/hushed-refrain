@@ -699,6 +699,30 @@ body[data-platform="qq"] .task-command-bar {
 .task-header { min-width: 0; display: flex; align-items: center; gap: 9px; }
 .task-header > div { min-width: 0; }
 .task-header h2 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task-heading-copy { flex: 1 1 auto; }
+.live-task-identity {
+  min-width: 0;
+  max-width: 248px;
+  min-height: 40px;
+  padding: 4px 9px 4px 5px;
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-soft);
+  background: var(--surface-subtle);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-control);
+}
+.live-task-identity[hidden] { display: none; }
+.live-task-identity > img { width: 30px; height: 30px; padding: 2px; flex: 0 0 auto; object-fit: cover; background: var(--surface-raised); border: 1px solid var(--line); border-radius: 50%; }
+.live-task-identity > span { min-width: 0; display: grid; gap: 2px; }
+.live-task-identity strong,
+.live-task-identity small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-task-identity strong { font-size: .7rem; font-weight: 720; }
+.live-task-identity small { color: var(--muted); font-size: .6rem; }
+.live-task-identity[data-platform="qq"] { background: #eaf8f6; border-color: #bddfda; }
+.live-task-identity[data-platform="qq"] > img { border-color: #b8dcd6; }
 .toolbar-context { min-width: 0; max-width: 100%; display: flex; align-items: stretch; }
 .toolbar-context > span { min-width: 94px; padding: 0 11px; display: grid; align-content: center; gap: 2px; border-left: 1px solid var(--line); }
 .toolbar-context small { color: var(--muted); font-size: .6rem; font-weight: 650; }
@@ -890,6 +914,7 @@ dialog::backdrop { background: rgb(20 20 22 / 52%); }
 .dialog-actions { margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px; }
 .uid-help-dialog,
 .classic-encrypt-uin-dialog,
+.pdf-export-dialog,
 .update-dialog,
 .settlement-dialog { padding: 0; overflow: hidden; }
 .uid-help-dialog { width: min(520px, calc(100vw - 32px)); }
@@ -929,6 +954,21 @@ dialog::backdrop { background: rgb(20 20 22 / 52%); }
 .classic-decode-status { margin: 12px 0 0; color: var(--muted); font-size: .69rem; line-height: 1.55; }
 .classic-decode-status.is-success { color: var(--success); }
 .classic-decode-status.is-error { color: var(--danger); }
+.pdf-export-dialog {
+  width: min(470px, calc(100vw - 32px));
+  max-height: calc(100vh - 24px);
+  max-height: calc(100dvh - 24px);
+}
+.pdf-export-dialog > .dialog-heading { padding: 17px 19px; background: var(--surface-subtle); border-bottom: 1px solid var(--line); }
+.pdf-export-content { padding: 19px; }
+.pdf-export-content > p { margin: 14px 0 0; color: var(--muted-strong); font-size: .72rem; line-height: 1.6; }
+.pdf-export-status { display: flex; align-items: center; gap: 11px; }
+.pdf-export-status > div { min-width: 0; display: grid; gap: 4px; }
+.pdf-export-status strong { overflow: hidden; color: var(--ink-soft); font-size: .8rem; text-overflow: ellipsis; white-space: nowrap; }
+.pdf-export-status small { color: var(--muted); font-size: .66rem; font-variant-numeric: tabular-nums; }
+.pdf-export-spinner { width: 28px; height: 28px; flex: 0 0 auto; border: 3px solid color-mix(in srgb, var(--accent) 16%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin 800ms linear infinite; }
+.pdf-export-track { height: 4px; margin-top: 15px; display: block; overflow: hidden; background: var(--surface-raised); border-radius: var(--radius-pill); }
+.pdf-export-track > span { width: 42%; height: 100%; display: block; background: var(--accent); border-radius: inherit; animation: pdf-export-progress 1.3s ease-in-out infinite; }
 .qr-stage { width: 230px; height: 230px; margin: 16px auto; display: grid; place-items: center; background: var(--surface-raised); border: 1px solid var(--line); }
 .qr-stage img { width: 212px; height: 212px; object-fit: contain; }
 #qrStatus { margin-bottom: 0; color: var(--muted); text-align: center; }
@@ -1004,6 +1044,7 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
 @keyframes splash-progress { from { transform: translateX(-120%); } to { transform: translateX(360%); } }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes progress-scan { 0% { transform: translateX(-115%); } 55%, 100% { transform: translateX(195%); } }
+@keyframes pdf-export-progress { from { transform: translateX(-115%); } to { transform: translateX(340%); } }
 @keyframes result-live-arrive { from { opacity: 0; background: var(--success-soft); } to { opacity: 1; background: transparent; } }
 @keyframes dialog-arrive { from { opacity: 0; transform: translateY(7px) scale(.99); } to { opacity: 1; transform: none; } }
 @keyframes toast-arrive { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
@@ -1018,6 +1059,9 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
 
 @container (max-width: 560px) {
   .task-command-bar { gap: 8px; }
+  .task-header { flex-wrap: wrap; }
+  .task-heading-copy { flex-basis: calc(100% - 44px); }
+  .live-task-identity { width: calc(100% - 43px); max-width: none; margin-left: 43px; }
   .toolbar-context > span,
   .toolbar-context > .toolbar-topology,
   .toolbar-number-control { min-width: 0; flex: 1 1 120px; }

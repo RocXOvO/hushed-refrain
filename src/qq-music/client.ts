@@ -64,6 +64,8 @@ export class QQMusicCommentPageProtocolError extends QQMusicProtocolError {
 }
 
 export class QQMusicClient implements QQMusicPlatformClient {
+  readonly resolvesOpaqueLocally = true;
+
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
   private readonly userAgent: string;

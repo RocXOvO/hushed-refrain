@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  DESKTOP_EXPORT_CHANNELS,
   desktopDashboardUrl,
   desktopResultReportIdentityMatches,
   desktopResultReportLoadError,
@@ -10,6 +11,14 @@ import {
   redactDesktopResultExportText,
   resultReportFilename,
 } from "../src/window-shell";
+
+test("keeps PDF export and cancellation on explicit desktop bridge channels", () => {
+  assert.deepEqual(DESKTOP_EXPORT_CHANNELS, {
+    cancelResultsPdf: "desktop-export:cancel-results-pdf",
+    resultsPdf: "desktop-export:results-pdf",
+    resultsPdfProgress: "desktop-export:results-pdf-progress",
+  });
+});
 
 test("uses a frameless window only on Windows", () => {
   assert.deepEqual(desktopWindowChrome("win32"), { frame: false });

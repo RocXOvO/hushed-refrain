@@ -270,8 +270,11 @@
     let elapsedLocation;
     let resolutionLocation;
     let frame;
+    let retirementFrame;
     let startedAt;
     let settled = false;
+    let retiring = false;
+    let visualDetached = false;
     let committed = false;
     let commitAttempted = false;
     let commitError;
@@ -292,7 +295,6 @@
       }
       releaseContext();
       safely(() => { canvas.width = 1; canvas.height = 1; });
-      safely(() => canvas.remove());
     }
 
     function resize() {
@@ -348,15 +350,33 @@
       return immediate(commit);
     }
 
-    function cleanup() {
-      if (frame !== undefined) safely(() => cancelAnimationFrame(frame));
+    function removeRuntimeListeners() {
       safely(() => canvas.removeEventListener("webglcontextlost", onContextLost));
       safely(() => document.removeEventListener("visibilitychange", onVisibility));
       safely(() => motion.removeEventListener("change", onMotionPreference));
       safely(() => removeEventListener("resize", onResize));
       safely(() => removeEventListener("pagehide", onPageHide));
+    }
+
+    function detachVisual() {
+      if (visualDetached) return;
+      visualDetached = true;
+      if (frame !== undefined) safely(() => cancelAnimationFrame(frame));
+      frame = undefined;
+      safely(() => motion.removeEventListener("change", onMotionPreference));
+      safely(() => removeEventListener("resize", onResize));
+      safely(() => canvas.remove());
       safely(() => document.body.classList.remove("platform-switching"));
       safely(() => document.body.removeAttribute("aria-busy"));
+    }
+
+    function cleanup() {
+      if (frame !== undefined) safely(() => cancelAnimationFrame(frame));
+      if (retirementFrame !== undefined) safely(() => cancelAnimationFrame(retirementFrame));
+      frame = undefined;
+      retirementFrame = undefined;
+      removeRuntimeListeners();
+      detachVisual();
       releaseSetup();
     }
 
@@ -382,6 +402,27 @@
       }
     }
 
+    function completeRetirement() {
+      if (settled) return;
+      settled = true;
+      if (retirementFrame !== undefined) safely(() => cancelAnimationFrame(retirementFrame));
+      retirementFrame = undefined;
+      removeRuntimeListeners();
+      releaseSetup();
+      resolveFinished({ committed, completed: true, renderer: "webgl2", commitError });
+    }
+
+    function retireAfterCompositorHandoff() {
+      if (settled || retiring) return;
+      retiring = true;
+      detachVisual();
+      try {
+        retirementFrame = requestAnimationFrame(completeRetirement);
+      } catch {
+        completeRetirement();
+      }
+    }
+
     function drawAt(elapsedMs) {
       lastElapsedMs = elapsedMs;
       gl.uniform1f(elapsedLocation, elapsedMs);
@@ -403,13 +444,13 @@
             return;
           }
           if (elapsedMs >= DURATION_MS) {
-            settle(true);
+            retireAfterCompositorHandoff();
             return;
           }
         } else {
           drawAt(elapsedMs);
           if (elapsedMs >= DURATION_MS) {
-            settle(true);
+            retireAfterCompositorHandoff();
             return;
           }
         }
@@ -428,7 +469,9 @@
     }
 
     function onVisibility() {
-      if (document.hidden) settle(true);
+      if (!document.hidden) return;
+      if (retiring) completeRetirement();
+      else settle(true);
     }
 
     function onMotionPreference(event) {
@@ -439,11 +482,13 @@
       safely(() => event.preventDefault());
       if (settled) return;
       contextLost = true;
-      settle(true);
+      if (retiring) completeRetirement();
+      else settle(true);
     }
 
     function onPageHide() {
-      settle(false);
+      if (retiring) completeRetirement();
+      else settle(false);
     }
 
     try {
@@ -453,7 +498,7 @@
     }
     return {
       finished,
-      cancel() { settle(false); },
+      cancel() { if (!retiring) settle(false); },
     };
   }
 
