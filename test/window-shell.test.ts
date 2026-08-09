@@ -13,6 +13,7 @@ import {
   parseDesktopResultExportRequest,
   redactDesktopResultExportText,
   resultReportFilename,
+  sanitizeWindowsPdfFilename,
 } from "../src/window-shell";
 
 test("keeps PDF export and cancellation on explicit desktop bridge channels", () => {
@@ -59,11 +60,11 @@ test("validates PDF export messages and creates a loopback report URL", () => {
   assert.throws(() => parseDesktopResultExportRequest({ ...request, jobId: "not-a-uuid" }), /任务 ID/);
   assert.equal(
     resultReportFilename(request, new Date("2026-08-07T00:00:00.000Z")),
-    "网易云评论报告-UID-9000****0001-2026-08-07.pdf",
+    "网易云评论报告-UID-9000000001-2026-08-07.pdf",
   );
 });
 
-test("keeps QQ exports distinct from NetEase and masks opaque targets in filenames", () => {
+test("keeps QQ exports distinct from NetEase and includes the full safe target in filenames", () => {
   const request = parseDesktopResultExportRequest({
     platform: "qq",
     mode: "likes",
@@ -80,16 +81,60 @@ test("keeps QQ exports distinct from NetEase and masks opaque targets in filenam
     desktopResultReportUrl("http://127.0.0.1:4321/", request),
     "http://127.0.0.1:4321/report/results?platform=qq&mode=likes&jobId=a8d7e2b4-62c5-4b30-875d-8a4371513cc9&targetKind=encryptUin&target=opaque-user_1234",
   );
-  assert.equal(
-    resultReportFilename(request, new Date("2026-08-07T00:00:00.000Z")),
-    "QQ音乐评论报告-用户-opaq****1234-2026-08-07.pdf",
-  );
+  const filename = resultReportFilename(request, new Date("2026-08-07T00:00:00.000Z"));
+  assert.equal(filename, "QQ音乐评论报告-用户-opaque-user_1234-2026-08-07.pdf");
+  assert.equal(filename.includes(request.target.value), true);
   assert.throws(() => parseDesktopResultExportRequest({ ...request, mode: "source" }), /平台.*模式/);
   assert.throws(() => parseDesktopResultExportRequest({ ...request, target: { kind: "uid", value: "123" } }), /目标类型/);
   assert.throws(
     () => parseDesktopResultExportRequest({ ...request, target: { kind: "encryptUin", value: "<script>" } }),
     /EncryptUin/,
   );
+});
+
+test("keeps Windows report filenames free of reserved characters", () => {
+  const request = parseDesktopResultExportRequest({
+    platform: "qq",
+    mode: "song",
+    jobId: "a8d7e2b4-62c5-4b30-875d-8a4371513cc9",
+    target: { kind: "encryptUin", value: "**opaque-user_1234**" },
+  });
+  const filename = resultReportFilename(request, new Date("invalid"));
+  assert.equal(filename, "QQ音乐评论报告-用户-__opaque-user_1234__-report.pdf");
+  assert.doesNotMatch(filename, /[<>:"/\\|?*\u0000-\u001f]/);
+  assert.match(filename, /\.pdf$/);
+});
+
+test("sanitizes every Windows PDF basename boundary", () => {
+  const forbidden = /[<>:"/\\|?*\u0000-\u001f]/;
+  for (const input of [
+    'a<b>c:d"e/f\\g|h?i*j\u0000.pdf',
+    "a. ",
+    ".",
+    "..",
+    "CON.pdf",
+    "CON.txt.pdf",
+    "CON .txt.pdf",
+    "prn.PDF",
+    "AUX",
+    "NUL",
+    "COM1.pdf",
+    "COM9",
+    "COM¹.txt.pdf",
+    "CONIN$.pdf",
+    "CONOUT$.txt.pdf",
+    "LPT1.pdf",
+    "lpt9",
+    "LPT³.txt.pdf",
+  ]) {
+    const filename = sanitizeWindowsPdfFilename(input);
+    assert.doesNotMatch(filename, forbidden, input);
+    assert.doesNotMatch(filename.slice(0, -4), /[. ]$/, input);
+    assert.doesNotMatch(filename.slice(0, -4).split(".", 1)[0], /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i, input);
+    assert.match(filename, /\.pdf$/, input);
+    assert.ok(filename.length <= 184, input);
+  }
+  assert.equal(sanitizeWindowsPdfFilename("x".repeat(300)), `${"x".repeat(180)}.pdf`);
 });
 
 test("requires every generation field to match before printing a hidden report", () => {
@@ -142,6 +187,7 @@ test("surfaces a bounded report API error instead of mislabeling it as a stale g
 
 test("packaged PDF smoke traverses the renderer bridge and verifies every durable stage", () => {
   const source = readFileSync(join(process.cwd(), "src", "electron-main.ts"), "utf8");
+  assert.match(source, /defaultPath:\s*join\(app\.getPath\("documents"\), resultReportFilename\(request\)\)/);
   assert.match(source, /window\.ncmDesktop\.exportResultsPdf/);
   assert.match(source, /\["save-dialog", "load-report", "fonts", "print", "write", "saved"\]/);
   assert.match(source, /Packaged renderer-to-IPC PDF smoke/);

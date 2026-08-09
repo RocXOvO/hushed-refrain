@@ -1,6 +1,6 @@
 {
   "name": "ncm-comment-finder",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music and QQ Music comment finder",

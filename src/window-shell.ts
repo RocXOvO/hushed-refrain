@@ -112,10 +112,24 @@ export function desktopResultReportLoadError(value: unknown): string | undefined
 
 export function resultReportFilename(request: DesktopResultExportRequest, at = new Date()): string {
   const date = Number.isFinite(at.getTime()) ? at.toISOString().slice(0, 10) : "report";
-  const target = maskReportTarget(request.target.value);
-  return request.platform === "netease"
+  const target = request.target.value;
+  const filename = request.platform === "netease"
     ? `网易云评论报告-UID-${target}-${date}.pdf`
     : `QQ音乐评论报告-用户-${target}-${date}.pdf`;
+  return sanitizeWindowsPdfFilename(filename);
+}
+
+export function sanitizeWindowsPdfFilename(value: string): string {
+  let stem = String(value).replace(/\.pdf$/i, "");
+  stem = stem
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, "_")
+    .replace(/[. ]+$/g, "");
+  const deviceStem = stem.split(".", 1)[0]?.replace(/[. ]+$/g, "") ?? "";
+  if (!stem || /^(?:con|prn|aux|nul|clock\$|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i.test(deviceStem)) {
+    stem = stem ? `_${stem}` : "评论检索报告";
+  }
+  stem = stem.slice(0, 180).replace(/[. ]+$/g, "") || "评论检索报告";
+  return `${stem}.pdf`;
 }
 
 export function redactDesktopResultExportText(
@@ -130,12 +144,6 @@ export function redactDesktopResultExportText(
     if (encodedTarget !== target) result = result.replaceAll(encodedTarget, "[redacted-target]");
   }
   return result.replace(/\b(https?:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[redacted-credentials]@");
-}
-
-function maskReportTarget(value: string): string {
-  if (value.length > 8) return `${value.slice(0, 4)}****${value.slice(-4)}`;
-  if (value.length > 4) return `${value.slice(0, 2)}****${value.slice(-2)}`;
-  return `${value.slice(0, 1)}***${value.slice(-1)}`;
 }
 
 export function desktopWindowChrome(platform: NodeJS.Platform): Pick<BrowserWindowConstructorOptions, "frame"> {

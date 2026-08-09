@@ -4,7 +4,7 @@ This is the compact, durable map for `ncm-comment-finder`. It records current co
 
 ## Current baseline and authorities
 
-- Current release line: `v1.1.1`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
+- Current release line: `v1.1.2`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
 - Display brand: `乐评寻踪 / MUSIC COMMENT TRACE`; `productName=乐评寻踪`.
 - Stable technical identity: package `ncm-comment-finder`, appId `cn.local.ncm.commentfinder`, repository `RocXOvO/ncm-comment-finder`, artifact stem `NCM-Comment-Finder`, Electron data directory `appData/ncm-comment-finder`. Do not change these as part of a visual rename.
 - Current web cache-busters are `styles.css?v=60`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=2`, and `app.js?v=71`; keep them synchronized with `web/index.html`.
@@ -60,7 +60,7 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 - QQ results de-duplicate by `(songId,commentId)`. The writer completes `write + fsync` before match publication and state ownership; cancellation is checked again before cursor/checkpoint commit.
 - One logical comment page is passed to `appendBatch`, which de-duplicates its composite keys and persists the page with one write and one fsync before publication. Both modes checkpoint after 400 ms or 4 dirty pages; likes Workers await every revision to keep the checkpoint-slot bound hard, while the serial song chain may replay at most four already-durable JSONL pages after a crash. Final, stop, cooldown, and failure paths force the outstanding flush.
 - `QQJobManager` caches exact metadata returned by lookup/search (bounded to 32 entries). Song scans consume it only when its ID exactly equals `requestedSongId`; Scanner never performs an optional metadata request and never replaces the requested decimal-string primary key.
-- Canonical identity and presentation are separate. Numeric and reversible classic QQ forms may display full `QQ <number>`; a reversible 28-character WeChat-login token displays only `微信用户`; accepted opaque targets display `EncryptUin <value>`. Logs, diagnostics, filenames, fixtures, and release examples stay redacted/synthetic.
+- Canonical identity and presentation are separate. Numeric and reversible classic QQ forms may display full `QQ <number>`; a reversible 28-character WeChat-login token displays only `微信用户`; accepted opaque targets display `EncryptUin <value>`. The user-visible default PDF filename deliberately includes the complete canonical UID/EncryptUin; logs, errors, diagnostics, fixtures, and release examples stay redacted/synthetic.
 
 ## Lookup and proxy boundary
 
@@ -106,7 +106,7 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 - Electron keeps `contextIsolation:true`, `nodeIntegration:false`, `sandbox:true`, a narrow preload bridge, and a single-instance lock. Single-instance UX does not protect CLI/Web processes from sharing a logical scan root; that cross-process lease remains open audit work.
 - Windows update installation first blocks new work, stops the real globally active task, waits up to 45 seconds for terminal status/final checkpoint, and installs only after QQ lookup/pool barriers settle. Timeout or stop/status failure cancels installation.
 - Native Windows auto-update needs one matching `.exe`, `.exe.blockmap`, and `latest.yml`. Generic GitHub update checking and `electron-updater` are separate paths.
-- Desktop PDF export reports a monotonic cumulative `elapsedMs` from the start of export, including save-dialog time; stage-to-stage deltas may be derived but are not stored as independent durations. Packaged smoke must traverse renderer `window.ncmDesktop` → preload → IPC → hidden Chromium load/fonts/print → atomic write and observe `save-dialog, load-report, fonts, print, write, saved`, then verify the selected path and `%PDF-` header.
+- Desktop PDF export reports a monotonic cumulative `elapsedMs` from the start of export, including save-dialog time; stage-to-stage deltas may be derived but are not stored as independent durations. `resultReportFilename` uses the complete canonical target as intentional user-visible output, then `sanitizeWindowsPdfFilename` replaces Windows-forbidden/control characters, removes trailing dots/spaces, avoids reserved device stems, caps the stem at 180 characters, and fixes the extension to `.pdf`. Filename regressions must cover both platforms, exact target visibility, forbidden/control characters, trailing dots/spaces, reserved device names, length, and extension. Packaged smoke must traverse renderer `window.ncmDesktop` → preload → IPC → hidden Chromium load/fonts/print → atomic write and observe `save-dialog, load-report, fonts, print, write, saved`, then verify the selected path and `%PDF-` header.
 
 ## Key module index
 
@@ -137,7 +137,7 @@ git diff --check
 
 - Before handoff, run at least check, test, build, and diff-check; add the focused tests for changed behavior. Desktop/preload/updater/build changes also require the relevant desktop smoke/package path. Tests currently lack a strict `check:test` TypeScript gate; do not treat transpile-only execution as type coverage.
 - Routine tests use stubs and loopback services. Real NetEase/QQ/proxy traffic must be explicit, bounded, and never a default gate.
-- The `v1.1.1` release baseline is 517/517 tests with check, build, benchmark, the three renderer syntax checks, macOS desktop smoke, and diff-check passing; a later code change invalidates that count until the full gate is rerun.
+- The `v1.1.2` release baseline is 519/519 tests with check, build, benchmark, the three renderer syntax checks, macOS desktop smoke, and diff-check passing; a later code change invalidates that count until the full gate is rerun.
 - Windows packaging is a manual `workflow_dispatch`: it checks/tests, builds unpacked and NSIS forms, runs packaged startup/PDF smoke, and uploads a seven-day Actions artifact. It does not publish a GitHub Release.
 - Release from one exact final commit/version. Verify tag, `origin/main`, workflow `headSha`, manifests, and assets all agree. Validate `latest.yml` version/path/size/SHA-512 against the installer; build both macOS architectures from the same commit.
 - Publish only exact current-version files from a clean staging set. Local `release/` is non-authoritative and may contain historical files.
