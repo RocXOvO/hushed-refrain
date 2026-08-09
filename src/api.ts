@@ -12,6 +12,8 @@ import type {
   SongInfo,
   SongSearchResult,
   TargetLikedPlaylist,
+  TargetUserPlaylist,
+  TargetUserPlaylistPage,
 } from "./types";
 
 type JsonObject = Record<string, unknown>;
@@ -130,7 +132,7 @@ export class EnhancedNcmClient implements NcmClient {
         id,
         name: text(song.name),
         artists,
-        sources: ["record" as const],
+        sources: [scope === "week" ? "record-week" as const : "record" as const],
         sourceRank: index + 1,
         playCount: numberOrUndefined(entry.playCount),
         score: numberOrUndefined(entry.score),
@@ -182,55 +184,71 @@ export class EnhancedNcmClient implements NcmClient {
     if (ownerId !== uid) {
       throw new ApiResponseError("喜欢歌单所属用户与目标 UID 不一致，已阻止使用错误的登录账号数据", 409, body);
     }
-    const listingCount = playlistTrackCount(target.trackCount, "列表", body);
-    const detailCount = playlistTrackCount(playlist.trackCount, "详情", body);
-    if (!Array.isArray(playlist.trackIds)) {
-      throw new ApiResponseError("目标用户喜欢歌单详情缺少 trackIds，可能是隐私限制或响应截断", 502, body);
-    }
-    const ids = playlist.trackIds.map((value) => positiveDecimalId(object(value).id));
-    if (ids.some((id) => !id)) {
-      throw new ApiResponseError("目标用户喜欢歌单包含无法识别的歌曲 ID，已阻止写入不完整目录", 502, body);
-    }
-    const uniqueIds = [...new Set(ids as string[])];
-    if (uniqueIds.length !== ids.length) {
-      throw new ApiResponseError("目标用户喜欢歌单包含重复歌曲 ID，无法确认目录是否完整", 502, body);
-    }
-    const declaredCounts = [listingCount, detailCount]
-      .filter((count): count is number => count !== undefined);
-    const minimumCompleteCount = declaredCounts.length > 0 ? Math.max(...declaredCounts) : undefined;
-    // user_playlist and playlist_detail are separate snapshots. NetEase can
-    // publish a newer explicit trackIds vector before either trackCount catches
-    // up (for example 1105 declared versus 1106 IDs). One newer validated ID
-    // is safe to scan; fewer unique IDs than any declaration still proves
-    // truncation and must fail rather than checkpoint a partial catalog.
-    if (minimumCompleteCount !== undefined && uniqueIds.length < minimumCompleteCount) {
-      const declarations = [
-        listingCount === undefined ? undefined : `列表声明 ${listingCount} 首`,
-        detailCount === undefined ? undefined : `详情声明 ${detailCount} 首`,
-      ].filter((value): value is string => Boolean(value));
-      throw new ApiResponseError(
-        `目标用户喜欢歌单响应不完整：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
-        502,
-        body,
-      );
-    }
-    const staleCounts = declaredCounts.filter((count) => uniqueIds.length > count + 1);
-    if (staleCounts.length > 0) {
-      const declarations = [
-        listingCount === undefined ? undefined : `列表声明 ${listingCount} 首`,
-        detailCount === undefined ? undefined : `详情声明 ${detailCount} 首`,
-      ].filter((value): value is string => Boolean(value));
-      throw new ApiResponseError(
-        `目标用户喜欢歌单计数差异过大：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
-        502,
-        body,
-      );
-    }
+    const uniqueIds = validatedPlaylistSongIds(target.trackCount, playlist, body, "目标用户喜欢歌单");
     return uniqueIds.map((id, index) => ({
       id,
       sources: ["likes" as const],
       sourceRank: index + 1,
     }));
+  }
+
+  async getTargetUserPlaylistPage(
+    uid: string,
+    offset: number,
+    limit: number,
+    cookie?: string,
+  ): Promise<TargetUserPlaylistPage> {
+    if (!Number.isInteger(offset) || offset < 0) throw new Error("playlist offset must be a non-negative integer");
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error("playlist limit must be between 1 and 500");
+    const body = await invoke("user_playlist", () =>
+      api.user_playlist({ uid, limit, offset, ...this.requestConfig(cookie) }),
+    );
+    if (!Array.isArray(body.playlist)) throw new ApiResponseError("用户歌单列表缺少 playlist 数组", 502, body);
+    if (typeof body.more !== "boolean") throw new ApiResponseError("用户歌单列表缺少有效的 more 分页标记", 502, body);
+    const playlists: TargetUserPlaylist[] = [];
+    const seen = new Set<string>();
+    let likedPlaylist: TargetLikedPlaylist | undefined;
+    for (const raw of body.playlist) {
+      const playlist = object(raw);
+      if (stringId(object(playlist.creator).userId) !== uid) continue;
+      const id = positiveDecimalId(playlist.id);
+      if (!id) throw new ApiResponseError("用户歌单列表包含无效歌单 ID", 502, body);
+      if (seen.has(id)) throw new ApiResponseError("用户歌单列表包含重复歌单 ID", 502, body);
+      seen.add(id);
+      if (Number(playlist.specialType) === 5) {
+        likedPlaylist = {
+          id,
+          trackCount: playlistTrackCount(playlist.trackCount, "列表", body),
+        };
+        continue;
+      }
+      playlists.push({
+        id,
+        name: nonEmptyText(playlist.name),
+        trackCount: playlistTrackCount(playlist.trackCount, "列表", body),
+      });
+    }
+    const more = body.more;
+    if (more && body.playlist.length === 0) {
+      throw new ApiResponseError("用户歌单分页声明尚有更多数据，但未返回任何条目", 502, body);
+    }
+    return { playlists, likedPlaylist, more, nextOffset: offset + body.playlist.length };
+  }
+
+  async getTargetUserPlaylistSongs(
+    uid: string,
+    target: TargetUserPlaylist,
+    cookie?: string,
+  ): Promise<SongCandidate[]> {
+    const body = await invoke("playlist_detail", () =>
+      api.playlist_detail({ id: target.id, s: 0, ...this.requestConfig(cookie) }),
+    );
+    const playlist = object(body.playlist);
+    if (stringId(object(playlist.creator).userId) !== uid) {
+      throw new ApiResponseError("用户歌单所属用户与目标 UID 不一致", 409, body);
+    }
+    return validatedPlaylistSongIds(target.trackCount, playlist, body, `用户歌单「${target.name ?? target.id}」`)
+      .map((id, index) => ({ id, sources: ["playlists" as const], sourceRank: index + 1 }));
   }
 
   async getSongComments(
@@ -516,9 +534,51 @@ function playlistTrackCount(value: unknown, source: "列表" | "详情", respons
     ? Number(value.trim())
     : Number.NaN;
   if (!Number.isSafeInteger(parsed) || parsed < 0) {
-    throw new ApiResponseError(`目标用户喜欢歌单${source} trackCount 无效`, 502, response);
+    throw new ApiResponseError(`目标用户歌单${source} trackCount 无效`, 502, response);
   }
   return parsed;
+}
+
+function validatedPlaylistSongIds(
+  listingTrackCount: unknown,
+  playlist: JsonObject,
+  response: unknown,
+  label: string,
+): string[] {
+  const listingCount = playlistTrackCount(listingTrackCount, "列表", response);
+  const detailCount = playlistTrackCount(playlist.trackCount, "详情", response);
+  if (!Array.isArray(playlist.trackIds)) {
+    throw new ApiResponseError(`${label}详情缺少 trackIds，可能是隐私限制或响应截断`, 502, response);
+  }
+  const ids = playlist.trackIds.map((value) => positiveDecimalId(object(value).id));
+  if (ids.some((id) => !id)) {
+    throw new ApiResponseError(`${label}包含无法识别的歌曲 ID，已阻止写入不完整目录`, 502, response);
+  }
+  const uniqueIds = [...new Set(ids as string[])];
+  if (uniqueIds.length !== ids.length) {
+    throw new ApiResponseError(`${label}包含重复歌曲 ID，无法确认目录是否完整`, 502, response);
+  }
+  const declaredCounts = [listingCount, detailCount].filter((count): count is number => count !== undefined);
+  const minimumCompleteCount = declaredCounts.length > 0 ? Math.max(...declaredCounts) : undefined;
+  const declarations = [
+    listingCount === undefined ? undefined : `列表声明 ${listingCount} 首`,
+    detailCount === undefined ? undefined : `详情声明 ${detailCount} 首`,
+  ].filter((value): value is string => Boolean(value));
+  if (minimumCompleteCount !== undefined && uniqueIds.length < minimumCompleteCount) {
+    throw new ApiResponseError(
+      `${label}响应不完整：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
+      502,
+      response,
+    );
+  }
+  if (declaredCounts.some((count) => uniqueIds.length > count + 1)) {
+    throw new ApiResponseError(
+      `${label}计数差异过大：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
+      502,
+      response,
+    );
+  }
+  return uniqueIds;
 }
 
 function positiveDecimalId(value: unknown): string | undefined {

@@ -72,6 +72,7 @@ export interface QQMusicTransportGateLike {
   readonly isCancelled: boolean;
   readonly signal: AbortSignal;
   run<T>(request: () => Promise<T>): Promise<T>;
+  runWithPacing?<T>(beforeStart: () => Promise<void>, request: () => Promise<T>): Promise<T>;
   cancel(): void;
 }
 
@@ -182,6 +183,8 @@ export interface QQMusicScanOptions {
   mode: "song" | "likes";
   target: string;
   songId?: string;
+  /** Optional metadata already obtained by the lookup-only UI; never required for scanning. */
+  songMetadata?: QQMusicSong;
   pageSize: number;
   likedPageSize: number;
   maxSongs: number;

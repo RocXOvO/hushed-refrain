@@ -123,6 +123,103 @@ test("resolves likes through the target user's owned playlist even with a login 
   }
 });
 
+test("labels weekly listening records independently from all-time records", async () => {
+  const mutable = upstream as unknown as { user_record: (params: Record<string, unknown>) => Promise<unknown> };
+  const original = mutable.user_record;
+  mutable.user_record = async (params) => ({
+    status: 200,
+    body: params.type === 1
+      ? { weekData: [{ song: { id: 7, name: "week" } }] }
+      : { allData: [{ song: { id: 7, name: "all" } }] },
+  });
+  try {
+    const client = new EnhancedNcmClient();
+    assert.deepEqual((await client.getUserRecord("42", "all"))[0].sources, ["record"]);
+    assert.deepEqual((await client.getUserRecord("42", "week"))[0].sources, ["record-week"]);
+  } finally {
+    mutable.user_record = original;
+  }
+});
+
+test("paginates target-owned public playlists, excludes likes and subscriptions, and validates tracks", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  const listingCalls: number[] = [];
+  mutable.user_playlist = async (params) => {
+    listingCalls.push(Number(params.offset));
+    return Number(params.offset) === 0
+      ? { status: 200, body: { more: true, playlist: [
+        { id: 10, name: "owned", specialType: 0, trackCount: 2, creator: { userId: 42 } },
+        { id: 11, name: "likes", specialType: 5, trackCount: 1, creator: { userId: 42 } },
+        { id: 12, name: "subscribed", specialType: 0, trackCount: 1, creator: { userId: 77 } },
+      ] } }
+      : { status: 200, body: { more: false, playlist: [
+        { id: 13, name: "second", specialType: 0, trackCount: 1, creator: { userId: 42 } },
+      ] } };
+  };
+  mutable.playlist_detail = async (params) => ({
+    status: 200,
+    body: { playlist: {
+      creator: { userId: 42 },
+      trackCount: params.id === "10" ? 2 : 1,
+      trackIds: params.id === "10" ? [{ id: 101 }, { id: 102 }] : [{ id: 103 }],
+    } },
+  });
+  try {
+    const client = new EnhancedNcmClient();
+    const first = await client.getTargetUserPlaylistPage("42", 0, 500);
+    assert.deepEqual(first.playlists.map(({ id }) => id), ["10"]);
+    assert.deepEqual(first.likedPlaylist, { id: "11", trackCount: 1 });
+    assert.equal(first.nextOffset, 3);
+    const second = await client.getTargetUserPlaylistPage("42", first.nextOffset, 500);
+    assert.deepEqual(second.playlists.map(({ id }) => id), ["13"]);
+    const songs = await client.getTargetUserPlaylistSongs("42", first.playlists[0]);
+    assert.deepEqual(songs.map(({ id, sources }) => ({ id, sources })), [
+      { id: "101", sources: ["playlists"] },
+      { id: "102", sources: ["playlists"] },
+    ]);
+    assert.deepEqual(listingCalls, [0, 3]);
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+test("rejects malformed user-playlist pagination and duplicate IDs", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: () => Promise<unknown>;
+  };
+  const original = mutable.user_playlist;
+  try {
+    const client = new EnhancedNcmClient();
+    mutable.user_playlist = async () => ({ status: 200, body: { playlist: [] } });
+    await assert.rejects(
+      client.getTargetUserPlaylistPage("42", 0, 500),
+      /more 分页标记/,
+    );
+    mutable.user_playlist = async () => ({
+      status: 200,
+      body: {
+        more: false,
+        playlist: [
+          { id: 10, specialType: 0, trackCount: 0, creator: { userId: 42 } },
+          { id: 10, specialType: 0, trackCount: 0, creator: { userId: 42 } },
+        ],
+      },
+    });
+    await assert.rejects(
+      client.getTargetUserPlaylistPage("42", 0, 500),
+      /重复歌单 ID/,
+    );
+  } finally {
+    mutable.user_playlist = original;
+  }
+});
+
 test("turns NetEase 301 responses into a clear login requirement", async () => {
   const mutable = upstream as unknown as {
     user_playlist: (params: Record<string, unknown>) => Promise<unknown>;

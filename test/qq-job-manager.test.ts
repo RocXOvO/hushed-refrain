@@ -497,6 +497,21 @@ test("search lookup is generation-independent and leaves completed task results 
   assert.equal(after.id, started.id);
   assert.deepEqual(after.generation, before.generation);
   assert.equal(after.status, before.status);
+
+  const songJob = await fixture.manager.start({
+    mode: "song",
+    target: "canonical-user",
+    songId: "7",
+    allowDirect: true,
+  });
+  assert.equal(songJob.status, "running");
+  assert.deepEqual(fixture.options[1].songMetadata, {
+    id: "7",
+    name: "Search Song",
+    artists: ["Artist"],
+  });
+  fixture.finish(reportFor(fixture.options[1]));
+  await fixture.settled();
 });
 
 test("QQ user and song preflight prefer direct without touching a running proxy pool", async () => {

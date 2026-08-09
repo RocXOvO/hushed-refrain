@@ -12,13 +12,16 @@ const common = {
   averageRequestMs: 150,
   averageCheckpointMs: 20,
   averageCheckpointBytes: 250_000,
+  checkpointIntervalMs: 400,
+  checkpointPageCap: 4,
+  averageCheckpointBatchPages: 3,
 } satisfies Omit<QQMusicBenchmarkInput, "mode" | "lanes" | "pageSize">;
 
 const scenarios: Array<{ name: string; input: QQMusicBenchmarkInput }> = [
   { name: "song-4-lanes-page-1", input: { ...common, mode: "song", lanes: 4, pageSize: 1 } },
   { name: "song-4-lanes-page-25", input: { ...common, mode: "song", lanes: 4, pageSize: 25 } },
   { name: "song-8-lanes-page-25", input: { ...common, mode: "song", lanes: 8, pageSize: 25 } },
-  { name: "song-1-lane-page-25", input: { ...common, mode: "song", lanes: 1, pageSize: 25 } },
+  { name: "song-1-lane-page-25", input: { ...common, mode: "song", lanes: 1, pageSize: 25, averageCheckpointBatchPages: 2 } },
   {
     name: "likes-8-lanes-comment-page-25",
     input: {

@@ -221,6 +221,10 @@ test("a partial both refresh keeps the failed source catalog while merging succe
   const options = scanOptions(directory, "both");
   await runCommentFinder(client, governor(), options);
 
+  const legacyState = JSON.parse(await readFile(options.statePath, "utf8"));
+  for (const entry of legacyState.songs) delete entry.memberships;
+  await writeFile(options.statePath, `${JSON.stringify(legacyState, null, 2)}\n`, "utf8");
+
   client.commentCalls.length = 0;
   client.recordSongs = [song("A", "record", 9), { ...song("C", "record"), name: "renamed-C" }];
   client.likesFailure = new Error("likes unavailable");
@@ -230,6 +234,18 @@ test("a partial both refresh keeps the failed source catalog while merging succe
   assert.deepEqual(state.songs.map((entry: SongCandidate) => entry.id), ["A", "C", "B"]);
   assert.equal(state.songs[0].sourceRank, 9);
   assert.equal(state.songs[1].name, "renamed-C");
+  assert.deepEqual(
+    state.songs.map((entry: SongCandidate) => [
+      entry.id,
+      entry.sources,
+      entry.memberships?.map((membership) => membership.source),
+    ]),
+    [
+      ["A", ["record"], ["record"]],
+      ["C", ["record"], ["record"]],
+      ["B", ["likes"], ["likes"]],
+    ],
+  );
   assert.deepEqual(client.commentCalls.map((call) => call.songId), ["C"]);
   assert.equal(report.catalogSongs, 3);
   assert.equal(report.coverageComplete, false);

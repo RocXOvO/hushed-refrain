@@ -133,6 +133,28 @@ export async function readAtomicJson<T>(
   return undefined;
 }
 
+/** Removes one atomic document and only the recovery files owned by that document. */
+export async function removeAtomicFile(path: string): Promise<void> {
+  const directory = dirname(path);
+  const targetName = basename(path);
+  const legacyName = `${targetName}.tmp`;
+  const prefix = `${targetName}.tmp-`;
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (isMissing(error)) return;
+    throw error;
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.isFile() && (
+      entry.name === targetName || entry.name === legacyName || entry.name.startsWith(prefix)
+    ))
+    .map((entry) => unlink(join(directory, entry.name)).catch((error) => {
+      if (!isMissing(error)) throw error;
+    })));
+}
+
 async function atomicCandidates(path: string): Promise<Array<{ path: string; mtimeMs: number; primary: boolean }>> {
   const directory = dirname(path);
   const targetName = basename(path);

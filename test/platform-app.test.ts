@@ -476,6 +476,73 @@ test("source preview distinguishes privacy from cooldown and inconclusive prefli
   assert.equal(target.textContent, "喜欢歌曲 暂时无法确认");
 });
 
+test("pool rebuild notice appears only for a collapsed inspector and does not replay unchanged live text", () => {
+  const classes = new Set(["inspector-collapsed"]);
+  const notice = { hidden: true };
+  let titleWrites = 0;
+  let detailWrites = 0;
+  const title = { value: "", set textContent(value: string) { this.value = value; titleWrites += 1; } };
+  const detail = { value: "", set textContent(value: string) { this.value = value; detailWrites += 1; } };
+  const context: Record<string, unknown> = {
+    document: { body: { classList: { contains: (name: string) => classes.has(name) } } },
+    el: { poolBuildNotice: notice, poolBuildNoticeTitle: title, poolBuildNoticeDetail: detail },
+    poolBuildNoticeSignature: "",
+    poolStatus: "not-running",
+    poolRefreshing: false,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`${extractFunction("syncPoolBuildNotice")} globalThis.sync = syncPoolBuildNotice;`, context);
+  const sync = context.sync as (pool: { status: string; refreshing?: boolean }) => void;
+
+  sync({ status: "starting" });
+  assert.equal(notice.hidden, false);
+  assert.equal(title.value, "正在构建 IP 池");
+  sync({ status: "starting" });
+  assert.equal(titleWrites, 1);
+  assert.equal(detailWrites, 1);
+
+  classes.delete("inspector-collapsed");
+  sync({ status: "starting" });
+  assert.equal(notice.hidden, true);
+  classes.add("inspector-collapsed");
+  sync({ status: "running", refreshing: true });
+  assert.equal(notice.hidden, false);
+  assert.equal(title.value, "正在重新检测 IP 池");
+  sync({ status: "running", refreshing: false });
+  assert.equal(notice.hidden, true);
+});
+
+test("PDF progress remains visible when modal presentation is temporarily unavailable", () => {
+  let fallbackShows = 0;
+  let intervalCallback = (): void => {};
+  const dialog = {
+    open: false,
+    showModal() { throw new Error("native dialog is still settling"); },
+    show() { fallbackShows += 1; this.open = true; },
+  };
+  const context: Record<string, unknown> = {
+    Date,
+    PDF_EXPORT_STAGE_LABELS: { "load-report": "正在读取全部已保存结果…" },
+    resultExportStartedAt: 0,
+    resultExportElapsedTimer: undefined,
+    clearInterval() {},
+    setInterval(callback: () => void) { intervalCallback = callback; return 1; },
+    el: {
+      pdfExportStage: { textContent: "" },
+      cancelPdfExport: { disabled: false },
+      pdfExportDialog: dialog,
+      pdfExportElapsed: { textContent: "" },
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`${extractFunction("showPdfExportProgress")} globalThis.show = showPdfExportProgress;`, context);
+  (context.show as (stage: string) => void)("load-report");
+  intervalCallback();
+  assert.equal(fallbackShows, 1);
+  assert.equal((context.el as any).pdfExportStage.textContent, "正在读取全部已保存结果…");
+  assert.match((context.el as any).pdfExportElapsed.textContent, /^已用时 \d+ 秒$/);
+});
+
 test("source coverage distinguishes an unread catalog from a confirmed empty catalog", () => {
   const context: Record<string, unknown> = { fmt: (value: number) => String(value) };
   context.globalThis = context;

@@ -85,6 +85,35 @@ test("QQ result writer syncs its long-lived handle before publishing onAppend", 
   assert.deepEqual(events, ["write", "sync", "onAppend", "close"]);
 });
 
+test("QQ result writer persists one comment page with one write and one sync", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "qq-writer-page-batch-"));
+  const path = join(directory, "comments.jsonl");
+  const writes: string[] = [];
+  let syncs = 0;
+  const writer = new QQMusicResultWriter(path, undefined, {
+    openAppendFile: async () => ({
+      write: async (contents) => { writes.push(contents); },
+      sync: async () => { syncs += 1; },
+      close: async () => {},
+    }),
+  });
+  const records = Array.from({ length: 25 }, (_unused, index) => ({
+    platform: "qq" as const,
+    targetEncryptUin: "target",
+    songId: "7",
+    commentId: `comment-${index}`,
+    seqNo: String(100 - index),
+    authorEncryptUin: "target",
+    content: `match-${index}`,
+    capturedAt: "2026-08-07T00:00:00.000Z",
+  }));
+  assert.equal((await writer.appendBatch([...records, records[0]])).length, 25);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].trim().split("\n").length, 25);
+  assert.equal(syncs, 1);
+  await writer.close();
+});
+
 test("QQ result writer latches write or sync failure without publishing or rewriting", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-writer-sync-failure-"));
   const path = join(directory, "comments.jsonl");

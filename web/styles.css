@@ -686,6 +686,8 @@ input[type="radio"] { accent-color: var(--accent); }
 }
 .segmented.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .segmented.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.source-segmented { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.source-segmented label:last-child { grid-column: 1 / -1; }
 .segmented label { min-width: 0; }
 .segmented input { position: absolute; opacity: 0; pointer-events: none; }
 .segmented span { min-height: 34px; padding: 5px 6px; display: flex; align-items: center; justify-content: center; gap: 5px; color: var(--muted-strong); border: 1px solid transparent; border-radius: var(--radius-control); font-size: .72rem; text-align: center; transition: color var(--motion-control), background-color var(--motion-control), border-color var(--motion-control), box-shadow var(--motion-control); }
@@ -980,7 +982,33 @@ th:nth-child(5) { width: 58px; }
 .pool-empty { min-height: 52px; display: flex; align-items: center; justify-content: center; gap: 7px; color: var(--muted); font-size: .67rem; }
 .empty-state-dot { width: 6px; height: 6px; background: #bbb; border-radius: 50%; }
 .pool-selecting { min-height: 52px; display: flex; align-items: center; justify-content: center; gap: 8px; color: var(--accent); font-size: .68rem; font-weight: 650; }
-.pool-selecting-ring { width: 15px; height: 15px; border: 2px solid rgb(211 58 67 / 15%); border-top-color: var(--accent); border-radius: 50%; animation: spin 800ms linear infinite; }
+.pool-selecting-ring { width: 15px; height: 15px; border: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); border-top-color: var(--accent); border-radius: 50%; animation: spin 800ms linear infinite; }
+.pool-build-notice {
+  max-width: min(430px, calc(100vw - 32px));
+  min-height: 58px;
+  padding: 10px 12px;
+  position: fixed;
+  z-index: 1250;
+  top: 72px;
+  right: 18px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  color: #f7f7f7;
+  background: #242529;
+  border: 1px solid #414248;
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-surface);
+  box-shadow: 0 16px 38px rgb(18 19 22 / 24%);
+  text-align: left;
+  animation: toast-arrive 180ms ease-out both;
+}
+.pool-build-notice > span:nth-child(2) { min-width: 0; display: grid; gap: 3px; }
+.pool-build-notice strong { font-size: .75rem; }
+.pool-build-notice small { overflow: hidden; color: #bfc0c5; font-size: .64rem; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.pool-build-notice-action { color: #fff; font-size: .65rem; font-weight: 700; white-space: nowrap; }
+.pool-build-notice:hover { background: #2b2c31; border-color: #505159; border-left-color: var(--accent); box-shadow: 0 18px 42px rgb(18 19 22 / 28%); }
 .pool-notes { margin-top: 6px; border-top: 1px solid var(--line); }
 .pool-notes summary { min-height: 35px; display: flex; align-items: center; color: var(--muted-strong); font-size: .68rem; font-weight: 650; cursor: pointer; }
 .pool-notes > div { padding-bottom: 5px; }
@@ -1110,7 +1138,8 @@ body.platform-switching .platform-surface *::after {
   transition: none !important;
 }
 body.platform-switching dialog[open],
-body.platform-switching .toast {
+body.platform-switching .toast,
+body.platform-switching .pool-build-notice {
   animation: none !important;
 }
 
@@ -1211,6 +1240,7 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
 }
 
 @media (max-width: 820px) {
+  .pool-build-notice { top: 66px; right: 12px; left: 12px; max-width: none; }
   .topbar { height: auto; min-height: 56px; padding: 6px 8px; grid-template-columns: auto minmax(178px, 1fr) auto; gap: 6px; }
   .brand-copy small,
   .ui-version-badge,
@@ -1264,6 +1294,8 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
 }
 
 @media (max-width: 480px) {
+  .pool-build-notice { grid-template-columns: auto minmax(0, 1fr); }
+  .pool-build-notice-action { display: none; }
   .topbar { grid-template-columns: 30px minmax(170px, 1fr) auto; padding-inline: 5px; }
   .platform-portal-tab { padding-inline: 5px; }
   .platform-portal-tab strong { font-size: .66rem; }

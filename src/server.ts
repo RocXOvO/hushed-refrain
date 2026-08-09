@@ -11,6 +11,7 @@ import {
   AuthenticationRequired,
   CooldownRequired,
   RunCancelled,
+  SourcePrivacyRestricted,
   errorStatus,
   isSourcePrivacyRestricted,
 } from "./errors";
@@ -67,7 +68,7 @@ import {
 } from "./parallel-scanner";
 import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
 import { renderResultReportHtml, type ResultReport } from "./result-report";
-import { loadState, SOURCE_CATALOG_VERSION } from "./state";
+import { loadState, migrateLegacyWeekState, SOURCE_CATALOG_VERSION } from "./state";
 import { taskElapsedMs, TaskCoordinator, type TaskAcquisitionBlock } from "./task-coordinator";
 import { readTaskLog, TaskLogger } from "./task-log";
 import type {
@@ -79,6 +80,7 @@ import type {
   SongInfo,
   SongSearchResponse,
   SongSearchResult,
+  RecordScope,
   SourceSelection,
 } from "./types";
 import { checkForUpdate, type UpdateSnapshot } from "./update";
@@ -164,7 +166,7 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   status: JobStatus;
   uid?: string;
   source?: SourceSelection;
-  recordScope?: "all" | "week";
+  recordScope?: RecordScope;
   startedAt?: string;
   finishedAt?: string;
   songs: number;
@@ -296,6 +298,8 @@ interface AuthSnapshot {
 interface SourceProbe {
   status: "available" | "private" | "restricted" | "cooldown";
   songs?: number;
+  playlists?: number;
+  complete?: boolean;
   error?: string;
 }
 
@@ -303,6 +307,7 @@ export interface UserProbe {
   profile: NcmUserProfile;
   record: SourceProbe;
   likes: SourceProbe;
+  playlists: SourceProbe;
   sessionPresent: boolean;
   elapsedMs: number;
   route: "direct" | "explicit-proxy" | "managed-pool";
@@ -618,12 +623,12 @@ class JobManager {
     let launched = false;
     try {
     const uid = numericId(input.uid, "UID");
-    const source = selection(input.source, ["record", "likes", "both"] as const, "source");
+    const source = selection(input.source, ["record", "likes", "playlists", "both", "all"] as const, "source");
     const cookie = await readCookie(this.paths.cookie);
-    if ((source === "likes" || source === "both") && !cookie) {
+    if ((source === "likes" || source === "both" || source === "all") && !cookie) {
       throw new HttpError(401, "喜欢歌曲需要网易云登录，请先点击“二维码登录”完成登录。");
     }
-    const recordScope = selection(input.recordScope ?? "all", ["all", "week"] as const, "recordScope");
+    const recordScope = selection(input.recordScope ?? "all", ["all", "week", "both"] as const, "recordScope");
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const minDelayMs = integer(input.minDelayMs ?? 2_500, "minDelayMs", 0, 600_000);
     const jitterMs = integer(input.jitterMs ?? 800, "jitterMs", 0, 600_000);
@@ -641,10 +646,14 @@ class JobManager {
     );
     const proxy = proxyUrl(input.proxy);
     const allowDirect = bool(input.allowDirect);
-    const taskPaths = sourceTaskPaths(this.paths.data, uid, source);
+    const fresh = bool(input.fresh);
+    const taskPaths = sourceTaskPaths(this.paths.data, uid, source, recordScope);
     const nextStatePath = taskPaths.statePath;
     const nextOutputPath = taskPaths.outputPath;
     const nextCoveragePath = taskPaths.coveragePath;
+    if (source === "record" || source === "both") {
+      await migrateLegacyWeekSourceState(this.paths.data, uid, source);
+    }
     const activePool = await readProxyPool(this.paths.pool);
     const activePoolExpected = proxyPoolStatusRunning(activePool);
     const poolEntries = activePoolExpected
@@ -711,7 +720,7 @@ class JobManager {
       maxCommentPagesPerSong,
       maxSongs,
       stopAfterFirst: false,
-      fresh: bool(input.fresh),
+      fresh,
       dryRun: bool(input.dryRun),
       signal: this.abortController.signal,
       onMatch: (comment) => this.publishMatch(comment),
@@ -2278,7 +2287,7 @@ export async function probeUser(uid: string, proxy: string | undefined, cookiePa
   const cookie = await readCookie(cookiePath);
   const client = new EnhancedNcmClient({ proxy, requestTimeoutMs: DIRECT_USER_PROBE_TIMEOUT_MS });
   const governor = new RequestGovernor({
-    requestBudget: 4,
+    requestBudget: 5,
     minDelayMs: DIRECT_USER_PROBE_START_DELAY_MS,
     jitterMs: 0,
     maxRetries: 0,
@@ -2286,12 +2295,25 @@ export async function probeUser(uid: string, proxy: string | undefined, cookiePa
   });
   // Public profile lookup does not need the operator's cookie. Keeping it out
   // prevents an expired login session from breaking a public UID switch.
-  const inspect = async (source: "record" | "likes"): Promise<SourceProbe> => {
+  const playlistOverview = governor.execute("target_playlists_page", () =>
+    client.getTargetUserPlaylistPage!(uid, 0, 500, cookie)
+  );
+  const inspect = async (source: "record" | "likes" | "playlists"): Promise<SourceProbe> => {
     try {
+      if (source === "playlists") {
+        const page = await playlistOverview;
+        return {
+          status: "available",
+          playlists: page.playlists.length,
+          songs: page.playlists.reduce((total, playlist) => total + (playlist.trackCount ?? 0), 0),
+          complete: !page.more,
+        };
+      }
       const songs = source === "record"
         ? await governor.execute("user_record", () => client.getUserRecord(uid, "all", cookie))
         : await (async () => {
-          const target = await governor.execute("target_likes_playlist", () => client.getTargetLikedPlaylist!(uid, cookie));
+          const target = (await playlistOverview).likedPlaylist;
+          if (!target) throw new SourcePrivacyRestricted("目标用户已开启喜欢歌单隐私或未公开该歌单");
           return governor.execute("target_likes_tracks", () => client.getTargetLikedPlaylistSongs!(uid, target, cookie));
         })();
       return { status: "available", songs: songs.length };
@@ -2307,15 +2329,17 @@ export async function probeUser(uid: string, proxy: string | undefined, cookiePa
   // These are independent reads. Start them together through one lightly
   // paced direct governor so normal network latency overlaps instead of
   // accumulating profile -> record -> playlist -> tracks serially.
-  const [profile, record, likes] = await Promise.all([
+  const [profile, record, likes, playlists] = await Promise.all([
     governor.execute("user_detail", () => client.getUserProfile(uid)),
     inspect("record"),
     inspect("likes"),
+    inspect("playlists"),
   ]);
   return {
     profile,
     record,
     likes,
+    playlists,
     sessionPresent: Boolean(cookie),
     elapsedMs: Date.now() - started,
     route: proxy ? "explicit-proxy" : "direct",
@@ -2571,13 +2595,27 @@ export function sourceTaskPaths(
   dataRoot: string,
   uid: string,
   source: SourceSelection,
+  recordScope: RecordScope = "all",
 ): { statePath: string; outputPath: string; coveragePath: string } {
   const suffix = `target-v${SOURCE_CATALOG_VERSION}`;
+  const includesRecord = source === "record" || source === "both" || source === "all";
+  const stateSource = includesRecord && recordScope !== "all" ? `${source}-record-${recordScope}` : source;
   return {
-    statePath: join(dataRoot, `web-state-${uid}-${source}-${suffix}.json`),
+    statePath: join(dataRoot, `web-state-${uid}-${stateSource}-${suffix}.json`),
     outputPath: join(dataRoot, `web-comments-${uid}-${suffix}.jsonl`),
     coveragePath: join(dataRoot, `web-song-coverage-${uid}-${suffix}.json`),
   };
+}
+
+/** Moves only an exactly matching legacy week checkpoint into its scoped path. */
+export async function migrateLegacyWeekSourceState(
+  dataRoot: string,
+  uid: string,
+  source: "record" | "both",
+): Promise<boolean> {
+  const legacyPath = sourceTaskPaths(dataRoot, uid, source, "all").statePath;
+  const scopedPath = sourceTaskPaths(dataRoot, uid, source, "week").statePath;
+  return migrateLegacyWeekState(legacyPath, scopedPath, uid, source);
 }
 function publicPoolEntries(entries: ProxyPoolEntry[]): ProxyPoolEntry[] {
   return entries.map((entry) => ({ ...entry, endpoint: maskProxyCredentials(entry.endpoint) }));

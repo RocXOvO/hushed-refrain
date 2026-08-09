@@ -16,6 +16,7 @@ import {
   DESKTOP_UPDATE_CHANNELS,
   DESKTOP_WINDOW_CHANNELS,
   desktopDashboardUrl,
+  desktopResultReportIdentityMatches,
   desktopResultReportUrl,
   desktopWindowChrome,
   parseDesktopResultExportRequest,
@@ -149,13 +150,16 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
   if (resultExportInProgress) throw new Error("已有一份 PDF 正在生成，请稍候。");
   const request = parseDesktopResultExportRequest(rawRequest);
   const exportAbort = new AbortController();
+  const exportStartedAt = Date.now();
   resultExportInProgress = true;
   resultExportAbortController = exportAbort;
   try {
-    const reportUrl = desktopResultReportUrl(dashboardUrl, request);
+    const smoke = desktopPdfSmokeConfig(request);
+    const reportUrl = smoke?.reportUrl ?? desktopResultReportUrl(dashboardUrl, request);
     return await runDesktopResultExport(request, {
       reportUrl,
       chooseDestination: async () => {
+        if (smoke) return smoke.destination;
         const destination = await dialog.showSaveDialog(window, {
           title: "导出评论检索报告",
           defaultPath: join(app.getPath("documents"), resultReportFilename(request)),
@@ -168,6 +172,9 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
       write: writeDesktopResultPdf,
       signal: exportAbort.signal,
       onProgress: (progress) => {
+        if (progress.stage !== "save-dialog") {
+          writeDesktopLog("pdf-export-progress", `stage=${progress.stage} elapsedMs=${progress.elapsedMs}`);
+        }
         if (!event.sender.isDestroyed()) {
           event.sender.send(DESKTOP_EXPORT_CHANNELS.resultsPdfProgress, progress);
         }
@@ -178,7 +185,8 @@ ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unk
     const stage = failure?.stage ?? "save-dialog";
     const code = failure?.code ?? "failed";
     const category = desktopExportFailureCategory(failure?.cause ?? error);
-    const logPath = writeDesktopLog("pdf-export", `stage=${stage} code=${code} category=${category}`);
+    const elapsedMs = Math.max(0, Date.now() - exportStartedAt);
+    const logPath = writeDesktopLog("pdf-export", `stage=${stage} code=${code} category=${category} elapsedMs=${elapsedMs}`);
     return {
       status: "failed",
       message: failure?.message ?? "选择保存位置失败，请重试。",
@@ -241,25 +249,60 @@ function createDesktopReportSession(parent: BrowserWindow, reportUrl: string): D
   };
 }
 
-async function runDesktopPdfSmoke(parent: BrowserWindow, destination: string): Promise<void> {
-  const request = parseDesktopResultExportRequest({
+function desktopPdfSmokeRequest() {
+  return parseDesktopResultExportRequest({
     platform: "netease",
     mode: "source",
     jobId: "00000000-0000-4000-8000-000000000001",
     target: { kind: "uid", value: "9000000001" },
   });
+}
+
+function desktopPdfSmokeConfig(request: ReturnType<typeof desktopPdfSmokeRequest>): {
+  destination: string;
+  reportUrl: string;
+} | undefined {
+  const destination = process.env.NCM_DESKTOP_SMOKE === "1"
+    ? process.env.NCM_DESKTOP_SMOKE_PDF
+    : undefined;
+  const expected = desktopPdfSmokeRequest();
+  if (!destination || !desktopResultReportIdentityMatches({
+    platform: request.platform,
+    mode: request.mode,
+    jobId: request.jobId,
+    targetKind: request.target.kind,
+    target: request.target.value,
+  }, expected)) return undefined;
   const html = `<!doctype html><meta name="result-report-platform" content="netease"><meta name="result-report-mode" content="source"><meta name="result-report-job" content="${request.jobId}"><meta name="result-report-target-kind" content="uid"><meta name="result-report-target" content="9000000001"><style>@page{size:A4;margin:15mm}body{font:16px sans-serif}</style><h1>乐评寻踪 PDF smoke</h1><p>Chromium hidden report print pipeline.</p>`;
-  const reportUrl = `data:text/html;charset=UTF-8,${encodeURIComponent(html)}`;
-  const result = await runDesktopResultExport(request, {
-    reportUrl,
-    chooseDestination: async () => destination,
-    createSession: () => createDesktopReportSession(parent, reportUrl),
-    write: writeDesktopResultPdf,
-  });
-  if (result.status !== "saved") throw new Error("Packaged PDF smoke did not save a file.");
+  return { destination, reportUrl: `data:text/html;charset=UTF-8,${encodeURIComponent(html)}` };
+}
+
+async function runDesktopPdfSmoke(parent: BrowserWindow, destination: string): Promise<void> {
+  const request = desktopPdfSmokeRequest();
+  const bridgeResult = await parent.webContents.executeJavaScript(`(async () => {
+    const stages = [];
+    const remove = window.ncmDesktop.onResultsPdfProgress((progress) => stages.push(progress?.stage));
+    try {
+      const result = await window.ncmDesktop.exportResultsPdf(${JSON.stringify(request)});
+      return { result, stages };
+    } finally {
+      remove();
+    }
+  })()` ) as { result?: { status?: string; path?: string }; stages?: string[] };
+  if (bridgeResult.result?.status !== "saved" || bridgeResult.result.path !== destination) {
+    throw new Error("Packaged renderer-to-IPC PDF smoke did not save the selected file.");
+  }
+  assertDesktopPdfSmokeStages(bridgeResult.stages);
   const bytes = readFileSync(destination);
   if (bytes.length < 5 || bytes.subarray(0, 5).toString("ascii") !== "%PDF-") {
     throw new Error("Packaged PDF smoke output is invalid.");
+  }
+}
+
+function assertDesktopPdfSmokeStages(stages: string[] | undefined): void {
+  const expected = ["save-dialog", "load-report", "fonts", "print", "write", "saved"];
+  if (!stages || expected.some((stage, index) => stages[index] !== stage)) {
+    throw new Error(`Packaged renderer-to-IPC PDF smoke missed progress stages: ${String(stages)}`);
   }
 }
 

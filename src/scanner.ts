@@ -37,6 +37,8 @@ import type {
   ScanOptions,
   ScanState,
   SongCandidate,
+  TargetUserPlaylist,
+  TargetUserPlaylistPage,
 } from "./types";
 
 const MAX_CONSECUTIVE_LANE_FAILURES = 5;
@@ -964,15 +966,20 @@ async function reconcileSongCatalog(
   for (let index = 0; index < previousSongs.length; index += 1) {
     const previousSong = previousSongs[index];
     if (currentIds.has(previousSong.id)) continue;
-    reconciledSongs.push(previousSong);
+    reconciledSongs.push({
+      ...cloneSongCandidate(previousSong),
+      memberships: mergeMemberships([], previousSong),
+    });
     reconciledProgress.push(previousProgress[index]);
   }
 
   state.songs = reconciledSongs;
   state.songProgress = reconciledProgress;
   const failedSources = new Set(collected.failures.flatMap((failure) =>
-    failure.startsWith("record:") ? ["record" as const]
+    failure.startsWith("record-all:") || failure.startsWith("record:") ? ["record" as const]
+      : failure.startsWith("record-week:") ? ["record-week" as const]
       : failure.startsWith("likes:") ? ["likes" as const]
+      : failure.startsWith("playlists:") ? ["playlists" as const]
       : []
   ));
   const trustworthyCatalogIds = new Set(currentIds);
@@ -1043,6 +1050,9 @@ function refreshSongMetadata(
     sourceRank: current.sourceRank ?? previous.sourceRank,
     playCount: current.playCount ?? previous.playCount,
     score: current.score ?? previous.score,
+    memberships: partialCatalog
+      ? mergeMemberships(mergeMemberships([], previous), current)
+      : current.memberships?.map((membership) => ({ ...membership })),
   };
 }
 
@@ -1051,6 +1061,7 @@ function cloneSongCandidate(song: SongCandidate): SongCandidate {
     ...song,
     sources: [...song.sources],
     artists: song.artists && [...song.artists],
+    memberships: song.memberships?.map((membership) => ({ ...membership })),
   };
 }
 
@@ -1081,17 +1092,19 @@ async function collectSongs(
 ): Promise<CollectedSongCatalog> {
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
-  if (options.source === "record" || options.source === "both") {
+  if (options.source === "record" || options.source === "both" || options.source === "all") {
     try {
-      batches.push(await governor.execute("user_record", () =>
-        client.getUserRecord(options.uid, options.recordScope, options.cookie),
-      ));
+      const record = await collectRecordSongs(options, (label, scope) =>
+        governor.execute(label, () => client.getUserRecord(options.uid, scope, options.cookie))
+      );
+      batches.push(record.songs);
+      failures.push(...record.failures);
     } catch (error) {
       if (options.source === "record" || isPauseSignal(error)) throw error;
       failures.push(`record: ${errorMessage(error)}`);
     }
   }
-  if (options.source === "likes" || options.source === "both") {
+  if (options.source === "likes" || options.source === "both" || options.source === "all") {
     try {
       batches.push(await collectTargetLikedSongs(client, options, (label, request) =>
         governor.execute(label, request)
@@ -1099,6 +1112,18 @@ async function collectSongs(
     } catch (error) {
       if (options.source === "likes" || isPauseSignal(error)) throw error;
       failures.push(`likes: ${errorMessage(error)}`);
+    }
+  }
+  if (options.source === "playlists" || options.source === "all") {
+    try {
+      const playlists = await collectTargetUserPlaylistSongs(client, options, (label, request) =>
+        governor.execute(label, request)
+      );
+      batches.push(playlists.songs);
+      failures.push(...playlists.failures);
+    } catch (error) {
+      if (options.source === "playlists" || isPauseSignal(error)) throw error;
+      failures.push(`playlists: ${errorMessage(error)}`);
     }
   }
   if (batches.length === 0) {
@@ -1113,17 +1138,19 @@ async function collectSongsPooled(
 ): Promise<CollectedSongCatalog> {
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
-  if (options.source === "record" || options.source === "both") {
+  if (options.source === "record" || options.source === "both" || options.source === "all") {
     try {
-      batches.push(await requestFromPool(lanes, "user_record", (client) =>
-        client.getUserRecord(options.uid, options.recordScope, options.cookie)
-      ));
+      const record = await collectRecordSongs(options, (label, scope) =>
+        requestFromPool(lanes, label, (client) => client.getUserRecord(options.uid, scope, options.cookie))
+      );
+      batches.push(record.songs);
+      failures.push(...record.failures);
     } catch (error) {
       if (options.source === "record" || isPauseSignal(error)) throw error;
       failures.push(`record: ${errorMessage(error)}`);
     }
   }
-  if (options.source === "likes" || options.source === "both") {
+  if (options.source === "likes" || options.source === "both" || options.source === "all") {
     try {
       batches.push(await collectTargetLikedSongsPooled(lanes, options));
     } catch (error) {
@@ -1131,7 +1158,36 @@ async function collectSongsPooled(
       failures.push(`likes: ${errorMessage(error)}`);
     }
   }
+  if (options.source === "playlists" || options.source === "all") {
+    try {
+      const playlists = await collectTargetUserPlaylistSongsPooled(lanes, options);
+      batches.push(playlists.songs);
+      failures.push(...playlists.failures);
+    } catch (error) {
+      if (options.source === "playlists" || isPauseSignal(error)) throw error;
+      failures.push(`playlists: ${errorMessage(error)}`);
+    }
+  }
   if (batches.length === 0) throw new Error(`All selected song sources failed: ${failures.join("; ")}`);
+  return { songs: mergeSongs(batches.flat()), failures };
+}
+
+async function collectRecordSongs(
+  options: ScanOptions,
+  execute: (label: string, scope: "all" | "week") => Promise<SongCandidate[]>,
+): Promise<CollectedSongCatalog> {
+  const scopes = options.recordScope === "both" ? ["all", "week"] as const : [options.recordScope];
+  const batches: SongCandidate[][] = [];
+  const failures: string[] = [];
+  for (const scope of scopes) {
+    try {
+      batches.push(await execute(`user_record_${scope}`, scope));
+    } catch (error) {
+      if (isPauseSignal(error)) throw error;
+      failures.push(`record-${scope}: ${errorMessage(error)}`);
+    }
+  }
+  if (batches.length === 0) throw new Error(`All selected listening-rank ranges failed: ${failures.join("; ")}`);
   return { songs: mergeSongs(batches.flat()), failures };
 }
 
@@ -1139,9 +1195,12 @@ async function requestFromPool<T>(
   lanes: SourceScanLane[],
   label: string,
   request: (client: NcmClient) => Promise<T>,
+  session?: { nextLaneIndex: number },
 ): Promise<T> {
   let lastError: unknown;
-  for (const lane of lanes) {
+  const firstLane = session ? session.nextLaneIndex++ % lanes.length : 0;
+  for (let offset = 0; offset < lanes.length; offset += 1) {
+    const lane = lanes[(firstLane + offset) % lanes.length];
     try {
       return await executeProxyRequest(lane, label, () => request(lane.client));
     } catch (error) {
@@ -1185,6 +1244,99 @@ async function collectTargetLikedSongsPooled(
   return requestFromPool(lanes, "target_likes_tracks", (client) =>
     client.getTargetLikedPlaylistSongs!(options.uid, target, options.cookie)
   );
+}
+
+async function collectTargetUserPlaylistSongs(
+  client: NcmClient,
+  options: ScanOptions,
+  execute: <T>(label: string, request: () => Promise<T>) => Promise<T>,
+): Promise<CollectedSongCatalog> {
+  if (!client.getTargetUserPlaylistPage || !client.getTargetUserPlaylistSongs) {
+    throw new Error("The selected client does not support target user playlists.");
+  }
+  return collectTargetUserPlaylistSongsWithExecutor(options, async (label, operation, playlist, offset) => {
+    if (operation === "page") {
+      return execute(label, () => client.getTargetUserPlaylistPage!(options.uid, offset!, 500, options.cookie));
+    }
+    return execute(label, () => client.getTargetUserPlaylistSongs!(options.uid, playlist!, options.cookie));
+  }, 1);
+}
+
+async function collectTargetUserPlaylistSongsPooled(
+  lanes: SourceScanLane[],
+  options: ScanOptions,
+): Promise<CollectedSongCatalog> {
+  if (!lanes.every((lane) => lane.client.getTargetUserPlaylistPage && lane.client.getTargetUserPlaylistSongs)) {
+    throw new Error("The selected proxy lanes do not support target user playlists.");
+  }
+  const session = { nextLaneIndex: 0 };
+  return collectTargetUserPlaylistSongsWithExecutor(options, async (label, operation, playlist, offset) => {
+    if (operation === "page") {
+      return requestFromPool(lanes, label, (client) =>
+        client.getTargetUserPlaylistPage!(options.uid, offset!, 500, options.cookie)
+      , session);
+    }
+    return requestFromPool(lanes, label, (client) =>
+      client.getTargetUserPlaylistSongs!(options.uid, playlist!, options.cookie)
+    , session);
+  }, lanes.length);
+}
+
+async function collectTargetUserPlaylistSongsWithExecutor(
+  options: ScanOptions,
+  execute: (
+    label: string,
+    operation: "page" | "tracks",
+    playlist?: TargetUserPlaylist,
+    offset?: number,
+  ) => Promise<TargetUserPlaylistPage | SongCandidate[]>,
+  detailConcurrency: number,
+): Promise<CollectedSongCatalog> {
+  const playlists = new Map<string, TargetUserPlaylist>();
+  let offset = 0;
+  let pageNumber = 0;
+  for (;;) {
+    pageNumber += 1;
+    if (pageNumber > 10_000) throw new Error("Target user playlist pagination exceeded its safety limit.");
+    const page = await execute("target_playlists_page", "page", undefined, offset) as TargetUserPlaylistPage;
+    for (const playlist of page.playlists) {
+      if (playlists.has(playlist.id)) {
+        throw new Error(`Target user playlist pagination repeated playlist ${playlist.id}.`);
+      }
+      playlists.set(playlist.id, playlist);
+    }
+    if (!page.more) break;
+    if (!Number.isSafeInteger(page.nextOffset) || page.nextOffset <= offset) {
+      throw new Error("Target user playlist pagination did not advance.");
+    }
+    offset = page.nextOffset;
+  }
+
+  const orderedPlaylists = [...playlists.values()];
+  const batches: Array<SongCandidate[] | undefined> = new Array(orderedPlaylists.length);
+  const failureSlots: Array<string | undefined> = new Array(orderedPlaylists.length);
+  let nextPlaylist = 0;
+  const workers = Math.min(orderedPlaylists.length, Math.max(1, detailConcurrency));
+  await Promise.all(Array.from({ length: workers }, async () => {
+    for (;;) {
+      const index = nextPlaylist++;
+      if (index >= orderedPlaylists.length) return;
+      const playlist = orderedPlaylists[index];
+      try {
+        batches[index] = await execute("target_playlist_tracks", "tracks", playlist) as SongCandidate[];
+      } catch (error) {
+        if (isPauseSignal(error)) throw error;
+        failureSlots[index] = `playlists:${playlist.id}: ${errorMessage(error)}`;
+      }
+    }
+  }));
+  const successfulBatches = batches.filter((batch): batch is SongCandidate[] => Boolean(batch));
+  const failures = failureSlots.filter((failure): failure is string => Boolean(failure));
+  if (playlists.size > 0 && successfulBatches.length === 0) {
+    throw new Error(`All target user playlist details failed: ${failures.join("; ")}`);
+  }
+  const songs = mergeSongs(successfulBatches.flat()).map((song, index) => ({ ...song, sourceRank: index + 1 }));
+  return { songs, failures };
 }
 
 async function requestBestEffortFromPool<T>(
@@ -1256,7 +1408,11 @@ export function mergeSongs(songs: SongCandidate[]): SongCandidate[] {
   for (const song of songs) {
     const existing = byId.get(song.id);
     if (!existing) {
-      byId.set(song.id, { ...song, sources: [...song.sources] });
+      byId.set(song.id, {
+        ...song,
+        sources: [...song.sources],
+        memberships: mergeMemberships([], song),
+      });
       continue;
     }
     for (const source of song.sources) {
@@ -1266,8 +1422,34 @@ export function mergeSongs(songs: SongCandidate[]): SongCandidate[] {
     existing.artists ??= song.artists;
     existing.playCount ??= song.playCount;
     existing.score ??= song.score;
+    existing.memberships = mergeMemberships(existing.memberships ?? [], song);
   }
   return [...byId.values()];
+}
+
+function mergeMemberships(
+  existing: NonNullable<SongCandidate["memberships"]>,
+  song: SongCandidate,
+): NonNullable<SongCandidate["memberships"]> {
+  const memberships = existing.map((membership) => ({ ...membership }));
+  const candidates = song.memberships?.length
+    ? song.memberships
+    : song.sources.map((source) => ({
+      source,
+      sourceRank: song.sourceRank,
+      playCount: song.playCount,
+      score: song.score,
+    }));
+  for (const candidate of candidates) {
+    const current = memberships.find((membership) => membership.source === candidate.source);
+    if (!current) memberships.push({ ...candidate });
+    else {
+      current.sourceRank ??= candidate.sourceRank;
+      current.playCount ??= candidate.playCount;
+      current.score ??= candidate.score;
+    }
+  }
+  return memberships;
 }
 
 async function appendMatches(

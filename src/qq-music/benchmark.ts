@@ -60,14 +60,13 @@ export function modelQQMusicBenchmark(
   const requests = pages + sourceRequests;
   const laneCycleMs = input.minDelayMs + input.averageJitterMs;
   const perLaneRateBoundMs = laneCycleMs / input.lanes;
-  const boundedCheckpoint = input.mode === "likes" && (input.checkpointIntervalMs ?? 0) > 0;
+  const boundedCheckpoint = (input.checkpointIntervalMs ?? 0) > 0;
   const checkpointBatchPages = boundedCheckpoint
     ? input.averageCheckpointBatchPages ?? (input.checkpointPageCap ?? 4)
     : 1;
   const checkpointBoundMs = input.averageCheckpointMs / checkpointBatchPages;
-  // A fresh song scan checkpoints task creation, resolved song metadata and
-  // terminal state. Likes mode checkpoints task creation, every source page
-  // and terminal state.
+  // A fresh song scan checkpoints task creation, resolved source state and
+  // terminal state. Likes mode also checkpoints each source page.
   const controlCheckpointWrites = input.mode === "song" ? 3 : 2 + sourceRequests;
   const workers = input.mode === "song"
     ? 1

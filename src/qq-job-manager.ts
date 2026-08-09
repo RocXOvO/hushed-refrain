@@ -50,6 +50,7 @@ import type {
   QQMusicRequestActivity,
   QQMusicScanOptions,
   QQMusicScanReport,
+  QQMusicSong,
   QQMusicSongActivity,
   QQMusicUser,
 } from "./qq-music/types";
@@ -278,6 +279,7 @@ export class QQJobManager {
   private readonly seenLanes = new Set<string>();
   private readonly commentRate = new CommentRateTracker();
   private readonly pagePerformance = new PagePerformanceTracker();
+  private readonly songLookupCache = new Map<string, QQMusicSong>();
   private inFlight = 0;
 
   constructor(options: QQJobManagerOptions) {
@@ -418,6 +420,7 @@ export class QQJobManager {
         mode: config.mode,
         target: target.encryptUin,
         songId: config.songId,
+        songMetadata: config.songId ? this.songLookupCache.get(config.songId) : undefined,
         pageSize: config.pageSize,
         likedPageSize: config.likedPageSize,
         maxSongs: config.maxSongs,
@@ -639,7 +642,7 @@ export class QQJobManager {
     preferDirectInput?: unknown,
   ) {
     const songId = decimalId(songIdInput, "QQ 音乐歌曲 ID");
-    return this.withLookupLanes(
+    const song = await this.withLookupLanes(
       proxyInput,
       allowDirectInput,
       (lanes) => executeControlAcrossLanes(lanes, "qq_song_lookup", (lane) =>
@@ -648,6 +651,10 @@ export class QQJobManager {
       signal,
       boolean(preferDirectInput),
     );
+    this.songLookupCache.delete(songId);
+    this.songLookupCache.set(songId, song);
+    while (this.songLookupCache.size > 32) this.songLookupCache.delete(this.songLookupCache.keys().next().value!);
+    return song;
   }
 
   async searchSongs(
@@ -660,7 +667,7 @@ export class QQJobManager {
   ): Promise<SongSearchResult[]> {
     const query = text(queryInput, "q", 2, 80);
     const limit = integer(limitInput ?? 10, "limit", 1, 10);
-    return this.withLookupLanes(
+    const songs = await this.withLookupLanes(
       proxyInput,
       allowDirectInput,
       (lanes) => executeControlAcrossLanes(lanes, "qq_song_search", (lane) => {
@@ -672,6 +679,19 @@ export class QQJobManager {
       signal,
       boolean(preferDirectInput),
     );
+    for (const song of songs) {
+      const id = String(song.id ?? "").trim();
+      if (!/^\d+$/.test(id)) continue;
+      this.songLookupCache.delete(id);
+      this.songLookupCache.set(id, {
+        id,
+        ...(song.mid ? { mid: song.mid } : {}),
+        name: song.name,
+        artists: song.artists,
+      });
+    }
+    while (this.songLookupCache.size > 32) this.songLookupCache.delete(this.songLookupCache.keys().next().value!);
+    return songs;
   }
 
   async lookupTarget(

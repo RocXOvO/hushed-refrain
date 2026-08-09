@@ -122,6 +122,59 @@ test("QQ HTTPS proxy transport reuses a healthy CONNECT and disposes it explicit
   assert.equal([...tunnelSockets].filter((socket) => !socket.destroyed).length, 0);
 });
 
+test("aborting one QQ request does not destroy another healthy tunnel on the shared lane agent", async (context) => {
+  let slowStarted!: () => void;
+  const sawSlow = new Promise<void>((resolve) => { slowStarted = resolve; });
+  let healthyStarted!: () => void;
+  const sawHealthy = new Promise<void>((resolve) => { healthyStarted = resolve; });
+  const target = https.createServer({ key: TEST_KEY, cert: TEST_CERT }, (request, response) => {
+    if (request.url === "/slow") {
+      slowStarted();
+      return;
+    }
+    healthyStarted();
+    setTimeout(() => response.end("healthy"), 30);
+  });
+  const targetPort = await listen(target);
+  context.after(() => close(target));
+  const tunnelSockets = new Set<net.Socket>();
+  const proxy = http.createServer();
+  proxy.on("connect", (_request, clientSocket, head) => {
+    const upstream = net.connect(targetPort, "127.0.0.1", () => {
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head.length > 0) upstream.write(head);
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    });
+    for (const socket of [clientSocket, upstream]) {
+      tunnelSockets.add(socket);
+      socket.once("close", () => tunnelSockets.delete(socket));
+    }
+    upstream.on("error", () => clientSocket.destroy());
+  });
+  const proxyPort = await listen(proxy);
+  context.after(() => {
+    for (const socket of tunnelSockets) socket.destroy();
+    return close(proxy);
+  });
+  const fetchViaProxy = createQQMusicProxyFetch({
+    proxyUrl: `http://127.0.0.1:${proxyPort}`,
+    targetRejectUnauthorized: false,
+    maxSockets: 2,
+  });
+  context.after(() => fetchViaProxy.close());
+
+  const slowAbort = new AbortController();
+  const slow = fetchViaProxy(`https://localhost:${targetPort}/slow`, { signal: slowAbort.signal });
+  await sawSlow;
+  const healthy = fetchViaProxy(`https://localhost:${targetPort}/healthy`);
+  await sawHealthy;
+  slowAbort.abort();
+
+  await assert.rejects(slow, (error: unknown) => (error as Error).name === "AbortError");
+  assert.equal(await (await healthy).text(), "healthy");
+});
+
 test("QQ proxy CONNECT is fail-closed on non-200 response", async (context) => {
   const proxy = http.createServer();
   proxy.on("connect", (_request, socket) => {

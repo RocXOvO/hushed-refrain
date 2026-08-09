@@ -1,6 +1,14 @@
-export type SongSource = "record" | "likes";
-export type SourceSelection = SongSource | "both";
+export type SongSource = "record" | "record-week" | "likes" | "playlists";
+export type SourceSelection = "record" | "likes" | "playlists" | "both" | "all";
+export type RecordScope = "all" | "week" | "both";
 export type Strategy = "auto" | "scan" | "history";
+
+export interface SongSourceMembership {
+  source: SongSource;
+  sourceRank?: number;
+  playCount?: number;
+  score?: number;
+}
 
 export interface SongCandidate {
   id: string;
@@ -10,11 +18,25 @@ export interface SongCandidate {
   sourceRank?: number;
   playCount?: number;
   score?: number;
+  /** Per-source evidence retained when one song belongs to several catalogs. */
+  memberships?: SongSourceMembership[];
 }
 
 export interface TargetLikedPlaylist {
   id: string;
   trackCount?: number;
+}
+
+export interface TargetUserPlaylist extends TargetLikedPlaylist {
+  name?: string;
+}
+
+export interface TargetUserPlaylistPage {
+  playlists: TargetUserPlaylist[];
+  /** The target-owned specialType=5 list when it is present on this page. */
+  likedPlaylist?: TargetLikedPlaylist;
+  more: boolean;
+  nextOffset: number;
 }
 
 export interface CommentRecord {
@@ -94,6 +116,17 @@ export interface NcmClient {
   getTargetLikedPlaylistSongs?(
     uid: string,
     playlist: TargetLikedPlaylist,
+    cookie?: string,
+  ): Promise<SongCandidate[]>;
+  getTargetUserPlaylistPage?(
+    uid: string,
+    offset: number,
+    limit: number,
+    cookie?: string,
+  ): Promise<TargetUserPlaylistPage>;
+  getTargetUserPlaylistSongs?(
+    uid: string,
+    playlist: TargetUserPlaylist,
     cookie?: string,
   ): Promise<SongCandidate[]>;
   getSongInfos?(songIds: readonly string[]): Promise<SongInfo[]>;
@@ -254,7 +287,7 @@ export interface ScanState {
   strategy: "scan" | "history";
   strategyResolved: boolean;
   source: SourceSelection;
-  recordScope: "all" | "week";
+  recordScope: RecordScope;
   sourcesLoaded: boolean;
   songs: SongCandidate[];
   songProgress?: SongScanProgress[];
@@ -285,7 +318,7 @@ export interface ScanOptions {
   uid: string;
   strategy: Strategy;
   source: SourceSelection;
-  recordScope: "all" | "week";
+  recordScope: RecordScope;
   cookie?: string;
   statePath: string;
   outputPath: string;

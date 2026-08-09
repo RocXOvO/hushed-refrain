@@ -1,4 +1,7 @@
-import { readAtomicJson, writeAtomicJson } from "./atomic-file";
+import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
+import lockfile from "proper-lockfile";
+import { readAtomicJson, removeAtomicFile, writeAtomicJson } from "./atomic-file";
 import type { ScanOptions, ScanState } from "./types";
 
 export const SOURCE_CATALOG_VERSION = 3;
@@ -69,13 +72,61 @@ export async function saveState(path: string, state: ScanState): Promise<void> {
   await writeAtomicJson(path, state);
 }
 
+/**
+ * Moves the one legacy checkpoint shape that used the all-time path for a
+ * weekly scan into its scoped path. The target is made durable and verified
+ * before the conflicting legacy document and its recovery files are removed.
+ */
+export async function migrateLegacyWeekState(
+  legacyPath: string,
+  targetPath: string,
+  uid: string,
+  source: "record" | "both",
+): Promise<boolean> {
+  await mkdir(dirname(legacyPath), { recursive: true });
+  const release = await lockfile.lock(legacyPath, {
+    realpath: false,
+    stale: 120_000,
+    update: 20_000,
+    retries: { retries: 40, factor: 1.2, minTimeout: 5, maxTimeout: 100, randomize: true },
+  });
+  try {
+    const legacy = await loadState(legacyPath);
+    if (!isMatchingLegacyWeekState(legacy, uid, source)) return false;
+
+    const current = await loadState(targetPath);
+    if (current && !isMatchingLegacyWeekState(current, uid, source)) {
+      throw new Error("Scoped weekly checkpoint does not match the legacy checkpoint identity.");
+    }
+    if (!current) {
+      await writeAtomicJson(targetPath, legacy);
+    }
+    const verified = await loadState(targetPath);
+    if (!isMatchingLegacyWeekState(verified, uid, source)) {
+      throw new Error("Weekly checkpoint migration could not verify its durable target.");
+    }
+    await removeAtomicFile(legacyPath);
+    return true;
+  } finally {
+    await release().catch(() => {});
+  }
+}
+
+function isMatchingLegacyWeekState(
+  state: ScanState | undefined,
+  uid: string,
+  source: "record" | "both",
+): state is ScanState {
+  return state?.uid === uid && state.source === source && state.recordScope === "week";
+}
+
 export function assertCompatibleState(state: ScanState, options: ScanOptions): void {
   const mismatches: string[] = [];
   if (state.uid !== options.uid) mismatches.push("uid");
   if (state.source !== options.source) mismatches.push("source");
   if (state.recordScope !== options.recordScope) mismatches.push("recordScope");
   if (
-    (options.source === "likes" || options.source === "both") &&
+    (options.source === "likes" || options.source === "playlists" || options.source === "both" || options.source === "all") &&
     state.sourceCatalogVersion !== SOURCE_CATALOG_VERSION
   ) mismatches.push("目标用户喜欢歌曲目录版本");
   if (options.strategy !== "auto" && state.strategy !== options.strategy) {

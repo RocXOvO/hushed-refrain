@@ -92,20 +92,31 @@ export class QQMusicResultWriter {
   }
 
   async append(record: QQMusicFoundComment): Promise<boolean> {
+    return (await this.appendBatch([record])).length > 0;
+  }
+
+  /** Persists every new match from one logical comment page with one write and one fsync. */
+  async appendBatch(records: readonly QQMusicFoundComment[]): Promise<QQMusicFoundComment[]> {
     await this.initialize();
     if (this.closed || !this.file) throw new Error("QQ Music result writer is closed.");
     if (this.persistenceError) throw this.persistenceError;
-    let added = false;
+    let added: QQMusicFoundComment[] = [];
     const write = this.appendTail.then(async () => {
       if (this.persistenceError) throw this.persistenceError;
-      const key = qqMusicCommentKey(record.songId, record.commentId);
-      if (this.existingKeys.has(key)) return;
-      const stored = {
-        ...record,
-        commentUrl: record.commentUrl ?? qqMusicCommentUrl(record.songMid, record.songId),
-      };
+      const pending: QQMusicFoundComment[] = [];
+      const pendingKeys = new Set<string>();
+      for (const record of records) {
+        const key = qqMusicCommentKey(record.songId, record.commentId);
+        if (this.existingKeys.has(key) || pendingKeys.has(key)) continue;
+        pendingKeys.add(key);
+        pending.push({
+          ...record,
+          commentUrl: record.commentUrl ?? qqMusicCommentUrl(record.songMid, record.songId),
+        });
+      }
+      if (pending.length === 0) return;
       try {
-        await this.file!.write(`${JSON.stringify(stored)}\n`);
+        await this.file!.write(pending.map((record) => `${JSON.stringify(record)}\n`).join(""));
       } catch (cause) {
         throw this.latchPersistenceError("write", cause);
       }
@@ -114,9 +125,11 @@ export class QQMusicResultWriter {
       } catch (cause) {
         throw this.latchPersistenceError("sync", cause);
       }
-      this.existingKeys.add(key);
-      added = true;
-      try { this.onAppend?.(stored); } catch { /* Presentation callbacks cannot block persistence. */ }
+      for (const record of pending) {
+        this.existingKeys.add(qqMusicCommentKey(record.songId, record.commentId));
+        try { this.onAppend?.(record); } catch { /* Presentation callbacks cannot block persistence. */ }
+      }
+      added = pending;
     });
     this.appendTail = write.catch(() => {});
     await write;

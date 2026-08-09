@@ -26,6 +26,11 @@ interface GovernorRuntime {
   random: () => number;
 }
 
+export type RequestStartScheduler = <T>(
+  beforeStart: () => Promise<void>,
+  request: () => Promise<T>,
+) => Promise<T>;
+
 const defaultRuntime: GovernorRuntime = {
   now: () => Date.now(),
   sleep: (milliseconds) =>
@@ -59,26 +64,40 @@ export class RequestGovernor {
     return this.executeWithPolicy(label, request, true);
   }
 
+  /** Coordinates the lane clock with a task-wide start scheduler at the actual request boundary. */
+  async executeScheduled<T>(label: string, scheduler: RequestStartScheduler, request: () => Promise<T>): Promise<T> {
+    return this.executeWithPolicy(label, request, true, scheduler);
+  }
+
   /** Runs optional work through the same spacing/budget/cancellation path without latching its cooldown onto later required work. */
   async executeBestEffort<T>(label: string, request: () => Promise<T>): Promise<T> {
     return this.executeWithPolicy(label, request, false);
+  }
+
+  async executeBestEffortScheduled<T>(label: string, scheduler: RequestStartScheduler, request: () => Promise<T>): Promise<T> {
+    return this.executeWithPolicy(label, request, false, scheduler);
   }
 
   private async executeWithPolicy<T>(
     label: string,
     request: () => Promise<T>,
     latchCooldown: boolean,
+    scheduler?: RequestStartScheduler,
   ): Promise<T> {
     let retry = 0;
     while (true) {
       this.throwIfUnavailable();
-      await this.reserveSlot();
-
       try {
+        if (scheduler) return await scheduler(() => this.reserveSlot(), request);
+        await this.reserveSlot();
         return await request();
       } catch (error) {
         if (error instanceof RunCancelled) throw error;
         if (error instanceof AuthenticationRequired) throw error;
+        // These can originate in reserveSlot()/throwIfUnavailable(). They are
+        // control-flow signals for the scanner, not failed remote requests.
+        if (error instanceof RequestBudgetExhausted) throw error;
+        if (error instanceof CooldownRequired) throw error;
         const status = errorStatus(error);
         if (status === 301 && (this.options.platformPolicy ?? "netease") === "netease") {
           throw new AuthenticationRequired();

@@ -171,3 +171,17 @@ test("QQ benchmark total duration includes control checkpoint IO", () => {
     (1 + withCheckpointIo.controlCheckpointWrites) * 20,
   );
 });
+
+test("QQ song benchmark models the same bounded four-page checkpoint policy as the scanner", () => {
+  const result = modelQQMusicBenchmark({
+    ...base,
+    mode: "song",
+    lanes: 4,
+    pageSize: 25,
+    checkpointIntervalMs: 400,
+    checkpointPageCap: 4,
+    averageCheckpointBatchPages: 4,
+  });
+  assert.equal(result.pageCheckpointWrites, Math.ceil(result.pages / 4));
+  assert.equal(result.checkpointWrites, result.pageCheckpointWrites + result.controlCheckpointWrites);
+});

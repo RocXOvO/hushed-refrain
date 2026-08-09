@@ -23,6 +23,7 @@ export type DesktopResultExportProgressStage =
 
 export interface DesktopResultExportProgress {
   stage: DesktopResultExportProgressStage;
+  elapsedMs: number;
 }
 
 export type DesktopResultExportResult =
@@ -95,10 +96,14 @@ export async function runDesktopResultExport(
   request: DesktopResultExportRequest,
   runtime: DesktopResultExportRuntime,
 ): Promise<DesktopResultExportResult> {
-  runtime.onProgress?.({ stage: "save-dialog" });
+  const startedAt = Date.now();
+  const progress = (stage: DesktopResultExportProgressStage): void => {
+    runtime.onProgress?.({ stage, elapsedMs: Math.max(0, Date.now() - startedAt) });
+  };
+  progress("save-dialog");
   const destination = await runtime.chooseDestination();
   if (!destination) {
-    runtime.onProgress?.({ stage: "cancelled" });
+    progress("cancelled");
     return { status: "cancelled" };
   }
 
@@ -107,11 +112,11 @@ export async function runDesktopResultExport(
   try {
     runtime.signal?.throwIfAborted();
     session = runtime.createSession();
-    runtime.onProgress?.({ stage });
+    progress(stage);
     await bounded(session.load(runtime.reportUrl), timeoutFor(runtime, stage), stage, undefined, runtime.signal);
 
     stage = "fonts";
-    runtime.onProgress?.({ stage });
+    progress(stage);
     const readyReport = await bounded(
       session.waitForReadyReport(),
       timeoutFor(runtime, stage),
@@ -127,14 +132,14 @@ export async function runDesktopResultExport(
     }
 
     stage = "print";
-    runtime.onProgress?.({ stage });
+    progress(stage);
     const pdf = await bounded(session.print(), timeoutFor(runtime, stage), stage, undefined, runtime.signal);
     if (pdf.length < 5 || pdf.subarray(0, 5).toString("ascii") !== "%PDF-") {
       throw new DesktopResultExportError("print", "invalid-pdf");
     }
 
     stage = "write";
-    runtime.onProgress?.({ stage });
+    progress(stage);
     const writeAbort = new AbortController();
     await bounded(
       runtime.write(destination, pdf, writeAbort.signal),
@@ -144,14 +149,14 @@ export async function runDesktopResultExport(
       runtime.signal,
       () => writeAbort.abort(runtime.signal?.reason),
     );
-    runtime.onProgress?.({ stage: "saved" });
+    progress("saved");
     return { status: "saved", path: destination };
   } catch (error) {
     if (runtime.signal?.aborted) {
-      runtime.onProgress?.({ stage: "cancelled" });
+      progress("cancelled");
       return { status: "cancelled" };
     }
-    runtime.onProgress?.({ stage: "failed" });
+    progress("failed");
     if (error instanceof DesktopResultExportError) throw error;
     throw new DesktopResultExportError(stage, "failed", error);
   } finally {

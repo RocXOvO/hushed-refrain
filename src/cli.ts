@@ -19,7 +19,7 @@ import {
   type ParallelCommentLane,
 } from "./parallel-scanner";
 import { runCommentFinder } from "./scanner";
-import { SOURCE_CATALOG_VERSION } from "./state";
+import { migrateLegacyWeekState, SOURCE_CATALOG_VERSION } from "./state";
 import type { ScanOptions, SourceSelection, Strategy } from "./types";
 
 const help = `
@@ -27,15 +27,15 @@ ncm-comments - 乐评寻踪·网易云评论检索 CLI
 
 Commands:
   auth-qr             Log in with a QR code and save the session cookie
-  scan --uid UID      Find comments by UID through listening records or liked songs
+  scan --uid UID      Find comments by UID through rankings, liked songs, or user playlists
   scan-song            Scan one song with parallel time shards and match a UID
   proxy-pool           Start, inspect, or stop a verified Mihomo egress pool
   web                  Start the local browser dashboard
 
 Scan options:
   --strategy auto|scan|history       default: auto
-  --source record|likes|both         default: both
-  --record-scope all|week            default: all
+  --source record|likes|playlists|both|all  default: both
+  --record-scope all|week|both       default: all
   --cookie-file PATH                 default: .ncm/cookie.txt
   --output PATH                      default: data/comments-UID-target-v3.jsonl
   --state PATH                       default: data/state-UID-SOURCE-target-v3.json
@@ -372,9 +372,9 @@ async function scanCommand(args: string[]): Promise<void> {
 
   const uid = parsed.values.uid?.trim();
   if (!uid || !/^\d+$/.test(uid)) throw new Error("--uid must be a numeric user ID.");
-  const source = oneOf(parsed.values.source, ["record", "likes", "both"] as const, "source");
+  const source = oneOf(parsed.values.source, ["record", "likes", "playlists", "both", "all"] as const, "source");
   const strategy = oneOf(parsed.values.strategy, ["auto", "scan", "history"] as const, "strategy");
-  const recordScope = oneOf(parsed.values["record-scope"], ["all", "week"] as const, "record-scope");
+  const recordScope = oneOf(parsed.values["record-scope"], ["all", "week", "both"] as const, "record-scope");
   const cookiePath = resolve(parsed.values["cookie-file"]!);
   const cookie = await readCookie(cookiePath);
 
@@ -384,7 +384,7 @@ async function scanCommand(args: string[]): Promise<void> {
     source: source as SourceSelection,
     recordScope,
     cookie,
-    statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}-target-v${SOURCE_CATALOG_VERSION}.json`),
+    statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}${(source === "record" || source === "both" || source === "all") && recordScope !== "all" ? `-record-${recordScope}` : ""}-target-v${SOURCE_CATALOG_VERSION}.json`),
     outputPath: resolve(parsed.values.output ?? `data/comments-${uid}-target-v${SOURCE_CATALOG_VERSION}.jsonl`),
     coveragePath: resolve(parsed.values.coverage ?? `data/song-coverage-${uid}-target-v${SOURCE_CATALOG_VERSION}.json`),
     commentPageSize: integer(parsed.values["comment-page-size"], "comment-page-size", 1, 2_000),
@@ -395,6 +395,11 @@ async function scanCommand(args: string[]): Promise<void> {
     fresh: parsed.values.fresh!,
     dryRun: parsed.values["dry-run"]!,
   };
+  if (!parsed.values.state && (source === "record" || source === "both")) {
+    const legacyPath = resolve(`data/state-${uid}-${source}-target-v${SOURCE_CATALOG_VERSION}.json`);
+    const scopedPath = resolve(`data/state-${uid}-${source}-record-week-target-v${SOURCE_CATALOG_VERSION}.json`);
+    await migrateLegacyWeekState(legacyPath, scopedPath, uid, source);
+  }
 
   const governor = new RequestGovernor({
     requestBudget: integer(parsed.values["request-budget"], "request-budget", 1),

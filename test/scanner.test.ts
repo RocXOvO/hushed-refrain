@@ -131,6 +131,48 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(state.songProgress[0].totalComments, 3);
 });
 
+test("combines all-time and weekly ranks with likes and user playlists without rescanning duplicate songs", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-all-sources-"));
+  const client = new FakeClient();
+  const recordScopes: string[] = [];
+  client.getUserRecord = async (_uid, scope) => {
+    recordScopes.push(scope);
+    return scope === "all"
+      ? [{ id: "1", name: "one", sources: ["record"] }, { id: "2", sources: ["record"] }]
+      : [{ id: "2", name: "two", sources: ["record-week"] }, { id: "3", sources: ["record-week"] }];
+  };
+  client.getLikedSongs = async () => [{ id: "3", sources: ["likes"] }, { id: "4", sources: ["likes"] }];
+  client.getTargetUserPlaylistPage = async (_uid, offset) => offset === 0
+    ? { playlists: [{ id: "80", name: "public", trackCount: 2 }], more: false, nextOffset: 1 }
+    : { playlists: [], more: false, nextOffset: offset };
+  client.getTargetUserPlaylistSongs = async () => [
+    { id: "4", sources: ["playlists"] },
+    { id: "5", sources: ["playlists"] },
+  ];
+  const config = await options(directory);
+  config.source = "all";
+  config.recordScope = "both";
+  config.dryRun = true;
+
+  const report = await runCommentFinder(client, governor(30), config);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(report.songs, 5);
+  assert.deepEqual(recordScopes, ["all", "week"]);
+  assert.deepEqual(state.songs.map((song: SongCandidate) => ({ id: song.id, sources: song.sources })), [
+    { id: "1", sources: ["record"] },
+    { id: "2", sources: ["record", "record-week"] },
+    { id: "3", sources: ["record-week", "likes"] },
+    { id: "4", sources: ["likes", "playlists"] },
+    { id: "5", sources: ["playlists"] },
+  ]);
+  assert.deepEqual(
+    state.songs.find((song: SongCandidate) => song.id === "4").memberships.map((item: { source: string }) => item.source),
+    ["likes", "playlists"],
+  );
+});
+
 test("a fresh source checkpoint counts a rediscovered JSONL match without appending it again", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-existing-output-"));
   const client = new FakeClient();

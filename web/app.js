@@ -9,8 +9,8 @@ const el = {
   qqLikesUserLookup: $("#qqLikesUserLookupButton"), qqLikesUserPreview: $("#qqLikesUserPreview"), qqLikesUserAvatar: $("#qqLikesUserAvatar"), qqLikesUserNickname: $("#qqLikesUserNickname"), qqLikesUserMeta: $("#qqLikesUserMeta"),
   qqSongId: $("#qqSongId"), qqSongQuery: $("#qqSongQuery"), qqSongResults: $("#qqSongResults"), qqSongPreview: $("#qqSongPreview"), qqSongLookup: $("#qqSongLookupButton"),
   songId: $("#songId"), songQuery: $("#neteaseSongQuery"), songResults: $("#neteaseSongResults"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
-  userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
-  poolStatus: $("#poolStatus"), poolState: $("#poolStateIndicator"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"),
+  userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"), playlistsProbe: $("#playlistsProbe"),
+  poolStatus: $("#poolStatus"), poolState: $("#poolStateIndicator"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"), poolBuildNotice: $("#poolBuildNotice"), poolBuildNoticeTitle: $("#poolBuildNoticeTitle"), poolBuildNoticeDetail: $("#poolBuildNoticeDetail"),
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), qqSongStart: $("#qqSongStartButton"), qqLikesStart: $("#qqLikesStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
   taskTitle: $("#taskTitle"), status: $("#statusMetric"), progressLabel: $("#progressLabel"), progress: $("#progressMetric"), workLabel: $("#workLabel"), work: $("#workMetric"),
@@ -60,6 +60,7 @@ let neteaseAuthCookiePresent = false;
 let clashConfigSignature = "";
 let clashConfigSelection;
 let poolEntriesSignature = "";
+let poolBuildNoticeSignature = "";
 let renderedJobSignature = "";
 let logsSignature = "";
 let logsRefreshInFlight;
@@ -889,7 +890,10 @@ async function lookupUser() {
       ? `代理池 ${result.routeName || "节点"}${Number(result.routeAttempts) > 1 ? `（第 ${fmt(result.routeAttempts)} 个出口成功）` : ""}`
       : result.route === "explicit-proxy" ? "手动代理" : "本机直连";
     el.userMeta.textContent = [`UID ${result.profile.userId}`, result.profile.level === undefined ? null : `Lv.${result.profile.level}`, probeRoute, `${fmt(result.elapsedMs)}ms`].filter(Boolean).join(" · ");
-    probe(el.recordProbe, "听歌排行", result.record); probe(el.likesProbe, "喜欢歌曲", result.likes); el.userPreview.hidden = false;
+    probe(el.recordProbe, "听歌排行", result.record);
+    probe(el.likesProbe, "喜欢歌曲", result.likes);
+    probe(el.playlistsProbe, "用户歌单", result.playlists, true);
+    el.userPreview.hidden = false;
   } catch (error) { el.userPreview.hidden = true; toast(error.message); } finally { el.lookup.disabled = false; }
 }
 
@@ -915,10 +919,10 @@ function loadNeteaseUserProbe(uid) {
   return pending;
 }
 
-function probe(target, label, value) {
+function probe(target, label, value, playlistCount = false) {
   target.className = value.status;
   target.textContent = value.status === "available"
-    ? `${label} ${fmt(value.songs)}`
+    ? playlistCount ? `${label} ${fmt(value.playlists)}${value.complete === false ? "+" : ""} 个 · ${fmt(value.songs)}${value.complete === false ? "+" : ""} 首` : `${label} ${fmt(value.songs)}`
     : `${label} ${value.status === "private" ? "已开启隐私" : value.status === "cooldown" ? "冷却" : "暂时无法确认"}`;
 }
 
@@ -1666,6 +1670,23 @@ function renderPoolState(pool) {
   }
   el.poolState.className = `pool-state-indicator ${state}`;
   el.poolStatus.textContent = text;
+  syncPoolBuildNotice(pool);
+}
+
+function syncPoolBuildNotice(pool) {
+  const building = pool.status === "starting";
+  const refreshing = pool.status === "running" && Boolean(pool.refreshing);
+  const inspectorCollapsed = document.body.classList.contains("inspector-collapsed");
+  const visible = inspectorCollapsed && (building || refreshing);
+  const signature = visible ? (building ? "building" : "refreshing") : "hidden";
+  if (signature === poolBuildNoticeSignature) return;
+  poolBuildNoticeSignature = signature;
+  el.poolBuildNotice.hidden = !visible;
+  if (!visible) return;
+  el.poolBuildNoticeTitle.textContent = building ? "正在构建 IP 池" : "正在重新检测 IP 池";
+  el.poolBuildNoticeDetail.textContent = building
+    ? "正在测速、验证出口并选择最优节点"
+    : "旧节点仍在服务，新一轮复测完成后会自动接管";
 }
 
 function renderPoolEntries(entries, status) {
@@ -2021,7 +2042,14 @@ function showPdfExportProgress(stage) {
   if (!resultExportStartedAt) resultExportStartedAt = Date.now();
   el.pdfExportStage.textContent = label;
   el.cancelPdfExport.disabled = stage === "saved" || stage === "cancelled" || stage === "failed";
-  if (!el.pdfExportDialog.open) el.pdfExportDialog.showModal();
+  if (!el.pdfExportDialog.open) {
+    try {
+      el.pdfExportDialog.showModal();
+    } catch {
+      try { el.pdfExportDialog.show(); }
+      catch { /* Export continues; the button and toast remain available. */ }
+    }
+  }
   clearInterval(resultExportElapsedTimer);
   const renderElapsed = () => {
     el.pdfExportElapsed.textContent = `已用时 ${Math.max(0, Math.floor((Date.now() - resultExportStartedAt) / 1000))} 秒`;
@@ -2696,7 +2724,7 @@ async function restoreResumeTask() {
     $("#qqSongFresh").checked = false;
     $("#qqLikesFresh").checked = false;
     const source = el.sourceForm.elements.namedItem("source")?.value;
-    $("#recordScopeField").hidden = source === "likes";
+    $("#recordScopeField").hidden = source === "likes" || source === "playlists";
     const adjustments = Array.isArray(restored.adjustments) ? restored.adjustments : [];
     const messages = [];
     if (adjustments.includes("netease-request-spacing-per-start-v1")) {
@@ -3481,6 +3509,7 @@ function setInspectorCollapsed(collapsed) {
   el.inspectorToggle.title = collapsed ? "展开运行详情" : "收起运行详情";
   el.inspectorToggle.setAttribute("aria-expanded", String(!collapsed));
   $('[data-nav-view="pool"]')?.setAttribute("aria-expanded", String(!collapsed));
+  syncPoolBuildNotice({ status: poolStatus, refreshing: poolRefreshing });
 }
 function syncInspectorForViewport(event = inspectorOverlayQuery) {
   if (event.matches) setInspectorCollapsed(true);
@@ -3495,7 +3524,7 @@ function setBusy(value) {
   el.toolbarStart.setAttribute("aria-busy", String(value));
   syncTaskStartAvailability();
 }
-function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", both: "两者" }[value] || value || "-"; }
+function sourceName(value) { return { record: "听歌排行", likes: "喜欢歌曲", playlists: "用户歌单", both: "排行 + 喜欢", all: "全部来源" }[value] || value || "-"; }
 function fmt(value) { return Number(value || 0).toLocaleString("zh-CN"); }
 function finiteNumber(value) { const number = Number(value); return Number.isFinite(number) ? number : undefined; }
 function formatRate(value) {
@@ -3570,6 +3599,11 @@ el.taskPanelOpen.addEventListener("click", () => {
 });
 el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(true));
 el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
+el.poolBuildNotice.addEventListener("click", () => {
+  setActiveNavigation("pool");
+  setTaskPanelCollapsed(true);
+  setInspectorCollapsed(false);
+});
 el.globalSettingsButton.addEventListener("click", () => void openGlobalSettings());
 $("#closeGlobalSettingsButton").addEventListener("click", () => el.globalSettingsDialog.close());
 $("#cancelGlobalSettingsButton").addEventListener("click", () => el.globalSettingsDialog.close());
@@ -3650,7 +3684,7 @@ $$('[data-platform-target]').forEach((item) => {
   });
 });
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
-$$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && input.value === "likes"; }));
+$$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && ["likes", "playlists"].includes(input.value); }));
 $$('.tab').forEach((tab) => {
   tab.addEventListener("click", () => void activateTaskTab(tab));
   tab.addEventListener("keydown", (event) => {

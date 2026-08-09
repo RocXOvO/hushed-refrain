@@ -238,7 +238,12 @@ function resultTable(rows: string, continued: boolean): string {
 }
 
 function sourceLabel(source: SourceSelection | undefined): string {
-  return source === "record" ? "听歌排行" : source === "likes" ? "喜欢歌曲" : source === "both" ? "听歌排行 + 喜欢歌曲" : "当前用户来源";
+  return source === "record" ? "听歌排行"
+    : source === "likes" ? "喜欢歌曲"
+    : source === "playlists" ? "用户歌单"
+    : source === "both" ? "听歌排行 + 喜欢歌曲"
+    : source === "all" ? "全部用户来源"
+    : "当前用户来源";
 }
 
 function statusLabel(status: string): string {

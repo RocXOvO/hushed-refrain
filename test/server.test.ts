@@ -7,9 +7,11 @@ import { test } from "node:test";
 import upstream = require("@neteasecloudmusicapienhanced/api");
 import { RunCancelled } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
+import { loadState } from "../src/state";
 import { encodeClassicEncryptUin } from "../src/qq-music/classic-encrypt-uin";
 import {
   isLoopbackAddress,
+  migrateLegacyWeekSourceState,
   NcmSongSearchRouter,
   normalizeResumeTaskForClient,
   probeNeteaseIdentityDirect,
@@ -288,6 +290,7 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
           profile: { userId: uid, nickname: "synthetic-netease-user" },
           record: { status: "available", songs: 1 },
           likes: { status: "available", songs: 2 },
+          playlists: { status: "available", songs: 3, playlists: 1 },
           sessionPresent: false,
           elapsedMs: 4,
           route: "direct",
@@ -642,13 +645,111 @@ test("uses target-v3 per-source checkpoints with one canonical UID result and co
   assert.match(record.coveragePath, /web-song-coverage-42-target-v3\.json$/);
   const likes = sourceTaskPaths("/data", "42", "likes");
   const both = sourceTaskPaths("/data", "42", "both");
+  const playlists = sourceTaskPaths("/data", "42", "playlists");
+  const allRanges = sourceTaskPaths("/data", "42", "record", "both");
   assert.match(likes.statePath, /web-state-42-likes-target-v3\.json$/);
   assert.match(both.statePath, /web-state-42-both-target-v3\.json$/);
+  assert.match(playlists.statePath, /web-state-42-playlists-target-v3\.json$/);
+  assert.match(allRanges.statePath, /web-state-42-record-record-both-target-v3\.json$/);
   assert.equal(likes.outputPath, record.outputPath);
   assert.equal(both.outputPath, record.outputPath);
   assert.equal(likes.coveragePath, record.coveragePath);
   assert.doesNotMatch(record.statePath, /web-state-42-record\.json$/);
   assert.doesNotMatch(likes.outputPath, /target-v2/);
+});
+
+test("migrates only an exactly matching legacy weekly source checkpoint", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-week-state-migration-"));
+  const legacyPath = sourceTaskPaths(root, "42", "record", "all").statePath;
+  const scopedPath = sourceTaskPaths(root, "42", "record", "week").statePath;
+  await mkdir(join(legacyPath, ".."), { recursive: true });
+  await writeFile(legacyPath, `${JSON.stringify({
+    version: 3,
+    uid: "42",
+    source: "record",
+    recordScope: "week",
+    strategy: "scan",
+    strategyResolved: true,
+    sourcesLoaded: true,
+    songs: [{ id: "7", sources: ["record-week"] }],
+    sourceSongCount: 1,
+    sourceTruncated: false,
+    sourceErrors: [],
+    songIndex: 0,
+    commentOffset: 0,
+    pageInSong: 0,
+    historyTime: 0,
+    seenCommentIds: [],
+    matchCount: 0,
+    requestCount: 1,
+    truncatedSongIds: [],
+    finished: false,
+    coverageComplete: false,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-01T00:00:00.000Z",
+  })}\n`, "utf8");
+  assert.equal(await migrateLegacyWeekSourceState(root, "42", "record"), true);
+  assert.equal(JSON.parse(await readFile(scopedPath, "utf8")).recordScope, "week");
+  await assert.rejects(readFile(legacyPath, "utf8"), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  assert.equal(await migrateLegacyWeekSourceState(root, "42", "record"), false);
+
+  const allTimePath = sourceTaskPaths(root, "42", "record", "all").statePath;
+  assert.equal(allTimePath, legacyPath);
+  await writeFile(allTimePath, `${JSON.stringify({
+    ...JSON.parse(await readFile(scopedPath, "utf8")),
+    recordScope: "all",
+    updatedAt: "2026-08-02T00:00:00.000Z",
+  })}\n`, "utf8");
+  assert.equal((await loadState(allTimePath))?.recordScope, "all");
+});
+
+test("weekly checkpoint migration is concurrent, idempotent, and never overwrites its scoped authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-week-state-concurrent-"));
+  const legacyPath = sourceTaskPaths(root, "42", "both", "all").statePath;
+  const scopedPath = sourceTaskPaths(root, "42", "both", "week").statePath;
+  const state = {
+    version: 3,
+    uid: "42",
+    source: "both",
+    recordScope: "week",
+    strategy: "scan",
+    sourcesLoaded: true,
+    songs: [{ id: "legacy", sources: ["record-week"] }],
+    songProgress: [{ commentOffset: 0, pageInSong: 0, done: false }],
+    sourceSongCount: 1,
+    sourceTruncated: false,
+    sourceErrors: [],
+    songIndex: 0,
+    commentOffset: 0,
+    pageInSong: 0,
+    historyTime: 0,
+    seenCommentIds: [],
+    matchCount: 0,
+    requestCount: 0,
+    pagesProcessed: 0,
+    truncatedSongIds: [],
+    finished: false,
+    coverageComplete: false,
+    createdAt: "2026-08-01T00:00:00.000Z",
+    updatedAt: "2026-08-03T00:00:00.000Z",
+  };
+  await mkdir(join(legacyPath, ".."), { recursive: true });
+  await writeFile(legacyPath, `${JSON.stringify(state)}\n`, "utf8");
+  await writeFile(scopedPath, `${JSON.stringify({
+    ...state,
+    songs: [{ id: "scoped", sources: ["record-week"] }],
+    updatedAt: "2026-08-02T00:00:00.000Z",
+  })}\n`, "utf8");
+
+  const migrated = await Promise.all([
+    migrateLegacyWeekSourceState(root, "42", "both"),
+    migrateLegacyWeekSourceState(root, "42", "both"),
+  ]);
+  assert.deepEqual([...migrated].sort(), [false, true]);
+  assert.equal((await loadState(scopedPath))?.songs[0].id, "scoped");
+  await assert.rejects(readFile(legacyPath, "utf8"), (error: NodeJS.ErrnoException) => error.code === "ENOENT");
+  assert.equal(await migrateLegacyWeekSourceState(root, "42", "both"), false);
+  assert.equal(await loadState(sourceTaskPaths(root, "42", "both", "both").statePath), undefined);
 });
 
 test("dashboard serves UI assets and estimate API", async (context) => {
@@ -694,10 +795,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=59/);
+  assert.match(pageText, /styles\.css\?v=60/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /pointer-silk-trail\.js\?v=1/);
-  assert.match(pageText, /app\.js\?v=70/);
+  assert.match(pageText, /pointer-silk-trail\.js\?v=2/);
+  assert.match(pageText, /app\.js\?v=71/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
@@ -1061,7 +1162,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.doesNotMatch(styleText, /body\.platform-switching[\s\S]{0,180}task-command-bar\s*\{\s*pointer-events:\s*none/s);
   assert.match(styleText, /body\.platform-switching \.platform-surface[\s\S]*animation-play-state:\s*paused !important;[\s\S]*transition:\s*none !important;/s);
   assert.doesNotMatch(styleText, /body\.platform-switching > :not\(\.platform-transition-canvas\)/);
-  assert.match(styleText, /body\.platform-switching dialog\[open\],[\s\S]*body\.platform-switching \.toast\s*\{[\s\S]*animation:\s*none !important;/s);
+  assert.match(styleText, /body\.platform-switching dialog\[open\],[\s\S]*body\.platform-switching \.toast,[\s\S]*body\.platform-switching \.pool-build-notice\s*\{[\s\S]*animation:\s*none !important;/s);
   assert.match(appText, /async function playMotion[\s\S]{0,180}classList\.contains\("platform-switching"\)/);
   assert.match(appText, /async function animateDisclosure[\s\S]{0,900}classList\.contains\("platform-switching"\)/);
   assert.match(styleText, /\.navigation-rail\s*\{[^}]*overflow-y:\s*auto/s);
@@ -1221,6 +1322,7 @@ test("rotates UID lookups across the managed pool and fails over to another exit
     profile: { userId: uid, nickname: `user-${uid}` },
     record: { status: "available", songs: 1 },
     likes: { status: "available", songs: 2 },
+    playlists: { status: "available", songs: 3, playlists: 1 },
     sessionPresent: false,
     elapsedMs: 10,
     route: "direct",
@@ -1327,6 +1429,7 @@ test("NetEase ordinary user probes can bypass a running pool for a normal direct
         profile: { userId: uid, nickname: "direct-user" },
         record: { status: "available", songs: 1 },
         likes: { status: "available", songs: 2 },
+        playlists: { status: "available", songs: 3, playlists: 1 },
         sessionPresent: false,
         elapsedMs: 3,
         route: "direct",
@@ -1366,8 +1469,10 @@ test("starts NetEase profile, record, and liked-source probes concurrently", asy
   });
   mutable.user_detail = () => wait("profile", { code: 200, profile: { userId: 42, nickname: "user" } });
   mutable.user_record = () => wait("record", { code: 200, allData: [] });
-  mutable.user_playlist = () => wait("likes-list", {
+  let playlistRequest = 0;
+  mutable.user_playlist = () => wait(`playlist-list-${++playlistRequest}`, {
     code: 200,
+    more: false,
     playlist: [{ id: 9, specialType: 5, trackCount: 0, creator: { userId: 42 } }],
   });
   mutable.playlist_detail = async () => ({
@@ -1390,6 +1495,7 @@ test("starts NetEase profile, record, and liked-source probes concurrently", asy
     assert.equal(result.profile.nickname, "user");
     assert.equal(result.record.status, "available");
     assert.equal(result.likes.status, "available");
+    assert.equal(result.playlists.status, "available");
   } finally {
     mutable.user_detail = originals.user_detail;
     mutable.user_record = originals.user_record;
@@ -1420,6 +1526,7 @@ test("reports liked songs available when explicit IDs are newer than declared co
     status: 200,
     body: {
       code: 200,
+      more: false,
       playlist: [{ id: 9, specialType: 5, trackCount: 1105, creator: { userId: 42 } }],
     },
   });
@@ -1462,7 +1569,7 @@ test("reports a hidden NetEase liked playlist as privacy rather than cooldown", 
     body: { code: 200, profile: { userId: 42, nickname: "private-user" } },
   });
   mutable.user_record = async () => ({ status: 200, body: { code: 200, allData: [] } });
-  mutable.user_playlist = async () => ({ status: 200, body: { code: 200, playlist: [] } });
+  mutable.user_playlist = async () => ({ status: 200, body: { code: 200, more: false, playlist: [] } });
 
   try {
     const result = await probeUser("42", undefined, join(tmpdir(), "missing-private-ncm-cookie"));

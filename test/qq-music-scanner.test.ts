@@ -75,7 +75,7 @@ test("single-song QQ scan follows SeqNo pages and writes exact EncryptUin matche
   assert.equal(checkpoints.at(-1)?.coverageComplete, true);
   assert.deepEqual(
     [...new Set(checkpoints.map((activity) => activity.pagesProcessed))],
-    [0, 1, 2],
+    [0, 2],
   );
   assert.equal("songs" in (checkpoints.at(-1) as unknown as Record<string, unknown>), true);
   assert.equal("targetEncryptUin" in (checkpoints.at(-1) as unknown as Record<string, unknown>), false);
@@ -415,14 +415,14 @@ test("a permanent QQ lane failure hands the unchanged non-empty cursor to the ne
   ]);
 });
 
-test("QQ resume validates the requested song before source discovery completes", async () => {
+test("QQ resume validates the requested song after non-blocking source discovery", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-requested-song-"));
   const options = { ...scanOptions(directory), target: "123456" };
   const client = fakeClient({ comments: async () => ({ comments: [], hasMore: false }) });
   const first = await runQQMusicScan([lane(client, governor(1))], options);
   assert.equal(first.status, "paused");
   const state = await loadQQMusicScanState(options.statePath);
-  assert.equal(state?.sourceLoaded, false);
+  assert.equal(state?.sourceLoaded, true);
   assert.equal(state?.requestedSongId, "7");
 
   await assert.rejects(
@@ -606,17 +606,17 @@ test("QQ logical comment-page budget is task-wide instead of multiplying by Lane
   assert.match(result.note ?? "", /logical comment-page budget/i);
 });
 
-test("QQ song keeps requestedSongId authoritative over metadata response IDs", async () => {
+test("QQ song ignores cached metadata whose ID does not match requestedSongId", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-requested-song-authority-"));
   const requestedSongIds: string[] = [];
   const client = fakeClient({
-    songInfo: async () => ({ id: "999", mid: "metadata-mid", name: "metadata-name" }),
+    songInfo: async () => { throw new Error("scanner must not fetch optional song metadata"); },
     comments: async (songId) => {
       requestedSongIds.push(songId);
       return { comments: [], hasMore: false };
     },
   });
-  const options = scanOptions(directory);
+  const options = { ...scanOptions(directory), songMetadata: { id: "999", mid: "metadata-mid", name: "metadata-name" } };
 
   const result = await runQQMusicScan([lane(client, governor(0))], options);
   const state = await loadQQMusicScanState(options.statePath);
@@ -624,18 +624,19 @@ test("QQ song keeps requestedSongId authoritative over metadata response IDs", a
   assert.equal(result.status, "complete");
   assert.deepEqual(requestedSongIds, ["7"]);
   assert.equal(state?.songs[0].id, "7");
-  assert.equal(state?.songs[0].mid, "metadata-mid");
+  assert.equal(state?.songs[0].mid, undefined);
 });
 
-test("publishes resolved song metadata before the first comment page can cool down", async () => {
+test("publishes exact cached song metadata before the first comment page can cool down", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-song-metadata-progress-"));
   const activities: QQMusicSongActivity[] = [];
   const client = fakeClient({
-    songInfo: async (songId) => ({ id: songId, mid: "resolved-mid", name: "Resolved Song" }),
+    songInfo: async () => { throw new Error("scanner must not fetch optional song metadata"); },
     comments: async () => { throw { status: 429 }; },
   });
   const result = await runQQMusicScan([lane(client, governor(20))], {
     ...scanOptions(directory),
+    songMetadata: { id: "7", mid: "resolved-mid", name: "Resolved Song" },
     onSongProgress: (activity) => activities.push(activity),
   });
   assert.equal(result.status, "cooldown");
@@ -800,11 +801,11 @@ test("QQ likes flushes every four dirty pages without capping durable in-flight 
   assert.equal(state?.finished, true);
 });
 
-test("optional QQ song metadata cooldown does not poison the required comment lane", async () => {
+test("QQ song scanning never calls optional metadata before the required comment lane", async () => {
   const directory = await mkdtemp(join(tmpdir(), "qq-metadata-best-effort-"));
   let commentCalls = 0;
   const client = fakeClient({
-    songInfo: async () => { throw { status: 403 }; },
+    songInfo: async () => { throw new Error("optional metadata must stay outside the scanner"); },
     comments: async () => {
       commentCalls += 1;
       return { comments: [], hasMore: false };
@@ -1024,7 +1025,7 @@ test("QQ cooldown is persisted and blocks an immediate resumed request", async (
   assert.equal(second.status, "cooldown");
   assert.equal(second.requestsThisRun, 0);
   assert.equal(commentCalls, 1);
-  assert.equal(resumedActivities.some((activity) => activity.songName === "song-7"), true);
+  assert.equal(resumedActivities.some((activity) => activity.songId === "7" && activity.songName === undefined), true);
 });
 
 test("QQ cooldown wins over permanently unavailable lanes and remains resumable", async () => {

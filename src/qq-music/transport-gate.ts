@@ -98,9 +98,13 @@ export class QQMusicTransportGate {
   }
 
   async run<T>(request: () => Promise<T>): Promise<T> {
+    return this.runWithPacing(async () => {}, request);
+  }
+
+  async runWithPacing<T>(beforeStart: () => Promise<void>, request: () => Promise<T>): Promise<T> {
     await this.acquire();
     try {
-      await this.reserveStart();
+      await this.reserveStart(beforeStart);
       this.throwIfCancelled();
       return await request();
     } finally {
@@ -126,7 +130,7 @@ export class QQMusicTransportGate {
     next.resolve();
   }
 
-  private async reserveStart(): Promise<void> {
+  private async reserveStart(beforeStart: () => Promise<void>): Promise<void> {
     let release = (): void => {};
     const previous = this.startTail;
     this.startTail = new Promise<void>((resolve) => { release = resolve; });
@@ -137,6 +141,8 @@ export class QQMusicTransportGate {
         const waitMs = this.lastStartedAt + this.minStartDelayMs - this.runtime.now();
         if (waitMs > 0) await this.sleepOrStop(waitMs);
       }
+      this.throwIfCancelled();
+      await beforeStart();
       this.throwIfCancelled();
       this.lastStartedAt = this.runtime.now();
     } finally {

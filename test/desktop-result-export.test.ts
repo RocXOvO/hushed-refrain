@@ -45,6 +45,16 @@ test("desktop PDF export writes a validated PDF and closes the hidden session", 
   assert.deepEqual(progress, ["save-dialog", "load-report", "fonts", "print", "write", "saved"]);
 });
 
+test("desktop PDF export attaches monotonic elapsed time to every progress event", async () => {
+  const progress: Array<{ stage: string; elapsedMs: number }> = [];
+  await runDesktopResultExport(request, runtime({}, {
+    onProgress: (value) => progress.push(value),
+  }));
+  assert.deepEqual(progress.map((value) => value.stage), ["save-dialog", "load-report", "fonts", "print", "write", "saved"]);
+  assert.equal(progress.every((value) => Number.isInteger(value.elapsedMs) && value.elapsedMs >= 0), true);
+  assert.equal(progress.every((value, index) => index === 0 || value.elapsedMs >= progress[index - 1].elapsedMs), true);
+});
+
 test("desktop PDF export reports cancellation without creating a hidden session", async () => {
   let created = 0;
   const result = await runDesktopResultExport(request, runtime({}, {

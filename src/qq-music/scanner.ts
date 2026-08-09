@@ -261,20 +261,22 @@ export async function runQQMusicScan(
   };
 
   const checkpointCommentPage = async (): Promise<void> => {
-    if (options.mode === "song") {
-      await forceCheckpoint();
-      return;
-    }
     if (persistenceFailed) throw persistenceError!;
     const revision = ++checkpointRevision;
     dirtyPageCount += 1;
-    const waiting = waitForRevision(revision);
-    if (taskSignal.aborted || dirtyPageCount >= LIKES_CHECKPOINT_FLUSH_PAGE_CAP) {
+    const mustFlush = taskSignal.aborted || dirtyPageCount >= LIKES_CHECKPOINT_FLUSH_PAGE_CAP;
+    const waiting = options.mode === "likes" || mustFlush
+      ? waitForRevision(revision)
+      : undefined;
+    if (mustFlush) {
       void startFlush().catch(() => {});
     } else {
       scheduleFlush();
     }
-    await waiting;
+    // Likes Workers wait so the checkpoint-slot bound remains hard. A song is
+    // one serial SeqNo chain and may replay at most four already-durable JSONL
+    // pages after a crash, so it can continue until the same bounded flush.
+    if (waiting) await waiting;
   };
 
   const flushPendingCheckpoint = (): void => {
@@ -385,30 +387,6 @@ export async function runQQMusicScan(
     throw lastError ?? new Error("No QQ Music lane is available.");
   };
 
-  const executeBestEffortControl = async <T>(
-    label: string,
-    request: (lane: QQCommentLane) => Promise<T>,
-  ): Promise<T> => {
-    let lastError: unknown;
-    for (const runtime of runtimes) {
-      if (runtime.blocked) continue;
-      try {
-        await runtime.recovery.waitUntilReady();
-        if (runtime.lane.transportGate.isCancelled) throw new RunCancelled();
-        return await executeLane(runtime.lane, label, () => request(runtime.lane), true);
-      } catch (error) {
-        lastError = error;
-        if (isPermanentLaneError(error)) {
-          runtime.blocked = "unavailable";
-          continue;
-        }
-        if (error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
-        if (isDeterministicRequestError(error)) throw error;
-      }
-    }
-    throw lastError ?? new Error("No QQ Music lane is available for optional metadata.");
-  };
-
   try {
     if (migratedLegacyCommentPageSize) await forceCheckpoint();
     if (state?.finished) {
@@ -474,16 +452,7 @@ export async function runQQMusicScan(
     if (!state.sourceLoaded) {
       if (options.mode === "song") {
         const songId = options.songId!;
-        let metadata: QQMusicSong | undefined;
-        try {
-          metadata = await executeBestEffortControl(
-            `qq_song_detail:${songId}`,
-            (lane) => lane.client.getSongInfo(songId, lane.transportGate.signal),
-          );
-        } catch (error) {
-          if (error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
-          // Metadata is optional; the numeric song ID remains a usable scan target.
-        }
+        const metadata = options.songMetadata?.id === songId ? options.songMetadata : undefined;
         const song: QQMusicSong = {
           id: songId,
           mid: metadata?.mid,
@@ -662,10 +631,12 @@ export async function runQQMusicScan(
 
       let matchedThisPage = false;
       const newlySeenCommentKeys: string[] = [];
+      const pendingMatches: QQMusicFoundComment[] = [];
+      const pendingCommentKeys = new Set<string>();
       for (const comment of page.comments) {
         if (comment.authorEncryptUin !== state!.targetEncryptUin) continue;
         const key = qqMusicCommentKey(song.id, comment.commentId);
-        if (seenCommentKeys.has(key)) continue;
+        if (seenCommentKeys.has(key) || pendingCommentKeys.has(key)) continue;
         const found: QQMusicFoundComment = {
           ...comment,
           platform: "qq",
@@ -676,11 +647,21 @@ export async function runQQMusicScan(
           artists: song.artists,
           capturedAt: new Date().toISOString(),
         };
-        if (writer.has(song.id, comment.commentId) || await writer.append(found)) {
+        if (writer.has(song.id, comment.commentId)) {
           seenCommentKeys.add(key);
           newlySeenCommentKeys.push(key);
           matchedThisPage = true;
+        } else {
+          pendingCommentKeys.add(key);
+          pendingMatches.push(found);
         }
+      }
+      const appended = await writer.appendBatch(pendingMatches);
+      for (const found of appended) {
+        const key = qqMusicCommentKey(song.id, found.commentId);
+        seenCommentKeys.add(key);
+        newlySeenCommentKeys.push(key);
+        matchedThisPage = true;
       }
 
       // A durable JSONL row may legitimately lead the checkpoint after a stop.
@@ -937,9 +918,8 @@ function executeLane<T>(
   lane: QQCommentLane,
   label: string,
   request: () => Promise<T>,
-  bestEffort = false,
 ): Promise<T> {
-  const guardedRequest = () => lane.transportGate.run(async () => {
+  const guardedRequest = async () => {
     try {
       const result = await request();
       if (lane.transportGate.isCancelled) throw new RunCancelled();
@@ -948,10 +928,15 @@ function executeLane<T>(
       if (lane.transportGate.isCancelled) throw new RunCancelled();
       throw error;
     }
-  });
-  return bestEffort
-    ? lane.governor.executeBestEffort(label, guardedRequest)
-    : lane.governor.execute(label, guardedRequest);
+  };
+  const schedule = <U>(beforeStart: () => Promise<void>, attempt: () => Promise<U>) =>
+    lane.transportGate.runWithPacing
+      ? lane.transportGate.runWithPacing(beforeStart, attempt)
+      : lane.transportGate.run(async () => {
+        await beforeStart();
+        return attempt();
+      });
+  return lane.governor.executeScheduled(label, schedule, guardedRequest);
 }
 
 function checkpointActivity(state: QQMusicScanState): QQMusicCheckpointActivity {

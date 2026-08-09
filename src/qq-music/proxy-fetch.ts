@@ -93,6 +93,7 @@ function tunnelHttpsRequest(
   },
 ): Promise<Response> {
   return new Promise<Response>((resolve, reject) => {
+    const requestToken = agent.nextRequestToken();
     const signal = request.signal;
     if (signal?.aborted) {
       reject(abortError());
@@ -105,10 +106,11 @@ function tunnelHttpsRequest(
       if (settled) return;
       settled = true;
       cleanup();
+      agent.cancelPending(requestToken);
       upstreamRequest?.destroy();
-      // A failed or cancelled request invalidates the lane's pending tunnels.
-      // The reusable Agent can create fresh sockets on the next request.
-      agent.destroy();
+      // Only this request/socket is failed. Destroying the shared Agent here
+      // would also tear down unrelated healthy CONNECT tunnels on this lane.
+      // The lane owner closes the Agent when the lane itself is retired.
       reject(error);
     };
     const finishResolve = (response: Response): void => {
@@ -131,7 +133,8 @@ function tunnelHttpsRequest(
       headers: requestHeaders(request.headers, target, request.body),
       agent,
       rejectUnauthorized: options.targetRejectUnauthorized,
-    }, (incoming) => collectResponse(incoming).then(finishResolve, finishReject));
+      __qqRequestToken: requestToken,
+    } as https.RequestOptions, (incoming) => collectResponse(incoming).then(finishResolve, finishReject));
     upstreamRequest.once("error", finishReject);
     if (request.body) upstreamRequest.write(request.body);
     upstreamRequest.end();
@@ -139,7 +142,8 @@ function tunnelHttpsRequest(
 }
 
 class QQHttpsProxyAgent extends https.Agent {
-  private readonly pending = new Set<ReturnType<typeof http.request>>();
+  private readonly pending = new Map<number, ReturnType<typeof http.request>>();
+  private requestToken = 0;
 
   constructor(
     private readonly proxy: URL,
@@ -153,12 +157,22 @@ class QQHttpsProxyAgent extends https.Agent {
     super({ keepAlive: true, maxSockets: tunnelOptions.maxSockets });
   }
 
+  nextRequestToken(): number {
+    this.requestToken += 1;
+    return this.requestToken;
+  }
+
+  cancelPending(requestToken: number): void {
+    this.pending.get(requestToken)?.destroy(abortError());
+  }
+
   override createConnection(
     options: https.RequestOptions,
     callback?: (error: Error | null, stream: Duplex) => void,
   ): Duplex | undefined {
     if (!callback) throw new Error("QQ proxy tunnel requires an asynchronous connection callback.");
     const hostname = String(options.hostname ?? options.host ?? "");
+    const requestToken = Number((options as https.RequestOptions & { __qqRequestToken?: number }).__qqRequestToken);
     const port = typeof options.port === "number"
       ? options.port
       : numberPort(String(options.port ?? ""), 443);
@@ -168,7 +182,7 @@ class QQHttpsProxyAgent extends https.Agent {
     const finish = (error?: Error, stream?: TLSSocket): void => {
       if (settled) return;
       settled = true;
-      this.pending.delete(connectRequest);
+      if (Number.isInteger(requestToken)) this.pending.delete(requestToken);
       if (error) {
         tlsSocket?.destroy();
         proxySocket?.destroy();
@@ -185,7 +199,7 @@ class QQHttpsProxyAgent extends https.Agent {
       },
       rejectUnauthorized: this.tunnelOptions.proxyRejectUnauthorized,
     });
-    this.pending.add(connectRequest);
+    if (Number.isInteger(requestToken)) this.pending.set(requestToken, connectRequest);
     connectRequest.setTimeout(this.tunnelOptions.connectTimeoutMs, () => {
       const error = new QQMusicProxyError("QQ proxy CONNECT timed out.");
       connectRequest.destroy(error);
@@ -218,7 +232,7 @@ class QQHttpsProxyAgent extends https.Agent {
   }
 
   override destroy(): void {
-    for (const request of this.pending) request.destroy(abortError());
+    for (const request of this.pending.values()) request.destroy(abortError());
     this.pending.clear();
     super.destroy();
   }

@@ -49,6 +49,12 @@ function runtime(options: { reduced?: boolean; fine?: boolean; width?: number; h
       moveTo() {},
       quadraticCurveTo() {},
       lineTo() {},
+      ellipse() {},
+      save() {},
+      restore() {},
+      translate() {},
+      rotate() {},
+      scale() {},
       stroke() { if (main) mainDraws.push({ kind: "stroke", value: this.strokeStyle }); },
       drawImage() {
         if (options.drawThrows && main) throw new Error("synthetic draw failure");

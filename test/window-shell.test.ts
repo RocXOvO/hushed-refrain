@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
 import {
   DESKTOP_EXPORT_CHANNELS,
@@ -136,4 +138,11 @@ test("surfaces a bounded report API error instead of mislabeling it as a stale g
   assert.equal(desktopResultReportLoadError({ errorText: "not-json" }), undefined);
   assert.equal(desktopResultReportLoadError({ errorText: JSON.stringify({ error: "" }) }), undefined);
   assert.equal(desktopResultReportLoadError({ errorText: "x".repeat(4_097) }), undefined);
+});
+
+test("packaged PDF smoke traverses the renderer bridge and verifies every durable stage", () => {
+  const source = readFileSync(join(process.cwd(), "src", "electron-main.ts"), "utf8");
+  assert.match(source, /window\.ncmDesktop\.exportResultsPdf/);
+  assert.match(source, /\["save-dialog", "load-report", "fonts", "print", "write", "saved"\]/);
+  assert.match(source, /Packaged renderer-to-IPC PDF smoke/);
 });
