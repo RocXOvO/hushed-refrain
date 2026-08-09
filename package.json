@@ -1,6 +1,6 @@
 {
   "name": "ncm-comment-finder",
-  "version": "0.30.2",
+  "version": "0.30.3",
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Checkpointed NetEase Cloud Music and QQ Music comment finder",
@@ -117,8 +117,13 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "runAfterFinish": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
+      "include": "build/installer.nsh",
+      "installerLanguages": [
+        "zh_CN"
+      ],
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",

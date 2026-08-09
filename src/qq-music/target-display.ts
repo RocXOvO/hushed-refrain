@@ -44,6 +44,20 @@ export function describeQQMusicTarget(input: string): QQMusicTargetDisplay {
   }
 }
 
+/**
+ * Uses QQ's public avatar CDN only when the presentation identity is a
+ * concrete numeric QQ. Opaque EncryptUin values and WeChat identities must
+ * never be inserted into the QQ-number avatar route.
+ */
+export function qqMusicTargetAvatarUrl(display: QQMusicTargetDisplay): string | undefined {
+  if (display.kind !== "qq-number" || !/^\d{5,20}$/.test(display.profileLookup)) return undefined;
+  const url = new URL("https://q1.qlogo.cn/g");
+  url.searchParams.set("b", "qq");
+  url.searchParams.set("nk", display.profileLookup);
+  url.searchParams.set("s", "100");
+  return url.toString();
+}
+
 function numericDisplay(value: string): QQMusicTargetDisplay {
   return { kind: "qq-number", label: `QQ ${value}`, profileLookup: value };
 }

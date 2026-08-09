@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   DESKTOP_EXPORT_CHANNELS,
+  DESKTOP_SETTINGS_CHANNELS,
   desktopDashboardUrl,
   desktopResultReportIdentityMatches,
   desktopResultReportLoadError,
@@ -17,6 +18,14 @@ test("keeps PDF export and cancellation on explicit desktop bridge channels", ()
     cancelResultsPdf: "desktop-export:cancel-results-pdf",
     resultsPdf: "desktop-export:results-pdf",
     resultsPdfProgress: "desktop-export:results-pdf-progress",
+  });
+});
+
+test("keeps global desktop settings on explicit preload bridge channels", () => {
+  assert.deepEqual(DESKTOP_SETTINGS_CHANNELS, {
+    get: "desktop-settings:get",
+    reset: "desktop-settings:reset",
+    update: "desktop-settings:update",
   });
 });
 

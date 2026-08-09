@@ -11,6 +11,7 @@ import {
   isLoopbackAddress,
   NcmSongSearchRouter,
   normalizeResumeTaskForClient,
+  probeNeteaseIdentityDirect,
   probeNeteaseIdentityThroughLanes,
   sourceTaskPaths,
   startDashboard,
@@ -55,7 +56,31 @@ test("NetEase song-search router rotates verified pool exits", async () => {
   assert.deepEqual(proxies, entries.map((entry) => entry.endpoint));
 });
 
-test("NetEase live identity reuses active task proxy lanes without a direct fallback", async () => {
+test("NetEase auxiliary song lookup can bypass a running pool for a normal direct request", async () => {
+  const proxies: Array<string | undefined> = [];
+  let poolReads = 0;
+  const router = new NcmSongSearchRouter("unused", {
+    readPool: async () => {
+      poolReads += 1;
+      throw new Error("the direct path must not inspect the pool");
+    },
+    search: async (query, _limit, proxy) => {
+      proxies.push(proxy);
+      return [{ id: "7", name: query, artists: [] }];
+    },
+    lookup: async (songId, proxy) => {
+      proxies.push(proxy);
+      return { id: songId, name: "Song", artists: [] };
+    },
+  });
+
+  assert.equal((await router.run("direct search", 5, undefined, true)).songs[0].name, "direct search");
+  assert.equal((await router.lookup("7", undefined, true)).id, "7");
+  assert.deepEqual(proxies, [undefined, undefined]);
+  assert.equal(poolReads, 0);
+});
+
+test("explicit NetEase lane identity probing remains fail-closed when used internally", async () => {
   const calls: string[] = [];
   const lane = (name: string, fail: boolean) => ({
     name,
@@ -86,6 +111,25 @@ test("NetEase live identity reuses active task proxy lanes without a direct fall
   assert.equal(result.route, "explicit-proxy");
   assert.equal(result.routeName, "manual-b");
   assert.equal(result.routeAttempts, 2);
+});
+
+test("NetEase Live Task identity is a presentation-only direct request", async () => {
+  const proxies: Array<string | undefined> = [];
+  const result = await probeNeteaseIdentityDirect("123456789", async (uid, proxy) => {
+    proxies.push(proxy);
+    return {
+      profile: { userId: uid, nickname: "direct-live-user" },
+      elapsedMs: 4,
+    };
+  });
+  assert.deepEqual(proxies, [undefined]);
+  assert.deepEqual(result, {
+    profile: { userId: "123456789", nickname: "direct-live-user" },
+    elapsedMs: 4,
+    route: "direct",
+    routeName: "本机直连",
+    routeAttempts: 1,
+  });
 });
 
 test("NetEase song-search router never falls back to direct while its pool is running", async () => {
@@ -189,12 +233,14 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
   const runtimeRoot = await mkdtemp(join(tmpdir(), "ncm-dashboard-song-search-"));
   const neteaseCalls: Array<{ query: string; limit: number; proxy?: string }> = [];
   const lookupCalls: string[] = [];
+  const qqClientProxies: Array<string | undefined> = [];
   const classicIdentifier = "123456789012";
   const classicEncryptUin = encodeClassicEncryptUin(classicIdentifier);
   const wechatInternalId = "1150000000000000472";
   const wechatEncryptUin = "oK6koenzoenzoenzoenzoevloc**";
   let publicProfileCalls = 0;
   let neteaseProfileCalls = 0;
+  const neteaseProbeProxies: Array<string | undefined> = [];
   const client: QQMusicPlatformClient = {
     searchSongs: async (query, limit) => [{
       id: "900719925474099312345",
@@ -228,8 +274,24 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
     host: "127.0.0.1",
     port: 0,
     runtimeRoot,
-    qqClientFactory: () => client,
+    qqClientFactory: (proxy) => {
+      qqClientProxies.push(proxy);
+      return client;
+    },
     userProbeRouter: {
+      readPool: async () => { throw new Error("ordinary probes must not inspect the pool"); },
+      probe: async (uid, proxy) => {
+        neteaseProbeProxies.push(proxy);
+        return {
+          profile: { userId: uid, nickname: "synthetic-netease-user" },
+          record: { status: "available", songs: 1 },
+          likes: { status: "available", songs: 2 },
+          sessionPresent: false,
+          elapsedMs: 4,
+          route: "direct",
+          routeAttempts: 1,
+        };
+      },
       profile: async (uid) => {
         neteaseProfileCalls += 1;
         return {
@@ -274,6 +336,11 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
   assert.deepEqual(await numericLookup.json(), { id: "7", name: "Numeric Song", artists: ["Artist"] });
   assert.deepEqual(lookupCalls, ["7"]);
 
+  const neteaseProbe = await fetch(`${base}/api/user?uid=123456789&proxy=http://127.0.0.1:19999`);
+  assert.equal(neteaseProbe.status, 200);
+  assert.equal((await neteaseProbe.json() as { route: string }).route, "direct");
+  assert.deepEqual(neteaseProbeProxies, [undefined]);
+
   const neteaseProfile = await fetch(`${base}/api/user/profile?uid=123456789`);
   assert.equal(neteaseProfile.status, 200);
   assert.deepEqual(await neteaseProfile.json(), {
@@ -297,7 +364,7 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
   assert.match((await staleTaskProfile.json()).error, /任务已经切换/);
   assert.equal(neteaseProfileCalls, 1);
 
-  const qq = await fetch(`${base}/api/qq/song/search?q=${encodeURIComponent("QQ 搜索")}&limit=3&allowDirect=1`);
+  const qq = await fetch(`${base}/api/qq/song/search?q=${encodeURIComponent("QQ 搜索")}&limit=3`);
   assert.equal(qq.status, 200);
   assert.deepEqual(await qq.json(), {
     platform: "qq",
@@ -309,6 +376,7 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
       artists: ["3"],
     }],
   });
+  assert.deepEqual(qqClientProxies, [undefined]);
 
   for (const [input, expected] of [
     [classicIdentifier, { kind: "qq-number", label: `QQ ${classicIdentifier}` }],
@@ -327,6 +395,50 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
     assert.deepEqual(await display.json(), expected);
   }
   assert.equal(publicProfileCalls, 0);
+
+  const qqProfile = await fetch(`${base}/api/qq/user`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target: classicEncryptUin, proxy: "http://127.0.0.1:18080" }),
+  });
+  assert.equal(qqProfile.status, 200);
+  const qqProfileBody = await qqProfile.json() as {
+    platform: string;
+    identity: Record<string, unknown>;
+    route: string;
+    routeName: string;
+    routeAttempts: number;
+    elapsedMs: number;
+  };
+  assert.deepEqual(qqProfileBody.identity, {
+    kind: "qq-number",
+    label: `QQ ${classicIdentifier}`,
+    nickname: "synthetic-qq-profile",
+    avatarUrl: `https://q1.qlogo.cn/g?b=qq&nk=${classicIdentifier}&s=100`,
+  });
+  assert.equal(qqProfileBody.platform, "qq");
+  assert.equal(qqProfileBody.route, "direct");
+  assert.equal(qqProfileBody.routeName, "本机直连");
+  assert.equal(qqProfileBody.routeAttempts, 1);
+  assert.equal(Number.isFinite(qqProfileBody.elapsedMs), true);
+  assert.deepEqual(qqClientProxies, [undefined, undefined]);
+  assert.equal(publicProfileCalls, 1);
+
+  const wechatProfile = await fetch(`${base}/api/qq/user`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ target: wechatEncryptUin }),
+  });
+  assert.equal(wechatProfile.status, 200);
+  assert.deepEqual(await wechatProfile.json(), {
+    platform: "qq",
+    identity: { kind: "wechat-user", label: "微信用户" },
+    route: "local",
+    routeName: "本地识别",
+    routeAttempts: 0,
+    elapsedMs: 0,
+  });
+  assert.equal(publicProfileCalls, 1);
 
   const decoded = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
     method: "POST",
@@ -359,7 +471,7 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
     identifier: wechatInternalId,
     maskedIdentifier: "115***472",
   });
-  assert.equal(publicProfileCalls, 0);
+  assert.equal(publicProfileCalls, 1);
 
   const decodedProfileUrl = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
     method: "POST",
@@ -370,7 +482,7 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
   });
   assert.equal(decodedProfileUrl.status, 200);
   assert.equal((await decodedProfileUrl.json() as { resolution: string }).resolution, "local");
-  assert.equal(publicProfileCalls, 0);
+  assert.equal(publicProfileCalls, 1);
 
   const resolvedNumericProfile = await fetch(`${base}/api/qq/encrypt-uin/decode`, {
     method: "POST",
@@ -387,7 +499,7 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
     identifier: wechatInternalId,
     maskedIdentifier: "115***472",
   });
-  assert.equal(publicProfileCalls, 1);
+  assert.equal(publicProfileCalls, 2);
 
   const verified = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
     method: "POST",
@@ -465,14 +577,18 @@ test("dashboard exposes bounded, platform-neutral song-search routes", async (co
 
   assert.equal((await fetch(`${base}/api/song/search?q=x`)).status, 400);
   assert.equal((await fetch(`${base}/api/song/search?q=valid&limit=11`)).status, 400);
-  assert.equal((await fetch(`${base}/api/qq/song/search?q=valid&limit=1`)).status, 409);
-  const unsafeVerify = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
+  assert.equal((await fetch(`${base}/api/qq/song/search?q=valid&limit=11`)).status, 400);
+  const fixedDirectVerify = await fetch(`${base}/api/qq/encrypt-uin/verify`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ encryptUin: classicEncryptUin }),
+    body: JSON.stringify({
+      encryptUin: classicEncryptUin,
+      proxy: "http://127.0.0.1:18080",
+      allowDirect: false,
+    }),
   });
-  assert.equal(unsafeVerify.status, 409);
-  assert.match(await unsafeVerify.text(), /不会回退到本机直连|未检测到可用代理/);
+  assert.equal(fixedDirectVerify.status, 200);
+  assert.equal(qqClientProxies.at(-1), undefined);
 });
 
 test("aborting an HTTP QQ song search releases the lookup lease for the next query", async (context) => {
@@ -503,12 +619,12 @@ test("aborting an HTTP QQ song search releases the lookup lease for the next que
   const address = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${address.port}`;
   const controller = new AbortController();
-  const first = fetch(`${base}/api/qq/song/search?q=first%20query&allowDirect=1`, { signal: controller.signal });
+  const first = fetch(`${base}/api/qq/song/search?q=first%20query`, { signal: controller.signal });
   await started;
   controller.abort();
   await assert.rejects(first, (error: unknown) => (error as { name?: string }).name === "AbortError");
 
-  const second = await fetch(`${base}/api/qq/song/search?q=second%20query&allowDirect=1`);
+  const second = await fetch(`${base}/api/qq/song/search?q=second%20query`);
   assert.equal(second.status, 200);
   assert.deepEqual(await second.json(), {
     platform: "qq",
@@ -576,9 +692,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=55/);
+  assert.match(pageText, /styles\.css\?v=56/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /app\.js\?v=66/);
+  assert.match(pageText, /app\.js\?v=67/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
@@ -599,6 +715,18 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.doesNotMatch(pageText, /id="platformSwitch"/);
   assert.match(pageText, /id="qqSongForm"/);
   assert.match(pageText, /id="qqLikesForm"/);
+  assert.match(pageText, /id="qqSongUserLookupButton"[^>]*aria-label="探测 QQ 音乐用户"/);
+  assert.match(pageText, /id="qqLikesUserLookupButton"[^>]*aria-label="探测 QQ 音乐用户"/);
+  assert.match(pageText, /id="qqSongUserPreview"[^>]*class="user-preview qq-user-preview"[^>]*aria-live="polite"/);
+  assert.match(pageText, /id="qqLikesUserPreview"[^>]*class="user-preview qq-user-preview"[^>]*aria-live="polite"/);
+  assert.match(pageText, /id="logPath"[^>]*class="log-path is-placeholder"/);
+  assert.match(pageText, /class="navigation-footer"[^>]*>[\s\S]*id="globalSettingsButton"/);
+  assert.match(pageText, /id="globalSettingsDialog"/);
+  assert.match(pageText, /name="desktopCloseBehavior" value="ask"/);
+  assert.match(pageText, /name="desktopCloseBehavior" value="background"/);
+  assert.match(pageText, /name="desktopCloseBehavior" value="exit"/);
+  assert.match(pageText, /id="taskStartupProgress"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.doesNotMatch(pageText, /taskStartupElapsed/);
   const qqLikesMarkup = pageText.match(/<form id="qqLikesForm"[\s\S]*?<\/form>/)?.[0] ?? "";
   assert.doesNotMatch(qqLikesMarkup, /name="workersPerProxy"/);
   assert.match(qqLikesMarkup, /实际 Worker 由顶部“总工作线程上限”统一控制/);
@@ -608,7 +736,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /EncryptUin \/ QQ音乐个人主页链接 \/ 数字标识/);
   assert.match(pageText, /32 位新式 ID/);
   assert.match(pageText, /直接显示完整 QQ 号候选/);
-  assert.match(pageText, /代理池或显式代理存在时请求 fail-closed/);
+  assert.match(pageText, /低频普通查询固定使用本机直连，不读取代理池/);
   assert.match(pageText, /隐藏完整标识/);
   assert.match(pageText, /复制完整标识/);
   assert.match(pageText, /不会批量导入、枚举或反查/);
@@ -719,6 +847,17 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /\/api\/user\/profile\?uid=\$\{encodeURIComponent\(uid\)\}&mode=\$\{encodeURIComponent\(taskMode\)\}&jobId=\$\{encodeURIComponent\(jobId\)\}/);
   assert.doesNotMatch(appText, /\/api\/user\/profile[^`\n]*proxy=/);
   assert.match(appText, /\/api\/qq\/target\/display/);
+  assert.match(appText, /\/api\/qq\/user/);
+  assert.match(appText, /body:\s*JSON\.stringify\(\{ target \}\)/);
+  assert.match(appText, /function renderSongSearchStatus/);
+  assert.match(appText, /正在搜索候选歌曲/);
+  assert.match(appText, /logPath\.classList\.toggle\("is-placeholder", !data\.path\)/);
+  assert.match(appText, /function beginTaskStartup/);
+  assert.match(appText, /function finishTaskStartup/);
+  assert.match(appText, /setupDesktopSettings/);
+  assert.match(appText, /updateSettings\(\{ closeBehavior: selected \}\)/);
+  assert.match(appText, /resetSettings\(\)/);
+  assert.doesNotMatch(appText, /taskStartupElapsed/);
   assert.match(appText, /inspectorBody\.inert/);
   assert.match(appText, /\/api\/song\/search/);
   assert.match(appText, /\/api\/qq\/song\/search/);
@@ -843,6 +982,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /::-webkit-scrollbar-thumb/);
   assert.match(styleText, /\.navigation-rail/);
   assert.match(styleText, /\.song-read-track/);
+  assert.match(styleText, /\.qq-user-preview/);
+  assert.match(styleText, /\.log-path\.is-placeholder\s*\{[^}]*font-family:\s*inherit/s);
+  assert.match(styleText, /\.task-startup-progress\s*\{[^}]*position:\s*fixed[^}]*right:/s);
+  assert.match(styleText, /@keyframes startup-capsule-expand/);
+  assert.match(styleText, /\.task-startup-track\s*\{[^}]*height:\s*2px/s);
+  assert.match(styleText, /\.navigation-footer/);
+  assert.match(styleText, /\.global-settings-dialog/);
   assert.match(styleText, /\.navigation-rail\s*\{[^}]*position:\s*sticky/s);
   assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);
@@ -1095,7 +1241,7 @@ test("keeps a failed managed-pool UID lookup from silently falling back to direc
   assert.deepEqual(calls, [pool.entries[0].endpoint]);
 });
 
-test("loads a lightweight NetEase Live Task profile through the same fail-closed pool router", async () => {
+test("retains managed-pool profile routing for explicit internal router callers", async () => {
   const entry = { name: "node-a", endpoint: "http://127.0.0.1:17891", egressIp: "1.1.1.1", latencyMs: 10, ncmLatencyMs: 20, ncmVerified: true };
   const calls: Array<string | undefined> = [];
   const router = new UserProbeRouter("/cookie", "/pool", {
@@ -1136,6 +1282,38 @@ test("loads a lightweight NetEase Live Task profile through the same fail-closed
     routeAttempts: 1,
   });
   assert.deepEqual(calls, [entry.endpoint]);
+});
+
+test("NetEase ordinary user probes can bypass a running pool for a normal direct request", async () => {
+  const proxies: Array<string | undefined> = [];
+  let poolReads = 0;
+  const router = new UserProbeRouter("/cookie", "/pool", {
+    readPool: async () => {
+      poolReads += 1;
+      throw new Error("the direct path must not inspect the pool");
+    },
+    probe: async (uid, proxy) => {
+      proxies.push(proxy);
+      return {
+        profile: { userId: uid, nickname: "direct-user" },
+        record: { status: "available", songs: 1 },
+        likes: { status: "available", songs: 2 },
+        sessionPresent: false,
+        elapsedMs: 3,
+        route: "direct",
+        routeAttempts: 1,
+      };
+    },
+    profile: async (uid, proxy) => {
+      proxies.push(proxy);
+      return { profile: { userId: uid, nickname: "direct-user" }, elapsedMs: 2 };
+    },
+  });
+
+  assert.equal((await router.run("101", "http://127.0.0.1:19999", true)).route, "direct");
+  assert.equal((await router.profile("101", "http://127.0.0.1:19999", true)).route, "direct");
+  assert.deepEqual(proxies, [undefined, undefined]);
+  assert.equal(poolReads, 0);
 });
 
 test("turns user_detail 404 into an actionable UID error without rotating every exit", async () => {

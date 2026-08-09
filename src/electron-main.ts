@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, Tray } from "electron";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
@@ -11,6 +11,7 @@ import {
   type DesktopResultReportSession,
 } from "./desktop-result-export";
 import {
+  DESKTOP_SETTINGS_CHANNELS,
   DESKTOP_EXPORT_CHANNELS,
   DESKTOP_UPDATE_CHANNELS,
   DESKTOP_WINDOW_CHANNELS,
@@ -20,6 +21,12 @@ import {
   parseDesktopResultExportRequest,
   resultReportFilename,
 } from "./window-shell";
+import {
+  DEFAULT_DESKTOP_SETTINGS,
+  DesktopSettingsStore,
+  type DesktopCloseBehavior,
+  type DesktopSettings,
+} from "./desktop-settings";
 import {
   isWindowsAutoUpdateSupported,
   unsupportedWindowsUpdateState,
@@ -31,6 +38,8 @@ import {
 // The visible product name may change, but checkpoints, logs and updater
 // handoff must continue using the established v0.x data directory.
 app.setPath("userData", join(app.getPath("appData"), "ncm-comment-finder"));
+const primaryInstance = app.requestSingleInstanceLock();
+if (!primaryInstance) app.quit();
 
 let dashboard: Server | undefined;
 let windowsUpdater: WindowsUpdateController | undefined;
@@ -39,6 +48,16 @@ let mainWindow: BrowserWindow | undefined;
 let dashboardUrl: string | undefined;
 let resultExportInProgress = false;
 let resultExportAbortController: AbortController | undefined;
+const desktopSettingsStore = new DesktopSettingsStore(
+  join(app.getPath("userData"), "desktop-settings.json"),
+  (error) => { writeDesktopLog("desktop-settings-recovery", error); },
+);
+let desktopSettings: DesktopSettings = { ...DEFAULT_DESKTOP_SETTINGS };
+let tray: Tray | undefined;
+let isQuitting = false;
+let quitApproved = false;
+let gracefulQuitPromise: Promise<void> | undefined;
+let closeDecisionPending = false;
 
 function currentUpdateState() {
   return windowsUpdater?.getState() ?? windowsUpdateFallbackState ?? unsupportedWindowsUpdateState(app.getVersion());
@@ -109,6 +128,20 @@ ipcMain.handle(DESKTOP_UPDATE_CHANNELS.download, async () => windowsUpdater?.dow
 ipcMain.handle(DESKTOP_UPDATE_CHANNELS.install, () => {
   windowsUpdater?.install();
   return currentUpdateState();
+});
+ipcMain.handle(DESKTOP_SETTINGS_CHANNELS.get, (event) => {
+  assertMainWindowSender(event);
+  return desktopSettings;
+});
+ipcMain.handle(DESKTOP_SETTINGS_CHANNELS.update, async (event, value: unknown) => {
+  assertMainWindowSender(event);
+  desktopSettings = await desktopSettingsStore.update(value);
+  return desktopSettings;
+});
+ipcMain.handle(DESKTOP_SETTINGS_CHANNELS.reset, async (event) => {
+  assertMainWindowSender(event);
+  desktopSettings = await desktopSettingsStore.reset();
+  return desktopSettings;
 });
 ipcMain.handle(DESKTOP_EXPORT_CHANNELS.resultsPdf, async (event, rawRequest: unknown) => {
   const window = senderWindow(event);
@@ -231,6 +264,7 @@ async function runDesktopPdfSmoke(parent: BrowserWindow, destination: string): P
 }
 
 async function createWindow(): Promise<void> {
+  desktopSettings = await desktopSettingsStore.load();
   dashboard = await startDashboard({
     host: "127.0.0.1",
     port: 0,
@@ -259,6 +293,18 @@ async function createWindow(): Promise<void> {
     },
   });
   mainWindow = window;
+  window.on("close", (event) => {
+    if (quitApproved) return;
+    event.preventDefault();
+    void requestWindowClose(window).catch((error) => {
+      writeDesktopLog("window-close", error);
+      if (!window.isDestroyed()) window.show();
+      dialog.showErrorBox("无法关闭窗口", "关闭操作未完成，主窗口已保持打开。请重试。");
+    });
+  });
+  window.on("closed", () => {
+    if (mainWindow === window) mainWindow = undefined;
+  });
   initializeWindowsUpdater(window);
   const sendMaximizedState = (): void => {
     if (!window.isDestroyed()) {
@@ -291,9 +337,10 @@ async function createWindow(): Promise<void> {
       platform: window.ncmDesktop?.platform,
       maximized: await window.ncmDesktop?.isMaximized?.(),
       updateState: await window.ncmDesktop?.getUpdateState?.(),
+      settings: await window.ncmDesktop?.getSettings?.(),
       exportReady: typeof window.ncmDesktop?.exportResultsPdf === "function"
-    }))()` ) as { platform?: string; maximized?: boolean; updateState?: { supported?: boolean }; exportReady?: boolean };
-    if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean" || bridge.exportReady !== true) {
+    }))()` ) as { platform?: string; maximized?: boolean; updateState?: { supported?: boolean }; settings?: { closeBehavior?: string }; exportReady?: boolean };
+    if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean" || !["ask", "background", "exit"].includes(bridge.settings?.closeBehavior ?? "") || bridge.exportReady !== true) {
       throw new Error("Desktop window preload bridge is unavailable.");
     }
     if (process.platform === "win32" && app.isPackaged && bridge.updateState.supported !== true) {
@@ -319,7 +366,166 @@ async function createWindow(): Promise<void> {
   }
 }
 
-app.whenReady().then(createWindow).catch((error) => {
+function assertMainWindowSender(event: Electron.IpcMainInvokeEvent): void {
+  const window = senderWindow(event);
+  if (!window || window !== mainWindow) throw new Error("当前窗口不能修改全局设置。");
+}
+
+function showMainWindow(): void {
+  const window = mainWindow;
+  if (!window || window.isDestroyed()) return;
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+  app.dock?.show();
+}
+
+function ensureTray(): Tray {
+  if (tray && !tray.isDestroyed()) return tray;
+  tray = undefined;
+  const icon = nativeImage.createFromPath(join(app.getAppPath(), "web", "app-icon.png")).resize({ width: 18, height: 18 });
+  if (icon.isEmpty()) throw new Error("tray-icon-empty");
+  const nextTray = new Tray(icon);
+  try {
+    nextTray.setToolTip("乐评寻踪");
+    nextTray.setContextMenu(Menu.buildFromTemplate([
+      { label: "显示主界面", click: showMainWindow },
+      { type: "separator" },
+      {
+        label: "退出应用",
+        click: () => { void requestGracefulQuit(); },
+      },
+    ]));
+    nextTray.on("click", showMainWindow);
+    tray = nextTray;
+    return nextTray;
+  } catch (error) {
+    try {
+      nextTray.destroy();
+    } catch {
+      // The original setup error is more useful than a best-effort cleanup failure.
+    }
+    throw error;
+  }
+}
+
+function moveWindowToBackground(window: BrowserWindow): boolean {
+  try {
+    ensureTray();
+    window.hide();
+    app.dock?.hide();
+    return true;
+  } catch (error) {
+    writeDesktopLog("tray-create", error);
+    if (!window.isDestroyed()) {
+      window.show();
+      window.focus();
+    }
+    dialog.showErrorBox("无法转入后台", "系统托盘初始化失败，主窗口已保持打开。");
+    return false;
+  }
+}
+
+async function rememberCloseBehavior(behavior: DesktopCloseBehavior): Promise<void> {
+  try {
+    desktopSettings = await desktopSettingsStore.update({ closeBehavior: behavior });
+  } catch (error) {
+    writeDesktopLog("desktop-settings-save", error);
+    dialog.showErrorBox("设置保存失败", "本次关闭选择仍会执行，但无法记住到下次启动。");
+  }
+}
+
+async function requestWindowClose(window: BrowserWindow): Promise<void> {
+  if (closeDecisionPending || window.isDestroyed()) return;
+  closeDecisionPending = true;
+  try {
+    let behavior = desktopSettings.closeBehavior;
+    if (behavior === "ask") {
+      const decision = await dialog.showMessageBox(window, {
+        type: "question",
+        title: "关闭乐评寻踪",
+        message: "要退出应用，还是转入后台继续运行？",
+        detail: "转入后台会保留本地服务和正在进行的任务；退出应用会结束当前进程。",
+        buttons: ["退出应用", "转入后台", "取消"],
+        defaultId: 1,
+        cancelId: 2,
+        noLink: true,
+        checkboxLabel: "记住我的选择",
+        checkboxChecked: false,
+      });
+      if (decision.response === 2) return;
+      behavior = decision.response === 0 ? "exit" : "background";
+      if (decision.checkboxChecked) await rememberCloseBehavior(behavior);
+    }
+    if (behavior === "background") {
+      moveWindowToBackground(window);
+      return;
+    }
+    await requestGracefulQuit();
+  } finally {
+    closeDecisionPending = false;
+  }
+}
+
+async function prepareDashboardForQuit(): Promise<void> {
+  const origin = dashboardUrl;
+  if (!origin) return;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("desktop-quit-timeout")), 45_000);
+  timeout.unref?.();
+  try {
+    const prepareResponse = await fetch(new URL("/api/tasks/prepare-update", origin), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+      signal: controller.signal,
+    });
+    if (!prepareResponse.ok) throw new Error(`prepare-update-http-${prepareResponse.status}`);
+    let state = await prepareResponse.json() as { active?: boolean; mode?: string };
+    while (state.active && state.mode !== "pool" && !controller.signal.aborted) {
+      await quitDelay(125, controller.signal);
+      const activeResponse = await fetch(new URL("/api/tasks/active", origin), { signal: controller.signal });
+      if (!activeResponse.ok) throw new Error(`active-task-http-${activeResponse.status}`);
+      state = await activeResponse.json() as { active?: boolean; mode?: string };
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function requestGracefulQuit(): Promise<void> {
+  if (gracefulQuitPromise) return gracefulQuitPromise;
+  isQuitting = true;
+  gracefulQuitPromise = (async () => {
+    try {
+      await prepareDashboardForQuit();
+    } catch (error) {
+      writeDesktopLog("graceful-quit", error);
+    }
+    quitApproved = true;
+    app.quit();
+  })();
+  return gracefulQuitPromise;
+}
+
+function quitDelay(milliseconds: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, milliseconds);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+if (primaryInstance) app.on("second-instance", showMainWindow);
+
+(primaryInstance ? app.whenReady().then(createWindow) : Promise.resolve()).catch((error) => {
   const logPath = writeDesktopLog("startup-fatal", error);
   const detail = logPath
     ? `启动日志已保存到：\n${logPath}`
@@ -329,8 +535,17 @@ app.whenReady().then(createWindow).catch((error) => {
   app.exit(1);
 });
 
-app.on("window-all-closed", () => app.quit());
-app.on("before-quit", () => {
+app.on("activate", showMainWindow);
+app.on("window-all-closed", () => {
+  if (!mainWindow) void requestGracefulQuit();
+});
+app.on("before-quit", (event) => {
+  if (!quitApproved) {
+    event.preventDefault();
+    void requestGracefulQuit();
+    return;
+  }
+  isQuitting = true;
   resultExportAbortController?.abort(new Error("application-quit"));
   resultExportAbortController = undefined;
   dashboard?.close();
@@ -339,6 +554,8 @@ app.on("before-quit", () => {
   mainWindow = undefined;
   windowsUpdater = undefined;
   windowsUpdateFallbackState = undefined;
+  tray?.destroy();
+  tray = undefined;
 });
 
 function desktopExportFailureCategory(error: unknown): string {

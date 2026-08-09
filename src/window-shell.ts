@@ -16,6 +16,12 @@ export const DESKTOP_UPDATE_CHANNELS = {
   stateChanged: "desktop-update:state-changed",
 } as const;
 
+export const DESKTOP_SETTINGS_CHANNELS = {
+  get: "desktop-settings:get",
+  reset: "desktop-settings:reset",
+  update: "desktop-settings:update",
+} as const;
+
 export const DESKTOP_EXPORT_CHANNELS = {
   cancelResultsPdf: "desktop-export:cancel-results-pdf",
   resultsPdf: "desktop-export:results-pdf",

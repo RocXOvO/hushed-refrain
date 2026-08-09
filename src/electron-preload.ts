@@ -18,6 +18,12 @@ const DESKTOP_UPDATE_CHANNELS = {
   stateChanged: "desktop-update:state-changed",
 } as const;
 
+const DESKTOP_SETTINGS_CHANNELS = {
+  get: "desktop-settings:get",
+  reset: "desktop-settings:reset",
+  update: "desktop-settings:update",
+} as const;
+
 const DESKTOP_EXPORT_CHANNELS = {
   cancelResultsPdf: "desktop-export:cancel-results-pdf",
   resultsPdf: "desktop-export:results-pdf",
@@ -39,6 +45,9 @@ contextBridge.exposeInMainWorld("ncmDesktop", Object.freeze({
   checkForUpdates: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.check),
   downloadUpdate: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.download),
   installUpdate: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_UPDATE_CHANNELS.install),
+  getSettings: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_SETTINGS_CHANNELS.get),
+  updateSettings: (settings: unknown): Promise<unknown> => ipcRenderer.invoke(DESKTOP_SETTINGS_CHANNELS.update, settings),
+  resetSettings: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_SETTINGS_CHANNELS.reset),
   exportResultsPdf: (request: unknown): Promise<unknown> => ipcRenderer.invoke(DESKTOP_EXPORT_CHANNELS.resultsPdf, request),
   cancelResultsPdf: (): Promise<unknown> => ipcRenderer.invoke(DESKTOP_EXPORT_CHANNELS.cancelResultsPdf),
   onResultsPdfProgress: (listener: (progress: unknown) => void): (() => void) => {

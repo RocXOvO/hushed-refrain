@@ -343,21 +343,25 @@ export class UserProbeRouter {
     private readonly dependencies: UserProbeRouterDependencies = {},
   ) {}
 
-  async run(uid: string, explicitProxy?: string): Promise<UserProbe> {
+  async run(uid: string, explicitProxy?: string, preferDirect = false): Promise<UserProbe> {
     const probe = this.dependencies.probe ?? probeUser;
-    return this.route(uid, explicitProxy, (proxy) => probe(uid, proxy, this.cookiePath));
+    return this.route(uid, explicitProxy, (proxy) => probe(uid, proxy, this.cookiePath), preferDirect);
   }
 
-  async profile(uid: string, explicitProxy?: string): Promise<UserIdentityProbe> {
+  async profile(uid: string, explicitProxy?: string, preferDirect = false): Promise<UserIdentityProbe> {
     const profile = this.dependencies.profile ?? probeUserProfile;
-    return this.route(uid, explicitProxy, (proxy) => profile(uid, proxy));
+    return this.route(uid, explicitProxy, (proxy) => profile(uid, proxy), preferDirect);
   }
 
   private async route<T extends object>(
     uid: string,
     explicitProxy: string | undefined,
     request: (proxy: string | undefined) => Promise<T>,
+    preferDirect = false,
   ): Promise<T & Pick<UserProbe, "route" | "routeName" | "routeAttempts">> {
+    if (preferDirect) {
+      return this.runSingle(request, undefined, "direct", "本机直连");
+    }
     if (explicitProxy) {
       return this.runSingle(request, explicitProxy, "explicit-proxy", "手动代理");
     }
@@ -444,22 +448,29 @@ export class NcmSongSearchRouter {
     private readonly dependencies: NcmSongSearchRouterDependencies = {},
   ) {}
 
-  async run(query: string, limit: number, explicitProxy?: string): Promise<SongSearchResponse> {
+  async run(
+    query: string,
+    limit: number,
+    explicitProxy?: string,
+    preferDirect = false,
+  ): Promise<SongSearchResponse> {
     const search = this.dependencies.search ?? searchNcmSongs;
     const songs = await this.runWithPool(
       (proxy) => search(query, limit, proxy),
       explicitProxy,
       "歌曲搜索",
+      preferDirect,
     );
     return { platform: "netease", query, songs };
   }
 
-  async lookup(songId: string, explicitProxy?: string): Promise<SongInfo> {
+  async lookup(songId: string, explicitProxy?: string, preferDirect = false): Promise<SongInfo> {
     const lookup = this.dependencies.lookup ?? lookupNcmSong;
     return this.runWithPool(
       (proxy) => lookup(songId, proxy),
       explicitProxy,
       "歌曲信息查询",
+      preferDirect,
     );
   }
 
@@ -467,12 +478,21 @@ export class NcmSongSearchRouter {
     request: (proxy: string | undefined) => Promise<T>,
     explicitProxy: string | undefined,
     label: string,
+    preferDirect: boolean,
   ): Promise<T> {
     if (explicitProxy) {
       try {
         return await request(explicitProxy);
       } catch (error) {
         throw ncmLookupHttpError(error, 1, false, true, label);
+      }
+    }
+
+    if (preferDirect) {
+      try {
+        return await request(undefined);
+      } catch (error) {
+        throw ncmLookupHttpError(error, 1, false, false, label);
       }
     }
 
@@ -567,7 +587,6 @@ class UpdatePreparationGate {
 class JobManager {
   private snapshotValue: JobSnapshot = emptySnapshot();
   private lanes: SourceTaskLane[] = [];
-  private profileCursor = 0;
   private transportGate?: ProxyTransportGate;
   private statePath?: string;
   private outputPath?: string;
@@ -946,13 +965,7 @@ class JobManager {
     if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== uid) {
       throw new HttpError(409, "当前用户来源任务已经切换，请重新加载。");
     }
-    const lanes = [...this.lanes];
-    if (lanes.length === 0) {
-      throw new HttpError(409, "当前用户来源任务的网络通道已关闭；不会改用本机直连查询资料。");
-    }
-    const start = this.profileCursor % lanes.length;
-    this.profileCursor = (this.profileCursor + 1) % lanes.length;
-    const result = await probeNeteaseIdentityThroughLanes(lanes, uid, start);
+    const result = await probeNeteaseIdentityDirect(uid);
     if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== uid) {
       throw new HttpError(409, "当前用户来源任务已经切换，请重新加载。");
     }
@@ -1096,7 +1109,6 @@ class JobManager {
 class ParallelJobManager {
   private snapshotValue: ParallelJobSnapshot = emptyParallelSnapshot();
   private lanes: ParallelTaskLane[] = [];
-  private profileCursor = 0;
   private transportGate?: ProxyTransportGate;
   private statePath?: string;
   private outputPath?: string;
@@ -1355,13 +1367,7 @@ class ParallelJobManager {
     if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== uid) {
       throw new HttpError(409, "当前单曲任务已经切换，请重新加载。");
     }
-    const lanes = [...this.lanes];
-    if (lanes.length === 0) {
-      throw new HttpError(409, "当前单曲任务的代理通道已关闭；不会回退到本机直连查询资料。");
-    }
-    const start = this.profileCursor % lanes.length;
-    this.profileCursor = (this.profileCursor + 1) % lanes.length;
-    const result = await probeNeteaseIdentityThroughLanes(lanes, uid, start);
+    const result = await probeNeteaseIdentityDirect(uid);
     if (this.snapshotValue.id !== expectedJobId || this.snapshotValue.uid !== uid) {
       throw new HttpError(409, "当前单曲任务已经切换，请重新加载。");
     }
@@ -1773,9 +1779,10 @@ async function route(
     const resolved = await withRequestAbortSignal(request, response, (signal) =>
       qq.resolveClassicEncryptUinInput(
         input.input ?? input.encryptUin,
-        input.proxy,
-        input.allowDirect,
+        undefined,
+        true,
         signal,
+        true,
       )
     );
     return json(response, 200, resolved);
@@ -1793,6 +1800,22 @@ async function route(
     }
     return json(response, 200, { kind: display.kind, label: display.label });
   }
+  if (method === "POST" && url.pathname === "/api/qq/user") {
+    if (!isLoopbackAddress(request.socket.remoteAddress)) {
+      throw new HttpError(403, "QQ 音乐用户探测仅允许从本机访问。");
+    }
+    const input = jsonObject(await body(request));
+    const profile = await withRequestAbortSignal(request, response, (signal) =>
+      qq.lookupTarget(
+        input.target,
+        undefined,
+        true,
+        signal,
+        true,
+      )
+    );
+    return json(response, 200, profile);
+  }
   if (method === "POST" && url.pathname === "/api/qq/encrypt-uin/verify") {
     if (!isLoopbackAddress(request.socket.remoteAddress)) {
       throw new HttpError(403, "EncryptUin 在线验证仅允许从本机访问。");
@@ -1801,9 +1824,10 @@ async function route(
     const verification = await withRequestAbortSignal(request, response, (signal) =>
       qq.verifyClassicEncryptUin(
         input.encryptUin,
-        input.proxy,
-        input.allowDirect,
+        undefined,
+        true,
         signal,
+        true,
       )
     );
     return json(response, 200, verification);
@@ -1811,7 +1835,8 @@ async function route(
   if (method === "GET" && url.pathname === "/api/song") {
     const song = await songSearch.lookup(
       numericId(url.searchParams.get("id"), "歌曲 ID"),
-      proxyUrl(url.searchParams.get("proxy")),
+      undefined,
+      true,
     );
     return json(response, 200, song);
   }
@@ -1820,15 +1845,17 @@ async function route(
     return json(response, 200, await songSearch.run(
       query,
       integer(url.searchParams.get("limit") ?? 10, "limit", 1, 10),
-      proxyUrl(url.searchParams.get("proxy")),
+      undefined,
+      true,
     ));
   }
   if (method === "GET" && url.pathname === "/api/qq/song") {
     const song = await withRequestAbortSignal(request, response, (signal) => qq.lookupSong(
       numericId(url.searchParams.get("id"), "QQ 音乐歌曲 ID"),
-      url.searchParams.get("proxy"),
-      url.searchParams.get("allowDirect") === "1",
+      undefined,
+      true,
       signal,
+      true,
     ));
     return json(response, 200, song);
   }
@@ -1837,9 +1864,10 @@ async function route(
     const songs = await withRequestAbortSignal(request, response, (signal) => qq.searchSongs(
       query,
       integer(url.searchParams.get("limit") ?? 10, "limit", 1, 10),
-      url.searchParams.get("proxy"),
-      url.searchParams.get("allowDirect") === "1",
+      undefined,
+      true,
       signal,
+      true,
     ));
     return json(response, 200, {
       platform: "qq",
@@ -1924,7 +1952,8 @@ async function route(
   if (method === "GET" && url.pathname === "/api/user") {
     return json(response, 200, await userProbes.run(
       numericId(url.searchParams.get("uid"), "UID"),
-      proxyUrl(url.searchParams.get("proxy")),
+      undefined,
+      true,
     ));
   }
   if (method === "GET" && url.pathname === "/api/user/profile") {
@@ -1938,7 +1967,7 @@ async function route(
         ? await parallel.profile(uid, jobId)
         : await jobs.profile(uid, jobId));
     }
-    return json(response, 200, await userProbes.profile(uid));
+    return json(response, 200, await userProbes.profile(uid, undefined, true));
   }
   if (method === "GET" && url.pathname === "/api/auth") return json(response, 200, await auth.status());
   if (method === "POST" && url.pathname === "/api/auth/qr") return json(response, 202, await auth.start());
@@ -2276,6 +2305,14 @@ async function probeUserProfile(uid: string, proxy: string | undefined): Promise
   return { profile, elapsedMs: Date.now() - started };
 }
 
+export async function probeNeteaseIdentityDirect(
+  uid: string,
+  probe: (uid: string, proxy: string | undefined) => Promise<{ profile: NcmUserProfile; elapsedMs: number }> = probeUserProfile,
+): Promise<UserIdentityProbe> {
+  const result = await probe(uid, undefined);
+  return { ...result, route: "direct", routeName: "本机直连", routeAttempts: 1 };
+}
+
 export async function probeNeteaseIdentityThroughLanes(
   lanes: readonly NeteaseIdentityLane[],
   uid: string,
@@ -2344,11 +2381,11 @@ async function searchNcmSongs(
   limit: number,
   proxy: string | undefined,
 ): Promise<SongSearchResult[]> {
-  return new EnhancedNcmClient({ proxy }).searchSongs(query, limit);
+  return new EnhancedNcmClient({ proxy, requestTimeoutMs: 8_000 }).searchSongs(query, limit);
 }
 
 async function lookupNcmSong(songId: string, proxy: string | undefined): Promise<SongInfo> {
-  return new EnhancedNcmClient({ proxy }).getSongInfo(songId);
+  return new EnhancedNcmClient({ proxy, requestTimeoutMs: 8_000 }).getSongInfo(songId);
 }
 
 function isNcmLookupLaneFailure(error: unknown, visited = new Set<object>()): boolean {
@@ -2376,14 +2413,14 @@ function ncmLookupHttpError(
       ? `${label}已轮换 ${attempts} 个代理出口，但都被网易云暂时限流；不会回退到本机直连，请稍后再试。`
       : explicitProxy
       ? `${label}使用手动代理时被网易云暂时限流，请检查代理或稍后再试。`
-      : `${label}被网易云暂时限流；请稍后再试，或先开启代理池。`
+      : `${label}通过本机直连时被网易云暂时限流；请稍后再试。`
     );
   }
   return new HttpError(502, usedPool
     ? `${label}已自动轮换 ${attempts} 个代理出口，仍未收到有效响应；不会回退到本机直连。`
     : explicitProxy
-    ? `${label}未从手动代理收到有效上游响应，请检查代理设置。`
-    : `${label}未收到有效上游响应；当前未运行代理池，因此本次使用本机直连。`
+      ? `${label}未从手动代理收到有效上游响应，请检查代理设置。`
+    : `${label}通过本机直连未收到有效上游响应；请检查本机网络后重试。`
   );
 }
 
@@ -2394,12 +2431,12 @@ function userProbeHttpError(error: unknown, attempts: number, usedPool: boolean)
   if (error instanceof CooldownRequired) {
     return new HttpError(429, usedPool
       ? `用户资料查询已轮换 ${attempts} 个代理出口，但都被网易云暂时拒绝或限流；请稍后再试。`
-      : "用户资料查询被网易云暂时拒绝或限流；请稍后再试，或先开启代理池。"
+      : "用户资料查询通过本机直连时被网易云暂时拒绝或限流；请稍后再试。"
     );
   }
   return new HttpError(502, usedPool
     ? `用户资料查询已自动轮换 ${attempts} 个代理出口，仍未收到有效响应；请检查节点状态或稍后再试。`
-    : "用户资料查询未收到有效上游响应；请先开启代理池后重试，避免连续 UID 查询始终使用同一本机出口。"
+    : "用户资料查询通过本机直连未收到有效上游响应；请检查本机网络后重试。"
   );
 }
 

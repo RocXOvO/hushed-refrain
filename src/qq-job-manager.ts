@@ -27,6 +27,7 @@ import {
   ClassicEncryptUinError,
   decodeClassicEncryptUin,
   describeQQMusicTarget,
+  qqMusicTargetAvatarUrl,
   normalizeUserInput,
   parseClassicEncryptUinExperimentInput,
   type ClassicEncryptUinFormat,
@@ -59,6 +60,7 @@ import { readTaskLog, TaskLogger, type TaskLogEntry } from "./task-log";
 const ACTIVE_SONG_LIMIT = 64;
 const MAX_RESULT_REPORT_BYTES = 64 * 1024 * 1024;
 const MAX_RESULT_REPORT_RECORDS = 20_000;
+const DEFAULT_LOOKUP_TIMEOUT_MS = 8_000;
 
 export interface QQJobManagerPaths {
   data: string;
@@ -162,6 +164,15 @@ export interface QQTargetIdentitySnapshot {
   avatarUrl?: string;
 }
 
+export interface QQTargetProbeSnapshot {
+  platform: "qq";
+  identity: QQTargetIdentitySnapshot;
+  route: "local" | "direct" | "explicit-proxy" | "managed-pool";
+  routeName: string;
+  routeAttempts: number;
+  elapsedMs: number;
+}
+
 export interface QQResultSnapshot {
   generation: QQJobGeneration;
   results: QQMusicFoundComment[];
@@ -204,6 +215,7 @@ export interface QQJobManagerOptions {
   poolVerifier?: (pool: ProxyPoolFile, signal: AbortSignal) => Promise<ProxyPoolEntry[]>;
   reportSnapshotReader?: (path: string | undefined) => Promise<QQMusicFoundComment[]>;
   resumeWriter?: (path: string, descriptor: Record<string, unknown>) => Promise<void>;
+  lookupTimeoutMs?: number;
 }
 
 export class QQJobManagerError extends Error {
@@ -248,6 +260,7 @@ export class QQJobManager {
   private readonly poolVerifier: (pool: ProxyPoolFile, signal: AbortSignal) => Promise<ProxyPoolEntry[]>;
   private readonly reportSnapshotReader: (path: string | undefined) => Promise<QQMusicFoundComment[]>;
   private readonly resumeWriter: (path: string, descriptor: Record<string, unknown>) => Promise<void>;
+  private readonly lookupTimeoutMs: number;
   private snapshotValue = emptySnapshot();
   private generation?: InternalGeneration;
   private lease?: TaskLease;
@@ -281,6 +294,9 @@ export class QQJobManager {
       maxRecords: MAX_RESULT_REPORT_RECORDS,
     }));
     this.resumeWriter = options.resumeWriter ?? writeAtomicJson;
+    this.lookupTimeoutMs = Number.isFinite(options.lookupTimeoutMs) && Number(options.lookupTimeoutMs) > 0
+      ? Math.max(1, Math.floor(Number(options.lookupTimeoutMs)))
+      : DEFAULT_LOOKUP_TIMEOUT_MS;
   }
 
   async start(input: QQStartRequest): Promise<QQJobSnapshot> {
@@ -620,6 +636,7 @@ export class QQJobManager {
     proxyInput?: unknown,
     allowDirectInput?: unknown,
     signal?: AbortSignal,
+    preferDirectInput?: unknown,
   ) {
     const songId = decimalId(songIdInput, "QQ 音乐歌曲 ID");
     return this.withLookupLanes(
@@ -629,6 +646,7 @@ export class QQJobManager {
         lane.client.getSongInfo(songId, lane.transportGate.signal)
       ),
       signal,
+      boolean(preferDirectInput),
     );
   }
 
@@ -638,6 +656,7 @@ export class QQJobManager {
     proxyInput?: unknown,
     allowDirectInput?: unknown,
     signal?: AbortSignal,
+    preferDirectInput?: unknown,
   ): Promise<SongSearchResult[]> {
     const query = text(queryInput, "q", 2, 80);
     const limit = integer(limitInput ?? 10, "limit", 1, 10);
@@ -651,7 +670,81 @@ export class QQJobManager {
         return lane.client.searchSongs(query, limit, lane.transportGate.signal);
       }),
       signal,
+      boolean(preferDirectInput),
     );
+  }
+
+  async lookupTarget(
+    targetInput: unknown,
+    proxyInput?: unknown,
+    allowDirectInput?: unknown,
+    signal?: AbortSignal,
+    preferDirectInput?: unknown,
+  ): Promise<QQTargetProbeSnapshot> {
+    const target = text(targetInput, "target", 1, 512);
+    let display: QQMusicTargetDisplay;
+    try {
+      display = describeQQMusicTarget(target);
+    } catch {
+      throw new QQJobManagerError(400, "QQ 音乐用户目标格式错误。");
+    }
+    if (display.kind === "wechat-user") {
+      return {
+        platform: "qq",
+        identity: identitySnapshot(display),
+        route: "local",
+        routeName: "本地识别",
+        routeAttempts: 0,
+        elapsedMs: 0,
+      };
+    }
+
+    const normalized = normalizeUserInput(target);
+    const startedAt = Date.now();
+    try {
+      return await this.withLookupLanes(
+        proxyInput,
+        allowDirectInput,
+        async (lanes) => {
+          const attemptedLanes = new Set<QQCommentLane>();
+          const result = await executeControlAcrossLanes(lanes, "qq_target_probe", async (lane) => {
+            attemptedLanes.add(lane);
+            if (!lane.client.getPublicUserProfile) {
+              throw new QQJobManagerError(501, "当前 QQ 音乐客户端不支持公开用户探测。");
+            }
+            return {
+              laneName: lane.name,
+              profile: await lane.client.getPublicUserProfile(display.profileLookup, lane.transportGate.signal),
+            };
+          });
+          const canonical = canonicalEncryptUin(result.profile.encryptUin);
+          if (normalized.kind === "encrypt-uin" && canonical !== normalized.value) {
+            throw new QQJobManagerError(502, "QQ 音乐公开身份响应与目标 EncryptUin 不一致。");
+          }
+          const route = lookupRoute(result.laneName);
+          return {
+            platform: "qq",
+            identity: identitySnapshot(
+              display,
+              result.profile.nickname?.trim() || undefined,
+              qqMusicTargetAvatarUrl(display) ?? safeAvatarUrl(result.profile.avatarUrl),
+            ),
+            route: route.kind,
+            routeName: route.name,
+            routeAttempts: attemptedLanes.size,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+          };
+        },
+        signal,
+        boolean(preferDirectInput),
+      );
+    } catch (error) {
+      if (error instanceof QQJobManagerError || error instanceof RunCancelled) throw error;
+      if (error instanceof CooldownRequired) {
+        throw new QQJobManagerError(429, "QQ 音乐用户探测被暂时限流；请稍后重试。");
+      }
+      throw new QQJobManagerError(502, "QQ 音乐用户探测失败；未收到可用的公开资料响应。");
+    }
   }
 
   async verifyClassicEncryptUin(
@@ -659,6 +752,7 @@ export class QQJobManager {
     proxyInput?: unknown,
     allowDirectInput?: unknown,
     signal?: AbortSignal,
+    preferDirectInput?: unknown,
   ): Promise<QQClassicEncryptUinVerification> {
     const decoded = decodeClassicEncryptUin(String(encryptUinInput ?? ""));
     try {
@@ -681,6 +775,7 @@ export class QQJobManager {
           return { original, decodedIdentifier };
         },
         signal,
+        boolean(preferDirectInput),
       );
       const originalEncryptUin = canonicalEncryptUin(profiles.original.encryptUin);
       const decodedEncryptUin = canonicalEncryptUin(profiles.decodedIdentifier.encryptUin);
@@ -716,6 +811,7 @@ export class QQJobManager {
     proxyInput?: unknown,
     allowDirectInput?: unknown,
     signal?: AbortSignal,
+    preferDirectInput?: unknown,
   ): Promise<QQClassicEncryptUinResolution> {
     const parsed = parseClassicEncryptUinExperimentInput(String(input ?? ""));
     if (parsed.resolution === "local") {
@@ -742,6 +838,7 @@ export class QQJobManager {
           },
         ),
         signal,
+        boolean(preferDirectInput),
       );
     } catch (error) {
       if (error instanceof QQJobManagerError || error instanceof RunCancelled) throw error;
@@ -772,6 +869,7 @@ export class QQJobManager {
     allowDirectInput: unknown,
     operation: (lanes: QQCommentLane[]) => Promise<T>,
     externalSignal?: AbortSignal,
+    preferDirect = false,
   ): Promise<T> {
     const lookupVersion = ++this.lookupVersion;
     const previousLookup = this.lookupCompletion;
@@ -784,6 +882,12 @@ export class QQJobManager {
     const lease = this.coordinator.acquire("qq");
     if (!lease) throw new QQJobManagerError(409, "已有其他任务运行，请先停止当前任务。");
     const controller = new AbortController();
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("qq-lookup-timeout"));
+      cancelQQMusicLanes(this.lookupLanes);
+    }, this.lookupTimeoutMs);
     let settleLookup = (): void => {};
     const lookupCompletion = new Promise<void>((resolve) => { settleLookup = resolve; });
     this.lookupCompletion = lookupCompletion;
@@ -803,12 +907,19 @@ export class QQJobManager {
         minDelayMs: 300,
         jitterMs: 100,
         forbiddenCooldownMs: 900_000,
+        preferDirect,
       };
       const prepared = await this.prepareLanes(config, controller.signal);
       this.lookupLanes = prepared.lanes;
       throwIfAborted(controller.signal);
-      return await operation(prepared.lanes);
+      return await abortRace(operation(prepared.lanes), controller.signal);
+    } catch (error) {
+      if (timedOut) {
+        throw new QQJobManagerError(504, "普通查询超过 8 秒仍未完成；已停止本次本机直连，请检查网络后重试。");
+      }
+      throw error;
     } finally {
+      clearTimeout(timeout);
       controller.abort();
       cancelQQMusicLanes(this.lookupLanes);
       this.lookupLanes = [];
@@ -828,7 +939,9 @@ export class QQJobManager {
     laneSelection?: ProxyLaneSelection;
     proxyEnabled: boolean;
   }> {
-    const pool = await abortRace(this.poolReader(this.paths.pool), signal);
+    const pool = config.preferDirect && !config.proxy
+      ? undefined
+      : await abortRace(this.poolReader(this.paths.pool), signal);
     throwIfAborted(signal);
     const poolExpected = proxyPoolStatusRunning(pool);
     const available = poolExpected && pool
@@ -892,13 +1005,14 @@ export class QQJobManager {
 
   private async resolveCanonicalTarget(input: string) {
     const normalized = normalizeUserInput(input);
-    if (normalized.kind === "encrypt-uin"
-      && this.lanes.length > 0
-      && this.lanes.every((lane) => lane.client.resolvesOpaqueLocally === true)) {
+    if (normalized.kind === "encrypt-uin") {
       return { input: input.trim(), encryptUin: canonicalEncryptUin(normalized.value) };
     }
-    const resolved = await executeControlAcrossLanes(this.lanes, "qq_resolve_user", (lane) =>
-      lane.client.resolveUser(input, lane.transportGate.signal)
+    const resolved = await this.withDirectAuxLane((lane) =>
+      executeControlAcrossLanes([lane], "qq_resolve_user", (current) =>
+        current.client.resolveUser(input, current.transportGate.signal)
+      ),
+      this.abortController?.signal,
     );
     return { ...resolved, encryptUin: canonicalEncryptUin(resolved.encryptUin) };
   }
@@ -909,17 +1023,62 @@ export class QQJobManager {
   ): Promise<QQTargetIdentitySnapshot> {
     if (display.kind === "wechat-user") return identitySnapshot(display);
     let nickname = target.nickname?.trim() || undefined;
-    let avatarUrl = safeAvatarUrl(target.avatarUrl);
-    if ((!nickname || !avatarUrl) && this.lanes.some((lane) => lane.client.getPublicUserProfile)) {
-      const profile = await optionalTargetProfile(
-        this.lanes,
-        display.profileLookup,
-        target.encryptUin,
+    let avatarUrl = qqMusicTargetAvatarUrl(display) ?? safeAvatarUrl(target.avatarUrl);
+    if (!nickname || !avatarUrl) {
+      const profile = await this.withDirectAuxLane(
+        (lane) => optionalTargetProfile([lane], display.profileLookup, target.encryptUin),
+        this.abortController?.signal,
       );
       nickname ??= profile?.nickname?.trim() || undefined;
       avatarUrl ??= safeAvatarUrl(profile?.avatarUrl);
     }
     return identitySnapshot(display, nickname, avatarUrl);
+  }
+
+  private async withDirectAuxLane<T>(
+    operation: (lane: QQCommentLane) => Promise<T>,
+    externalSignal?: AbortSignal,
+  ): Promise<T> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const abortFromCaller = (): void => { controller.abort(); };
+    externalSignal?.addEventListener("abort", abortFromCaller, { once: true });
+    if (externalSignal?.aborted) controller.abort();
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      controller.abort(new Error("qq-direct-aux-timeout"));
+    }, this.lookupTimeoutMs);
+    const gate = new QQMusicTransportGate({
+      maxConcurrent: 1,
+      minStartDelayMs: DEFAULT_QQ_TRANSPORT_START_DELAY_MS,
+    });
+    const lane: QQCommentLane = {
+      name: "direct",
+      client: this.clientFactory(undefined),
+      transportGate: gate,
+      governor: new RequestGovernor({
+        requestBudget: 0,
+        minDelayMs: 300,
+        jitterMs: 100,
+        maxRetries: 2,
+        forbiddenCooldownMs: 900_000,
+        platformPolicy: "qq",
+      }),
+    };
+    try {
+      throwIfAborted(controller.signal);
+      return await abortRace(operation(lane), controller.signal);
+    } catch (error) {
+      if (timedOut) {
+        throw new QQJobManagerError(504, "QQ 音乐普通直连查询超过 8 秒，已停止。");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+      controller.abort();
+      cancelQQMusicLanes([lane]);
+      externalSignal?.removeEventListener("abort", abortFromCaller);
+    }
   }
 
   private trackRequest(activeId: string, activity: QQMusicRequestActivity): void {
@@ -1121,7 +1280,7 @@ type LanePreparationConfig = Pick<
   | "allowDirect"
   | "maxProxyLanes"
   | "hostConcurrency"
->;
+> & { preferDirect?: boolean };
 
 function parseStartRequest(input: QQStartRequest): ParsedStartRequest {
   if (!input || typeof input !== "object") throw new QQJobManagerError(400, "QQ 音乐任务参数格式错误。");
@@ -1255,6 +1414,15 @@ function safeAvatarUrl(value: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+function lookupRoute(laneName: string): {
+  kind: QQTargetProbeSnapshot["route"];
+  name: string;
+} {
+  if (laneName === "direct") return { kind: "direct", name: "本机直连" };
+  if (laneName === "static-proxy") return { kind: "explicit-proxy", name: "手动代理" };
+  return { kind: "managed-pool", name: laneName || "代理池节点" };
 }
 
 async function optionalTargetProfile(

@@ -222,3 +222,225 @@ test("QQ Live Task suppresses profile details for a WeChat identity", () => {
   assert.equal(identity.platform, "qq");
   assert.equal("avatarUrl" in identity, false);
 });
+
+test("QQ preflight renders a public nickname and trusted avatar while keeping WeChat local", () => {
+  const context: Record<string, unknown> = {
+    fmt(value: unknown) { return String(value); },
+    trustedAvatarUrl(value: unknown) {
+      return String(value || "").startsWith("https://q1.qlogo.cn/") ? String(value) : undefined;
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("qqProbeRouteLabel")}
+    ${extractFunction("renderQQUserProbe")}
+    globalThis.renderQQUserProbe = renderQQUserProbe;
+  `, context);
+  const render = context.renderQQUserProbe as (probe: unknown, result: unknown) => void;
+  const probe = {
+    preview: { hidden: true },
+    avatar: { src: "/icons/user-round.svg" },
+    nickname: { textContent: "-" },
+    meta: { textContent: "-" },
+  };
+
+  render(probe, {
+    identity: {
+      kind: "qq-number",
+      label: "QQ 123456789",
+      nickname: "synthetic-user",
+      avatarUrl: "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=100",
+    },
+    route: "direct",
+    routeName: "本机直连",
+    routeAttempts: 1,
+    elapsedMs: 8,
+  });
+  assert.equal(probe.preview.hidden, false);
+  assert.equal(probe.nickname.textContent, "synthetic-user");
+  assert.equal(probe.avatar.src, "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=100");
+  assert.match(probe.meta.textContent, /QQ 123456789.*本机直连.*8ms/);
+
+  render(probe, {
+    identity: { kind: "wechat-user", label: "微信用户", nickname: "must-not-render" },
+    route: "local",
+    routeName: "本地识别",
+    routeAttempts: 0,
+    elapsedMs: 0,
+  });
+  assert.equal(probe.nickname.textContent, "微信用户");
+  assert.equal(probe.avatar.src, "/icons/user-round.svg");
+  assert.equal(probe.meta.textContent, "微信用户 · 本地识别");
+});
+
+test("task startup capsule advances phases and settles without an elapsed-time surface", () => {
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  const classes = new Set<string>();
+  const stage = { textContent: "" };
+  const progress = {
+    hidden: true,
+    classList: {
+      add(name: string) { classes.add(name); },
+      remove(...names: string[]) { for (const name of names) classes.delete(name); },
+      contains(name: string) { return classes.has(name); },
+    },
+  };
+  const context: Record<string, unknown> = {
+    el: { taskStartupProgress: progress, taskStartupStage: stage },
+    taskStartupProgressVersion: 0,
+    taskStartupPhaseTimers: [],
+    taskStartupHideTimer: undefined,
+    setTimeout(callback: () => void) {
+      const id = ++nextTimer;
+      timers.set(id, callback);
+      return id;
+    },
+    clearTimeout(id: number | undefined) { if (id) timers.delete(id); },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("clearTaskStartupTimers")}
+    ${extractFunction("beginTaskStartup")}
+    ${extractFunction("finishTaskStartup")}
+    globalThis.api = { beginTaskStartup, finishTaskStartup };
+  `, context);
+  const api = context.api as {
+    beginTaskStartup(phases: string[]): void;
+    finishTaskStartup(success: boolean, message: string): void;
+  };
+
+  api.beginTaskStartup(["提交任务", "解析目标", "创建通道"]);
+  assert.equal(progress.hidden, false);
+  assert.equal(stage.textContent, "提交任务");
+  timers.get(1)?.();
+  assert.equal(stage.textContent, "解析目标");
+
+  api.finishTaskStartup(true, "任务已启动");
+  assert.equal(stage.textContent, "任务已启动");
+  assert.equal(classes.has("is-complete"), true);
+  const hide = [...timers.values()].at(-1);
+  hide?.();
+  assert.equal(progress.hidden, true);
+  assert.equal(appSource.includes("taskStartupElapsed"), false);
+});
+
+test("ordinary song search is single-flight, cached for a minute, and bounded", async () => {
+  let apiCalls = 0;
+  let completeFirst = (_value: unknown): void => {};
+  const firstResponse = new Promise((resolve) => { completeFirst = resolve; });
+  const rendered: unknown[] = [];
+  const search = {
+    platform: "netease",
+    query: {
+      value: "search song",
+      setCustomValidity() {},
+      reportValidity() {},
+    },
+    id: { value: "" },
+    preview: { textContent: "", hidden: true },
+    button: { disabled: false },
+    controller: undefined,
+    pendingQuery: "",
+    generation: 0,
+    cache: new Map(),
+  };
+  const context: Record<string, unknown> = {
+    AbortController,
+    URLSearchParams,
+    Date,
+    search,
+    qqLookupControllers: new Set(),
+    qqLookupBusy: false,
+    async api() {
+      apiCalls += 1;
+      if (apiCalls === 1) return firstResponse;
+      return { songs: [{ id: String(apiCalls), name: "Song", artists: [] }] };
+    },
+    renderSongResults(_search: unknown, songs: unknown) { rendered.push(songs); },
+    renderSongSearchStatus() {},
+    clearSongResults() {},
+    songLabel() { return "Song"; },
+    syncTaskStartAvailability() {},
+    toast() {},
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("songSearchParams")}
+    ${extractFunction("runSongSearch")}
+    globalThis.runSongSearch = runSongSearch;
+  `, context);
+  const run = context.runSongSearch as (search: unknown) => Promise<void>;
+
+  const first = run(search);
+  await Promise.resolve();
+  await run(search);
+  assert.equal(apiCalls, 1, "the same pending query shares one request");
+  completeFirst({ songs: [{ id: "7", name: "First", artists: [] }] });
+  await first;
+  await run(search);
+  assert.equal(apiCalls, 1, "the fresh cached query does not hit the network");
+
+  const cached = search.cache.get("search song") as { expiresAt: number };
+  cached.expiresAt = 0;
+  await run(search);
+  assert.equal(apiCalls, 2, "an expired entry is fetched again");
+
+  for (let index = 0; index < 25; index += 1) {
+    search.query.value = `query ${index}`;
+    await run(search);
+  }
+  assert.equal(search.cache.size, 24);
+  assert.equal(rendered.length > 0, true);
+});
+
+test("stop always targets the globally active manager and releases cross-platform start state", async () => {
+  const requests: string[] = [];
+  const notices: string[] = [];
+  let refreshes = 0;
+  let availabilitySyncs = 0;
+  const attributes = new Set<string>();
+  const context: Record<string, unknown> = {
+    TASK_VIEWS: {
+      "netease:parallel": { label: "网易云单曲并行" },
+      "qq:song": { label: "QQ 音乐单曲" },
+    },
+    activeTaskMode: "qq",
+    activeTaskViewKey: "qq:song",
+    taskViewKey: () => "netease:parallel",
+    el: {
+      stop: {
+        disabled: false,
+        setAttribute(name: string) { attributes.add(name); },
+        removeAttribute(name: string) { attributes.delete(name); },
+      },
+    },
+    async api(path: string) {
+      requests.push(path);
+      return path === "/api/tasks/stop"
+        ? { active: true, mode: "qq" }
+        : { active: false };
+    },
+    setTimeout(callback: () => void) { callback(); return 1; },
+    syncTaskStartAvailability() { availabilitySyncs += 1; },
+    toast(value: string) { notices.push(value); },
+    async refresh() { refreshes += 1; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("stopJob")}
+    globalThis.stopJob = stopJob;
+    globalThis.readState = () => ({ activeTaskMode, activeTaskViewKey, disabled: el.stop.disabled });
+  `, context);
+
+  await (context.stopJob as () => Promise<void>)();
+  assert.deepEqual(requests, ["/api/tasks/stop", "/api/tasks/active"]);
+  assert.equal(refreshes, 1);
+  assert.equal(availabilitySyncs >= 3, true);
+  assert.match(notices.at(-1) || "", /QQ 音乐单曲/);
+  const state = (context.readState as () => Record<string, unknown>)();
+  assert.equal(state.activeTaskMode, undefined);
+  assert.equal(state.activeTaskViewKey, undefined);
+  assert.equal(state.disabled, true);
+  assert.equal(attributes.has("aria-busy"), false);
+});

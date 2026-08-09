@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { encodeClassicEncryptUin } from "../src/qq-music/classic-encrypt-uin";
-import { describeQQMusicTarget } from "../src/qq-music/target-display";
+import { describeQQMusicTarget, qqMusicTargetAvatarUrl } from "../src/qq-music/target-display";
 
 test("describes numeric QQ and its official profile URL without masking", () => {
   const expected = { kind: "qq-number", label: "QQ 123456789", profileLookup: "123456789" };
@@ -9,6 +9,10 @@ test("describes numeric QQ and its official profile URL without masking", () => 
   assert.deepEqual(
     describeQQMusicTarget("https://y.qq.com/n/ryqq/profile/123456789"),
     expected,
+  );
+  assert.equal(
+    qqMusicTargetAvatarUrl(describeQQMusicTarget("123456789")),
+    "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=100",
   );
 });
 
@@ -29,6 +33,10 @@ test("decodes classic EncryptUin and its official profile URL to the same full Q
     describeQQMusicTarget(`https://y.qq.com/n/ryqq_v2/profile?uin=${token}`),
     expected,
   );
+  assert.equal(
+    qqMusicTargetAvatarUrl(describeQQMusicTarget(token)),
+    "https://q1.qlogo.cn/g?b=qq&nk=123456789012&s=100",
+  );
 });
 
 test("labels the 28-character wxuin form as a WeChat user instead of a QQ or WeChat number", () => {
@@ -40,6 +48,7 @@ test("labels the 28-character wxuin form as a WeChat user instead of a QQ or WeC
     profileLookup: identifier,
   });
   assert.doesNotMatch(describeQQMusicTarget(token).label, /QQ|QQ号|微信号/);
+  assert.equal(qqMusicTargetAvatarUrl(describeQQMusicTarget(token)), undefined);
 });
 
 test("shows an irreversible opaque target as a full EncryptUin without inventing a QQ", () => {
@@ -50,4 +59,5 @@ test("shows an irreversible opaque target as a full EncryptUin without inventing
     describeQQMusicTarget(`https://y.qq.com/portal/profile.html?uin=${token}`),
     expected,
   );
+  assert.equal(qqMusicTargetAvatarUrl(describeQQMusicTarget(token)), undefined);
 });

@@ -5,6 +5,8 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 const el = {
   parallelForm: $("#parallelForm"), sourceForm: $("#sourceForm"), parallelUid: $("#parallelUid"), uid: $("#uid"),
   qqSongForm: $("#qqSongForm"), qqLikesForm: $("#qqLikesForm"), qqSongTarget: $("#qqSongTarget"), qqLikesTarget: $("#qqLikesTarget"),
+  qqSongUserLookup: $("#qqSongUserLookupButton"), qqSongUserPreview: $("#qqSongUserPreview"), qqSongUserAvatar: $("#qqSongUserAvatar"), qqSongUserNickname: $("#qqSongUserNickname"), qqSongUserMeta: $("#qqSongUserMeta"),
+  qqLikesUserLookup: $("#qqLikesUserLookupButton"), qqLikesUserPreview: $("#qqLikesUserPreview"), qqLikesUserAvatar: $("#qqLikesUserAvatar"), qqLikesUserNickname: $("#qqLikesUserNickname"), qqLikesUserMeta: $("#qqLikesUserMeta"),
   qqSongId: $("#qqSongId"), qqSongQuery: $("#qqSongQuery"), qqSongResults: $("#qqSongResults"), qqSongPreview: $("#qqSongPreview"), qqSongLookup: $("#qqSongLookupButton"),
   songId: $("#songId"), songQuery: $("#neteaseSongQuery"), songResults: $("#neteaseSongResults"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"),
@@ -27,6 +29,8 @@ const el = {
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
+  globalSettingsButton: $("#globalSettingsButton"), globalSettingsDialog: $("#globalSettingsDialog"), globalSettingsSupport: $("#globalSettingsSupport"), globalSettingsStatus: $("#globalSettingsStatus"), saveGlobalSettings: $("#saveGlobalSettingsButton"), resetGlobalSettings: $("#resetGlobalSettingsButton"),
+  taskStartupProgress: $("#taskStartupProgress"), taskStartupStage: $("#taskStartupStage"),
   activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
   appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"), platformSurface: $("#platformSurface"), platformLiveRegion: $("#platformLiveRegion"),
   neteaseWorkbench: $("#neteaseWorkbench"), qqWorkbench: $("#qqWorkbench"),
@@ -114,6 +118,10 @@ const activeDisclosureDetails = new Set();
 const interfaceAnimations = new Set();
 const fallbackMotionElements = new Set();
 let activeSongsSignature = "";
+let desktopSettings = { version: 1, closeBehavior: "ask" };
+let taskStartupProgressVersion = 0;
+let taskStartupPhaseTimers = [];
+let taskStartupHideTimer;
 const activeSongRows = new Map();
 const inspectorOverlayQuery = matchMedia("(max-width: 1280px)");
 
@@ -161,6 +169,35 @@ for (const search of Object.values(SONG_SEARCHES)) {
   search.songs = [];
   search.activeIndex = -1;
   search.selectedQuery = "";
+  search.pendingQuery = "";
+  search.cache = new Map();
+}
+
+const QQ_USER_PROBES = {
+  "qq:song": {
+    viewKey: "qq:song",
+    form: el.qqSongForm,
+    input: el.qqSongTarget,
+    button: el.qqSongUserLookup,
+    preview: el.qqSongUserPreview,
+    avatar: el.qqSongUserAvatar,
+    nickname: el.qqSongUserNickname,
+    meta: el.qqSongUserMeta,
+  },
+  "qq:likes": {
+    viewKey: "qq:likes",
+    form: el.qqLikesForm,
+    input: el.qqLikesTarget,
+    button: el.qqLikesUserLookup,
+    preview: el.qqLikesUserPreview,
+    avatar: el.qqLikesUserAvatar,
+    nickname: el.qqLikesUserNickname,
+    meta: el.qqLikesUserMeta,
+  },
+};
+for (const probe of Object.values(QQ_USER_PROBES)) {
+  probe.generation = 0;
+  probe.controller = undefined;
 }
 
 function taskViewKey(platformValue = platform, modeValue = mode) { return `${platformValue}:${modeValue}`; }
@@ -276,18 +313,15 @@ async function decodeClassicEncryptUin() {
   setClassicStatus(
     el.classicDecodeStatus,
     resolutionHint === "network"
-      ? "正在经当前 QQ 代理配置联网获取 canonical EncryptUin…"
+      ? "正在通过本机直连获取 canonical EncryptUin…"
       : "正在本机提取并离线校验受支持格式…",
     undefined,
   );
-  const form = document.getElementById(el.classicDialog.dataset.formId) || el.qqSongForm;
-  const proxy = form.elements.proxy.value.trim();
-  const allowDirect = form.elements.allowDirect.checked;
   try {
     const decoded = await api("/api/qq/encrypt-uin/decode", {
       method: "POST",
       signal: controller.signal,
-      body: JSON.stringify({ input: sourceInput, proxy, allowDirect }),
+      body: JSON.stringify({ input: sourceInput }),
     });
     if (controller.signal.aborted || version !== classicDecodeVersion || sourceInput !== el.classicInput.value.trim()) return undefined;
     const identityLabel = classicIdentityLabel(decoded.identityKind);
@@ -314,8 +348,8 @@ async function decodeClassicEncryptUin() {
     el.classicIdentityKind.textContent = identityLabel;
     el.classicMaskedIdentifier.textContent = isWechatUser ? "微信用户" : decoded.identifier;
     el.classicIdentifierWarning.textContent = decoded.identityKind === "wxuin-candidate"
-      ? "该身份来自 QQ 音乐的微信登录体系，界面只标记为“微信用户”，不把内部 ID 误称为微信号或 QQ 号。在线验证会经当前代理请求 QQ 官方公开资料接口。"
-      : "这是 QQ号候选，不代表账号所有权。按当前显示设置直接显示完整 QQ 号；复制仍只在你明确点击后写入剪贴板。在线验证会经当前代理请求 QQ 官方公开资料接口。";
+      ? "该身份来自 QQ 音乐的微信登录体系，界面只标记为“微信用户”，不把内部 ID 误称为微信号或 QQ 号。在线验证是低频普通查询，固定使用本机直连。"
+      : "这是 QQ号候选，不代表账号所有权。按当前显示设置直接显示完整 QQ 号；复制仍只在你明确点击后写入剪贴板。在线验证是低频普通查询，固定使用本机直连。";
     el.classicResult.hidden = false;
     el.classicReveal.disabled = isWechatUser;
     el.classicReveal.textContent = isWechatUser ? "微信用户" : "隐藏完整标识";
@@ -376,15 +410,12 @@ async function verifyClassicEncryptUin() {
   syncTaskStartAvailability();
   el.classicVerify.disabled = true;
   el.classicVerifyStatus.hidden = false;
-  setClassicStatus(el.classicVerifyStatus, "正在通过当前 QQ 代理配置进行官方正向验证…", undefined);
-  const form = document.getElementById(el.classicDialog.dataset.formId) || el.qqSongForm;
-  const proxy = form.elements.proxy.value.trim();
-  const allowDirect = form.elements.allowDirect.checked;
+  setClassicStatus(el.classicVerifyStatus, "正在通过本机直连进行官方正向验证…", undefined);
   try {
     const verification = await api("/api/qq/encrypt-uin/verify", {
       method: "POST",
       signal: controller.signal,
-      body: JSON.stringify({ encryptUin: decoded.encryptUin, proxy, allowDirect }),
+      body: JSON.stringify({ encryptUin: decoded.encryptUin }),
     });
     if (controller.signal.aborted
       || decoded.sourceInput !== el.classicInput.value.trim()
@@ -428,6 +459,11 @@ async function startParallel() {
     return;
   }
   setBusy(true);
+  beginTaskStartup([
+    "正在提交单曲并行配置",
+    "服务端正在验证出口与歌曲",
+    "正在建立评论分片",
+  ]);
   const requestedView = taskViewKey();
   const requestedModeVersion = modeSwitchVersion;
   try {
@@ -446,7 +482,8 @@ async function startParallel() {
     } else void refresh();
     setTaskPanelCollapsed(true);
     toast("并行扫描已启动");
-  } catch (error) { toast(error.message); } finally { setBusy(false); }
+    finishTaskStartup(true, "单曲并行任务已启动");
+  } catch (error) { finishTaskStartup(false, `启动失败：${error.message}`); toast(error.message); } finally { setBusy(false); }
 }
 
 async function startSource(dryRun) {
@@ -457,6 +494,11 @@ async function startSource(dryRun) {
     return;
   }
   setBusy(true);
+  beginTaskStartup([
+    "正在提交用户来源配置",
+    "正在解析用户与歌曲来源",
+    "正在准备检查点与出口",
+  ]);
   const requestedView = taskViewKey();
   const requestedModeVersion = modeSwitchVersion;
   try {
@@ -477,7 +519,9 @@ async function startSource(dryRun) {
     } else void refresh();
     setTaskPanelCollapsed(true);
     toast(dryRun ? "正在读取候选歌曲" : "来源扫描已启动");
+    finishTaskStartup(true, dryRun ? "候选歌曲读取已启动" : "用户来源任务已启动");
   } catch (error) {
+    finishTaskStartup(false, `启动失败：${error.message}`);
     toast(error.message);
     if (error.status === 401) void startAuth();
   } finally { setBusy(false); }
@@ -494,6 +538,11 @@ async function startQQ(qqMode) {
     return;
   }
   setBusy(true);
+  beginTaskStartup([
+    "正在提交 QQ 音乐配置",
+    "正在解析目标与准备连接",
+    "正在创建评论 Lane",
+  ]);
   const requestedView = taskViewKey();
   const requestedModeVersion = modeSwitchVersion;
   try {
@@ -520,7 +569,41 @@ async function startQQ(qqMode) {
     } else void refresh();
     setTaskPanelCollapsed(true);
     toast(qqMode === "song" ? "QQ 音乐单曲扫描已启动" : "QQ 音乐喜欢歌曲扫描已启动");
-  } catch (error) { toast(error.message); } finally { setBusy(false); }
+    finishTaskStartup(true, qqMode === "song" ? "QQ 音乐单曲任务已启动" : "QQ 音乐喜欢歌曲任务已启动");
+  } catch (error) { finishTaskStartup(false, `启动失败：${error.message}`); toast(error.message); } finally { setBusy(false); }
+}
+
+function clearTaskStartupTimers() {
+  for (const timer of taskStartupPhaseTimers) clearTimeout(timer);
+  taskStartupPhaseTimers = [];
+  clearTimeout(taskStartupHideTimer);
+  taskStartupHideTimer = undefined;
+}
+
+function beginTaskStartup(phases) {
+  const version = ++taskStartupProgressVersion;
+  clearTaskStartupTimers();
+  el.taskStartupProgress.classList.remove("is-complete", "is-error");
+  el.taskStartupStage.textContent = phases[0] || "正在启动任务";
+  el.taskStartupProgress.hidden = false;
+  for (const [index, delay] of [450, 1_800].entries()) {
+    taskStartupPhaseTimers.push(setTimeout(() => {
+      if (version !== taskStartupProgressVersion || el.taskStartupProgress.classList.contains("is-complete")) return;
+      el.taskStartupStage.textContent = phases[index + 1] || phases.at(-1) || "正在等待服务端响应";
+    }, delay));
+  }
+}
+
+function finishTaskStartup(success, message) {
+  if (el.taskStartupProgress.hidden) return;
+  taskStartupProgressVersion += 1;
+  clearTaskStartupTimers();
+  el.taskStartupStage.textContent = message;
+  el.taskStartupProgress.classList.add(success ? "is-complete" : "is-error");
+  taskStartupHideTimer = setTimeout(() => {
+    el.taskStartupProgress.hidden = true;
+    el.taskStartupProgress.classList.remove("is-complete", "is-error");
+  }, success ? 900 : 3_200);
 }
 
 function songLabel(song) {
@@ -533,7 +616,22 @@ function clearSongResults(search) {
   search.activeIndex = -1;
   search.results.replaceChildren();
   search.results.hidden = true;
+  search.results.removeAttribute("aria-busy");
   search.query.setAttribute("aria-expanded", "false");
+  search.query.removeAttribute("aria-activedescendant");
+}
+
+function renderSongSearchStatus(search, message, busy = false) {
+  search.songs = [];
+  search.activeIndex = -1;
+  search.results.replaceChildren();
+  const status = document.createElement("div");
+  status.className = `song-search-empty${busy ? " is-loading" : ""}`;
+  status.textContent = message;
+  search.results.append(status);
+  search.results.hidden = false;
+  search.results.toggleAttribute("aria-busy", busy);
+  search.query.setAttribute("aria-expanded", "true");
   search.query.removeAttribute("aria-activedescendant");
 }
 
@@ -544,6 +642,7 @@ function cancelSongLookup(search) {
   search.generation += 1;
   const controller = search.controller;
   search.controller = undefined;
+  search.pendingQuery = "";
   controller?.abort();
   clearSongResults(search);
   search.button.disabled = false;
@@ -553,6 +652,7 @@ function renderSongResults(search, songs) {
   search.songs = songs;
   search.activeIndex = -1;
   search.results.replaceChildren();
+  search.results.removeAttribute("aria-busy");
   if (songs.length === 0) {
     const empty = document.createElement("div");
     empty.className = "song-search-empty";
@@ -605,14 +705,8 @@ function setActiveSongOption(search, index) {
   }
 }
 
-function songSearchParams(search, key, value) {
-  const params = new URLSearchParams({ [key]: value });
-  if (search.platform === "qq") {
-    const proxy = el.qqSongForm.elements.proxy.value.trim();
-    if (proxy) params.set("proxy", proxy);
-    if (el.qqSongForm.elements.allowDirect.checked) params.set("allowDirect", "1");
-  }
-  return params;
+function songSearchParams(_search, key, value) {
+  return new URLSearchParams({ [key]: value });
 }
 
 async function runSongSearch(search, userInitiated = false) {
@@ -627,9 +721,20 @@ async function runSongSearch(search, userInitiated = false) {
     return;
   }
   search.query.setCustomValidity("");
+  if (!numeric && search.controller && search.pendingQuery === query) return;
+  if (!numeric) {
+    const cacheKey = query.toLocaleLowerCase("zh-CN");
+    const cached = search.cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      renderSongResults(search, cached.songs);
+      return;
+    }
+    if (cached) search.cache.delete(cacheKey);
+  }
   search.controller?.abort();
   const controller = new AbortController();
   search.controller = controller;
+  search.pendingQuery = query;
   const generation = ++search.generation;
   search.button.disabled = true;
   if (search.platform === "qq") {
@@ -637,6 +742,7 @@ async function runSongSearch(search, userInitiated = false) {
     qqLookupBusy = true;
     syncTaskStartAvailability();
   }
+  if (!numeric) renderSongSearchStatus(search, "正在搜索候选歌曲…", true);
   try {
     if (numeric) {
       search.id.value = query;
@@ -654,6 +760,10 @@ async function runSongSearch(search, userInitiated = false) {
     const songs = Array.isArray(response.songs)
       ? response.songs.filter((song) => song && /^\d+$/.test(String(song.id))).slice(0, 10)
       : [];
+    const cacheKey = query.toLocaleLowerCase("zh-CN");
+    search.cache.delete(cacheKey);
+    search.cache.set(cacheKey, { songs, expiresAt: Date.now() + 60_000 });
+    while (search.cache.size > 24) search.cache.delete(search.cache.keys().next().value);
     renderSongResults(search, songs);
   } catch (error) {
     if (controller.signal.aborted || generation !== search.generation) return;
@@ -661,11 +771,14 @@ async function runSongSearch(search, userInitiated = false) {
       search.preview.textContent = `数字 ID ${query} · 未能获取歌曲信息，仍可按 ID 启动`;
       search.preview.hidden = false;
     } else {
-      clearSongResults(search);
+      renderSongSearchStatus(search, `搜索失败：${error.message}`);
     }
     if (userInitiated) toast(error.message);
   } finally {
-    if (search.controller === controller) search.controller = undefined;
+    if (search.controller === controller) {
+      search.controller = undefined;
+      search.pendingQuery = "";
+    }
     if (generation === search.generation) search.button.disabled = false;
     if (search.platform === "qq") {
       qqLookupControllers.delete(controller);
@@ -677,7 +790,10 @@ async function runSongSearch(search, userInitiated = false) {
 
 function handleSongQueryInput(search) {
   clearTimeout(search.timer);
-  search.controller?.abort();
+  const controller = search.controller;
+  search.controller = undefined;
+  search.pendingQuery = "";
+  controller?.abort();
   search.generation += 1;
   clearSongResults(search);
   const query = search.query.value.trim();
@@ -768,6 +884,94 @@ async function lookupUser() {
 }
 
 function probe(target, label, value) { target.className = value.status; target.textContent = value.status === "available" ? `${label} ${fmt(value.songs)}` : `${label} ${value.status === "cooldown" ? "冷却" : "受限"}`; }
+
+function resetQQUserProbe(probe) {
+  probe.generation += 1;
+  const controller = probe.controller;
+  probe.controller = undefined;
+  controller?.abort();
+  probe.button.disabled = false;
+  probe.preview.hidden = true;
+  probe.avatar.src = "/icons/user-round.svg";
+  probe.nickname.textContent = "-";
+  probe.meta.textContent = "-";
+  syncTaskStartAvailability();
+}
+
+function qqProbeRouteLabel(result) {
+  if (result.route === "local") return "本地识别";
+  if (result.route === "managed-pool") {
+    return `代理池 ${result.routeName || "节点"}${Number(result.routeAttempts) > 1 ? `（第 ${fmt(result.routeAttempts)} 个出口成功）` : ""}`;
+  }
+  return result.route === "explicit-proxy" ? "手动代理" : "本机直连";
+}
+
+function renderQQUserProbe(probe, result) {
+  const identity = result?.identity || {};
+  const wechat = identity.kind === "wechat-user";
+  probe.nickname.textContent = wechat ? "微信用户" : identity.nickname || "未提供公开昵称";
+  probe.meta.textContent = [
+    identity.label,
+    qqProbeRouteLabel(result),
+    result.route === "local" ? undefined : `${fmt(result.elapsedMs)}ms`,
+  ].filter(Boolean).join(" · ");
+  probe.avatar.src = wechat
+    ? "/icons/user-round.svg"
+    : trustedAvatarUrl(identity.avatarUrl, "qq") || "/icons/user-round.svg";
+  probe.preview.hidden = false;
+}
+
+async function lookupQQUser(probe) {
+  if (!probe.input.reportValidity()) return;
+  probe.controller?.abort();
+  const controller = new AbortController();
+  probe.controller = controller;
+  const generation = ++probe.generation;
+  const target = probe.input.value.trim();
+  probe.button.disabled = true;
+  probe.avatar.src = "/icons/user-round.svg";
+  probe.nickname.textContent = "正在探测 QQ 音乐用户";
+  probe.meta.textContent = "正通过本机直连读取公开昵称和头像…";
+  probe.preview.hidden = false;
+  qqLookupControllers.add(controller);
+  qqLookupBusy = true;
+  syncTaskStartAvailability();
+  try {
+    const result = await api("/api/qq/user", {
+      method: "POST",
+      signal: controller.signal,
+      body: JSON.stringify({ target }),
+    });
+    if (controller.signal.aborted || generation !== probe.generation || target !== probe.input.value.trim()) return;
+    if (result?.platform !== "qq"
+      || !["qq-number", "wechat-user", "encrypt-uin"].includes(result?.identity?.kind)
+      || typeof result?.identity?.label !== "string") {
+      throw new Error("QQ 音乐返回了无效的用户探测结果。");
+    }
+    renderQQUserProbe(probe, result);
+    qqTargetPreviews[probe.viewKey] = {
+      input: target,
+      kind: result.identity.kind,
+      label: result.identity.label,
+    };
+    syncToolbarContext();
+  } catch (error) {
+    if (controller.signal.aborted || generation !== probe.generation) return;
+    probe.preview.hidden = true;
+    toast(`探测 QQ 音乐用户失败：${error.message}`);
+  } finally {
+    if (probe.controller === controller) probe.controller = undefined;
+    if (generation === probe.generation) probe.button.disabled = false;
+    qqLookupControllers.delete(controller);
+    qqLookupBusy = qqLookupControllers.size > 0;
+    syncTaskStartAvailability();
+  }
+}
+
+function handleQQTargetInput(probe) {
+  resetQQUserProbe(probe);
+  scheduleQQTargetPreview(probe.viewKey, probe.input.value);
+}
 
 async function togglePool() {
   if (!poolRunning && poolSource === "clash-verge") {
@@ -1675,6 +1879,7 @@ async function performLogsRefresh(request, requestedView, expectedGeneration) {
     if (signature === logsSignature) return;
     logsSignature = signature;
     el.logPath.textContent = data.path || "任务启动后将在本地生成结构化日志。";
+    el.logPath.classList.toggle("is-placeholder", !data.path);
     el.logs.replaceChildren(...(data.entries.length ? data.entries.map(logRow) : [emptyLogRow()]));
   } catch (error) {
     if (request === logsRequest && requestedView === taskViewKey()
@@ -1885,6 +2090,7 @@ function resetVisibleLogs() {
   logsRequest += 1;
   logsSignature = "";
   el.logPath.textContent = "任务启动后将在本地生成结构化日志。";
+  el.logPath.classList.add("is-placeholder");
   el.logs.replaceChildren(emptyLogRow());
 }
 
@@ -2145,15 +2351,41 @@ function tableRow(values) { const row = document.createElement("tr"); values.for
 function emptyRow() { const row = document.createElement("tr"); row.className = "empty-row"; const cell = document.createElement("td"); cell.colSpan = 5; cell.textContent = "暂无命中"; row.append(cell); return row; }
 
 async function stopJob() {
+  const targetViewKey = activeTaskViewKey || taskViewKey();
+  const view = TASK_VIEWS[targetViewKey];
+  el.stop.disabled = true;
+  el.stop.setAttribute("aria-busy", "true");
   try {
-    const targetViewKey = activeTaskViewKey || taskViewKey();
-    const view = TASK_VIEWS[targetViewKey];
-    const targetMode = activeTaskMode || view.taskMode;
-    const job = await api(`${taskBase(targetMode)}/stop`, { method: "POST", body: "{}" });
-    targetMode === "parallel" ? renderParallel(job) : targetMode === "source" ? renderSource(job) : renderQQ(job);
-    if (targetViewKey !== taskViewKey()) toast(`已停止${view.label}任务`);
-    void refresh();
+    let state = await api("/api/tasks/stop", { method: "POST", body: "{}" });
+    activeTaskMode = state.active ? state.mode : undefined;
+    if (!state.active) activeTaskViewKey = undefined;
+    syncTaskStartAvailability();
+    if (state.active) {
+      toast(`正在停止${view.label}任务并保存进度…`);
+      const deadline = Date.now() + 45_000;
+      while (state.active && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 125));
+        state = await api("/api/tasks/active");
+        activeTaskMode = state.active ? state.mode : undefined;
+        if (!state.active) activeTaskViewKey = undefined;
+        syncTaskStartAvailability();
+      }
+    }
+    await refresh();
+    if (!state.active) {
+      activeTaskMode = undefined;
+      activeTaskViewKey = undefined;
+      syncTaskStartAvailability();
+      toast(`已停止${view.label}任务`);
+    } else {
+      toast("停止请求已发送，仍在等待检查点落盘。");
+    }
   } catch (error) { toast(error.message); }
+  finally {
+    el.stop.removeAttribute("aria-busy");
+    el.stop.disabled = !activeTaskMode;
+    syncTaskStartAvailability();
+  }
 }
 function refreshAuth() {
   if (authRefreshInFlight) return authRefreshInFlight;
@@ -2449,6 +2681,9 @@ async function switchMode(value) {
   const previousMode = mode;
   const previousForm = currentForm();
   if (["parallel", "song"].includes(previousMode)) cancelSongLookup(SONG_SEARCHES[ownerPlatform]);
+  if (ownerPlatform === "qq" && QQ_USER_PROBES[`qq:${previousMode}`]?.controller) {
+    resetQQUserProbe(QQ_USER_PROBES[`qq:${previousMode}`]);
+  }
   mode = value;
   selectedModes[platform] = mode;
   document.body.dataset.mode = mode;
@@ -2682,6 +2917,11 @@ function commitPlatformSelection(value, switchVersion, options = {}) {
     if (changed) {
       selectedTabs[previousPlatform] = $('.tab.active')?.dataset.tab || "results";
       cancelSongLookup(SONG_SEARCHES[previousPlatform]);
+      if (previousPlatform === "qq") {
+        for (const probe of Object.values(QQ_USER_PROBES)) {
+          if (probe.controller) resetQQUserProbe(probe);
+        }
+      }
       selectedModes[previousPlatform] = mode;
       platform = value;
       mode = selectedModes[platform];
@@ -2921,6 +3161,59 @@ async function setupDesktopWindowControls() {
   renderMaximized(await desktop.isMaximized());
 }
 
+function renderGlobalSettings(settings = desktopSettings) {
+  desktopSettings = {
+    version: 1,
+    closeBehavior: ["ask", "background", "exit"].includes(settings?.closeBehavior) ? settings.closeBehavior : "ask",
+  };
+  const selected = $(`input[name="desktopCloseBehavior"][value="${desktopSettings.closeBehavior}"]`);
+  if (selected) selected.checked = true;
+  const supported = typeof window.ncmDesktop?.getSettings === "function";
+  $$('input[name="desktopCloseBehavior"]').forEach((input) => { input.disabled = !supported; });
+  el.saveGlobalSettings.disabled = !supported;
+  el.resetGlobalSettings.disabled = !supported;
+  el.globalSettingsSupport.textContent = supported
+    ? "该选择保存在本机，关闭确认中勾选“记住我的选择”也会同步到这里。"
+    : "此设置仅在桌面客户端中生效。";
+}
+
+async function setupDesktopSettings() {
+  if (typeof window.ncmDesktop?.getSettings !== "function") {
+    renderGlobalSettings();
+    return;
+  }
+  try { renderGlobalSettings(await window.ncmDesktop.getSettings()); }
+  catch (error) { el.globalSettingsStatus.textContent = `设置读取失败：${error.message}`; }
+}
+
+async function openGlobalSettings() {
+  el.globalSettingsStatus.textContent = "";
+  await setupDesktopSettings();
+  el.globalSettingsDialog.showModal();
+}
+
+async function saveGlobalSettings() {
+  const selected = $('input[name="desktopCloseBehavior"]:checked')?.value;
+  if (!selected || typeof window.ncmDesktop?.updateSettings !== "function") return;
+  el.saveGlobalSettings.disabled = true;
+  try {
+    renderGlobalSettings(await window.ncmDesktop.updateSettings({ closeBehavior: selected }));
+    el.globalSettingsDialog.close();
+    toast("全局设置已保存");
+  } catch (error) { el.globalSettingsStatus.textContent = `保存失败：${error.message}`; }
+  finally { el.saveGlobalSettings.disabled = typeof window.ncmDesktop?.updateSettings !== "function"; }
+}
+
+async function resetGlobalSettings() {
+  if (typeof window.ncmDesktop?.resetSettings !== "function") return;
+  el.resetGlobalSettings.disabled = true;
+  try {
+    renderGlobalSettings(await window.ncmDesktop.resetSettings());
+    el.globalSettingsStatus.textContent = "已恢复默认：关闭窗口时每次询问。";
+  } catch (error) { el.globalSettingsStatus.textContent = `恢复失败：${error.message}`; }
+  finally { el.resetGlobalSettings.disabled = typeof window.ncmDesktop?.resetSettings !== "function"; }
+}
+
 function syncTaskStartAvailability() {
   const disabled = startSubmissionBusy || qqLookupBusy || Boolean(activeTaskMode)
     || poolChangeInFlight || poolStatus === "starting" || poolRefreshing;
@@ -2932,6 +3225,9 @@ function syncTaskStartAvailability() {
   el.toolbarStart.disabled = disabled;
   el.hostConcurrency.disabled = disabled;
   el.exitLimit.disabled = disabled;
+  for (const probe of Object.values(QQ_USER_PROBES)) {
+    probe.button.disabled = disabled || Boolean(probe.controller);
+  }
 }
 function selectedTaskLaneCount(workersPerLane) {
   if (!poolRunning) return 1;
@@ -3017,7 +3313,7 @@ function setActiveNavigation(view) {
   });
 }
 async function activateNavigation(view) {
-  if (["search", "settings"].includes(view)) {
+  if (view === "search") {
     const alreadyOpen = !document.body.classList.contains("task-panel-collapsed");
     const alreadyActive = $('[data-nav-view].active')?.dataset.navView === view;
     if (alreadyOpen && alreadyActive) {
@@ -3026,13 +3322,7 @@ async function activateNavigation(view) {
     }
     setActiveNavigation(view);
     setTaskPanelCollapsed(false);
-    if (view === "search") {
-      el.taskSidebar.scrollTo({ top: 0, behavior: "auto" });
-      return;
-    }
-    const details = currentForm().querySelector("details.advanced");
-    if (details && details.dataset.expanded !== "true") await animateDisclosure(details, true);
-    if (details) el.taskSidebar.scrollTo({ top: Math.max(0, details.offsetTop - 12), behavior: "auto" });
+    el.taskSidebar.scrollTo({ top: 0, behavior: "auto" });
     return;
   }
   if (view === "pool") {
@@ -3060,9 +3350,9 @@ function setTaskPanelCollapsed(collapsed) {
   el.taskPanelOpen.setAttribute("aria-label", collapsed ? "打开任务配置" : "关闭任务配置");
   el.taskPanelOpen.title = collapsed ? "打开任务配置" : "关闭任务配置";
   el.taskSidebar.setAttribute("aria-hidden", String(collapsed));
-  $$('[data-nav-view="search"], [data-nav-view="settings"]').forEach((item) => item.setAttribute("aria-expanded", String(!collapsed && item.classList.contains("active"))));
+  $$('[data-nav-view="search"]').forEach((item) => item.setAttribute("aria-expanded", String(!collapsed && item.classList.contains("active"))));
   const activeView = $('[data-nav-view].active')?.dataset.navView;
-  if (collapsed && ["search", "settings"].includes(activeView)) {
+  if (collapsed && activeView === "search") {
     setActiveNavigation($('.tab.active')?.dataset.tab || "results");
   }
   if (collapsed && el.taskSidebar.contains(document.activeElement)) {
@@ -3137,7 +3427,7 @@ function dismissSplash() {
 }
 
 async function boot() {
-  await setupDesktopUpdates();
+  await Promise.all([setupDesktopUpdates(), setupDesktopSettings()]);
   const restored = await restoreResumeTask();
   connectResultStream();
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
@@ -3171,6 +3461,11 @@ el.taskPanelOpen.addEventListener("click", () => {
 });
 el.taskPanelToggle.addEventListener("click", () => setTaskPanelCollapsed(true));
 el.inspectorToggle.addEventListener("click", () => setInspectorCollapsed(!document.body.classList.contains("inspector-collapsed")));
+el.globalSettingsButton.addEventListener("click", () => void openGlobalSettings());
+$("#closeGlobalSettingsButton").addEventListener("click", () => el.globalSettingsDialog.close());
+$("#cancelGlobalSettingsButton").addEventListener("click", () => el.globalSettingsDialog.close());
+el.saveGlobalSettings.addEventListener("click", () => void saveGlobalSettings());
+el.resetGlobalSettings.addEventListener("click", () => void resetGlobalSettings());
 el.exportResults.addEventListener("click", () => void exportCurrentResults());
 el.cancelPdfExport.addEventListener("click", () => void cancelPdfExport());
 el.pdfExportDialog.addEventListener("cancel", (event) => {
@@ -3182,8 +3477,15 @@ el.liveTaskAvatar.addEventListener("error", () => {
 });
 $$('[data-nav-view]').forEach((item) => item.addEventListener("click", () => void activateNavigation(item.dataset.navView)));
 $$('#parallelForm input, #sourceForm input, #qqSongForm input, #qqLikesForm input').forEach((input) => input.addEventListener("input", syncToolbarContext));
-el.qqSongTarget.addEventListener("input", () => scheduleQQTargetPreview("qq:song", el.qqSongTarget.value));
-el.qqLikesTarget.addEventListener("input", () => scheduleQQTargetPreview("qq:likes", el.qqLikesTarget.value));
+el.qqSongTarget.addEventListener("input", () => handleQQTargetInput(QQ_USER_PROBES["qq:song"]));
+el.qqLikesTarget.addEventListener("input", () => handleQQTargetInput(QQ_USER_PROBES["qq:likes"]));
+el.qqSongUserLookup.addEventListener("click", () => void lookupQQUser(QQ_USER_PROBES["qq:song"]));
+el.qqLikesUserLookup.addEventListener("click", () => void lookupQQUser(QQ_USER_PROBES["qq:likes"]));
+for (const probe of Object.values(QQ_USER_PROBES)) {
+  probe.avatar.addEventListener("error", () => {
+    if (!probe.avatar.src.endsWith("/icons/user-round.svg")) probe.avatar.src = "/icons/user-round.svg";
+  });
+}
 el.exitLimit.addEventListener("input", syncToolbarContext);
 el.hostConcurrency.addEventListener("input", syncToolbarContext);
 el.estimateButton.addEventListener("click", () => void refreshEstimate());
@@ -3313,6 +3615,7 @@ addEventListener("pagehide", () => {
   platformTransition = undefined;
   cancelInterfaceMotions();
   cancelClassicVerification();
+  for (const probe of Object.values(QQ_USER_PROBES)) resetQQUserProbe(probe);
   for (const search of Object.values(SONG_SEARCHES)) {
     clearTimeout(search.timer);
     search.controller?.abort();
@@ -3322,6 +3625,8 @@ addEventListener("pagehide", () => {
   clearTimeout(refreshTimer);
   clearTimeout(authRefreshTimer);
   clearInterval(runtimeTimerInterval);
+  clearTaskStartupTimers();
+  el.taskStartupProgress.hidden = true;
   inspectorOverlayQuery.removeEventListener("change", syncInspectorForViewport);
 });
 addEventListener("pageshow", (event) => {

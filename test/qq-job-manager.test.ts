@@ -38,6 +38,7 @@ test("resolves a canonical QQ target before deriving stable non-identifying task
     kind: "qq-number",
     label: "QQ 123456789",
     nickname: "synthetic-profile",
+    avatarUrl: "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=100",
   });
   assert.equal(fixture.options.length, 1);
   assert.equal(fixture.options[0].target, "canonical-user");
@@ -97,7 +98,7 @@ test("publishes full QQ, WeChat-user, and opaque target presentation without cha
     kind: "qq-number",
     label: `QQ ${qq}`,
     nickname: "synthetic-qq-user",
-    avatarUrl: "https://thirdqq.qlogo.cn/synthetic-avatar",
+    avatarUrl: `https://q1.qlogo.cn/g?b=qq&nk=${qq}&s=100`,
   });
   assert.equal(qqJob.generation?.target.value, qqToken);
   fixture.finish(reportFor(fixture.options[0]));
@@ -431,12 +432,10 @@ test("stops a QQ task during target resolution and never launches the scanner", 
 });
 
 test("keeps the previous result generation intact when a new startup preflight fails", async () => {
-  let resolveCalls = 0;
   const fixture = await managerFixture({
     clientFactory: () => fakeClient({
       resolveUser: async (input) => {
-        resolveCalls += 1;
-        if (resolveCalls > 1) throw Object.assign(new Error("resolve failed"), { status: 400 });
+        if (input === "123456789") throw Object.assign(new Error("resolve failed"), { status: 400 });
         return { input, encryptUin: "canonical-user" };
       },
     }),
@@ -500,6 +499,83 @@ test("search lookup is generation-independent and leaves completed task results 
   assert.equal(after.status, before.status);
 });
 
+test("QQ user and song preflight prefer direct without touching a running proxy pool", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-preflight-direct-"));
+  const createdWith: Array<string | undefined> = [];
+  const profileInputs: string[] = [];
+  let poolReads = 0;
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    poolReader: async () => {
+      poolReads += 1;
+      return {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        lastCheckedAt: new Date().toISOString(),
+        source: "external",
+        active: true,
+        entries: [{
+          name: "managed-lane",
+          endpoint: "http://127.0.0.1:18080",
+          egressIp: "192.0.2.10",
+          latencyMs: 10,
+          ncmLatencyMs: 10,
+          ncmVerified: true,
+        }],
+      };
+    },
+    clientFactory: (proxy) => {
+      createdWith.push(proxy);
+      return fakeClient({
+        getPublicUserProfile: async (input) => {
+          profileInputs.push(input);
+          return { input, encryptUin: "canonical-user", nickname: "synthetic-preflight" };
+        },
+        searchSongs: async () => [{ id: "7", name: "Search Song", artists: ["Artist"] }],
+      });
+    },
+  });
+
+  const directProfile = await manager.lookupTarget("123456789", undefined, true, undefined, true);
+  assert.deepEqual(
+    { ...directProfile, elapsedMs: 0 },
+    {
+      platform: "qq",
+      identity: {
+        kind: "qq-number",
+        label: "QQ 123456789",
+        nickname: "synthetic-preflight",
+        avatarUrl: "https://q1.qlogo.cn/g?b=qq&nk=123456789&s=100",
+      },
+      route: "direct",
+      routeName: "本机直连",
+      routeAttempts: 1,
+      elapsedMs: 0,
+    },
+  );
+  assert.equal(Number.isFinite(directProfile.elapsedMs), true);
+  assert.deepEqual(
+    await manager.searchSongs("search song", 5, undefined, true, undefined, true),
+    [{ id: "7", name: "Search Song", artists: ["Artist"] }],
+  );
+  assert.deepEqual(createdWith, [undefined, undefined]);
+  assert.deepEqual(profileInputs, ["123456789"]);
+  assert.equal(poolReads, 0);
+  assert.equal((await manager.status()).status, "idle");
+
+  const wechat = encodeClassicEncryptUin("1150000000000000472");
+  assert.deepEqual(await manager.lookupTarget(wechat, undefined, true, undefined, true), {
+    platform: "qq",
+    identity: { kind: "wechat-user", label: "微信用户" },
+    route: "local",
+    routeName: "本地识别",
+    routeAttempts: 0,
+    elapsedMs: 0,
+  });
+  assert.deepEqual(createdWith, [undefined, undefined]);
+});
+
 test("cancels an in-flight QQ song search and releases its global lease", async () => {
   const root = await mkdtemp(join(tmpdir(), "qq-manager-search-cancel-"));
   let searchStarted = (): void => {};
@@ -521,6 +597,36 @@ test("cancels an in-flight QQ song search and releases its global lease", async 
   await started;
   await manager.stop();
   await assert.rejects(search, RunCancelled);
+  assert.equal(coordinator.isBusy(), false);
+});
+
+test("bounds ordinary QQ lookups to eight seconds without changing scanner timeouts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-search-timeout-"));
+  const coordinator = new TaskCoordinator();
+  let calls = 0;
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator,
+    lookupTimeoutMs: 20,
+    clientFactory: () => fakeClient({
+      searchSongs: async () => {
+        calls += 1;
+        if (calls === 1) return new Promise(() => {});
+        return [{ id: "7", name: "Recovered", artists: [] }];
+      },
+    }),
+  });
+  await assert.rejects(
+    manager.searchSongs("search song", 10, undefined, true, undefined, true),
+    (error) => error instanceof QQJobManagerError
+      && error.status === 504
+      && /8 秒/.test(error.message),
+  );
+  assert.equal(coordinator.isBusy(), false);
+  assert.deepEqual(
+    await manager.searchSongs("search song", 10, undefined, true, undefined, true),
+    [{ id: "7", name: "Recovered", artists: [] }],
+  );
   assert.equal(coordinator.isBusy(), false);
 });
 
@@ -920,7 +1026,7 @@ test("keeps an explicitly stopped replacement job instead of jumping back to the
   const fixture = await managerFixture({
     clientFactory: () => fakeClient({
       resolveUser: async (input, signal) => {
-        if (input !== "slow-user") return { input, encryptUin: "canonical-user" };
+        if (input !== "123456789") return { input, encryptUin: "canonical-user" };
         slowResolveStarted();
         return new Promise((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(new RunCancelled()), { once: true });
@@ -932,7 +1038,7 @@ test("keeps an explicitly stopped replacement job instead of jumping back to the
   fixture.finish(reportFor(fixture.options[0]));
   await fixture.settled();
 
-  const replacement = fixture.manager.start({ mode: "likes", target: "slow-user", allowDirect: true });
+  const replacement = fixture.manager.start({ mode: "likes", target: "123456789", allowDirect: true });
   await resolving;
   await fixture.manager.stop();
   const stopped = await replacement;
@@ -1012,7 +1118,7 @@ test("keeps activity rows stable, bounded, and present across request failures",
   await fixture.settled();
 });
 
-test("rotates deterministic proxy-lane setup failures without ever falling back to direct", async () => {
+test("keeps formal proxy lanes for scanning while canonical target resolution stays direct", async () => {
   const root = await mkdtemp(join(tmpdir(), "qq-manager-control-failover-"));
   const entries = ["lane-a", "lane-b"].map((name, index) => ({
     name,
@@ -1036,8 +1142,13 @@ test("rotates deterministic proxy-lane setup failures without ever falling back 
       endpoints.push(endpoint);
       return fakeClient({
         resolveUser: async (input) => {
-          if (endpoint === entries[0].endpoint) throw new QQMusicProxyError("CONNECT rejected", 407);
-          return { input, encryptUin: "canonical-user" };
+          assert.equal(endpoint, undefined);
+          return {
+            input,
+            encryptUin: "canonical-user",
+            nickname: "synthetic-user",
+            avatarUrl: "https://example.invalid/avatar",
+          };
         },
       });
     },
@@ -1048,8 +1159,52 @@ test("rotates deterministic proxy-lane setup failures without ever falling back 
   });
   const snapshot = await manager.start({ mode: "likes", target: "123456789" });
   assert.equal(snapshot.status, "running");
-  assert.deepEqual(endpoints, entries.map((entry) => entry.endpoint));
-  assert.equal(endpoints.includes(undefined), false);
+  assert.deepEqual(endpoints, [...entries.map((entry) => entry.endpoint), undefined]);
+  finish(reportFor(scanOptions!));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test("keeps optional QQ target presentation off the formal proxy lanes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qq-manager-presentation-direct-"));
+  const target = "opaque-user_1234";
+  const entries = ["lane-a", "lane-b"].map((name, index) => ({
+    name,
+    endpoint: `http://127.0.0.1:${18180 + index}`,
+    egressIp: `198.51.100.${10 + index}`,
+    latencyMs: 10,
+    ncmLatencyMs: 10,
+    ncmVerified: true,
+  }));
+  const createdEndpoints: Array<string | undefined> = [];
+  const profileEndpoints: Array<string | undefined> = [];
+  let scanOptions: QQMusicScanOptions | undefined;
+  let finish = (_report: QQMusicScanReport): void => {};
+  const manager = new QQJobManager({
+    paths: paths(root),
+    coordinator: new TaskCoordinator(),
+    poolReader: async () => ({
+      version: 1, generatedAt: "2000-01-01T00:00:00.000Z", source: "external", active: true, entries,
+    }),
+    poolVerifier: async () => entries,
+    clientFactory: (endpoint) => {
+      createdEndpoints.push(endpoint);
+      return fakeClient({
+        getPublicUserProfile: async (input) => {
+          profileEndpoints.push(endpoint);
+          return { input, encryptUin: target, nickname: "direct-profile" };
+        },
+      });
+    },
+    runner: async (_lanes, options) => {
+      scanOptions = options;
+      return new Promise<QQMusicScanReport>((resolve) => { finish = resolve; });
+    },
+  });
+
+  await manager.start({ mode: "likes", target });
+  await waitForJob(manager, (job) => job.targetIdentity?.nickname === "direct-profile");
+  assert.deepEqual(createdEndpoints, [...entries.map((entry) => entry.endpoint), undefined]);
+  assert.deepEqual(profileEndpoints, [undefined]);
   finish(reportFor(scanOptions!));
   await new Promise<void>((resolve) => setImmediate(resolve));
 });
