@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import upstream = require("@neteasecloudmusicapienhanced/api");
 import { RunCancelled } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 import { encodeClassicEncryptUin } from "../src/qq-music/classic-encrypt-uin";
@@ -13,6 +14,7 @@ import {
   normalizeResumeTaskForClient,
   probeNeteaseIdentityDirect,
   probeNeteaseIdentityThroughLanes,
+  probeUser,
   sourceTaskPaths,
   startDashboard,
   UserProbeRouter,
@@ -692,9 +694,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=57/);
+  assert.match(pageText, /styles\.css\?v=58/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /app\.js\?v=67/);
+  assert.match(pageText, /app\.js\?v=68/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
@@ -1317,6 +1319,89 @@ test("NetEase ordinary user probes can bypass a running pool for a normal direct
   assert.equal((await router.profile("101", "http://127.0.0.1:19999", true)).route, "direct");
   assert.deepEqual(proxies, [undefined, undefined]);
   assert.equal(poolReads, 0);
+});
+
+test("starts NetEase profile, record, and liked-source probes concurrently", async () => {
+  const mutable = upstream as unknown as {
+    user_detail: () => Promise<unknown>;
+    user_record: () => Promise<unknown>;
+    user_playlist: () => Promise<unknown>;
+    playlist_detail: () => Promise<unknown>;
+  };
+  const originals = {
+    user_detail: mutable.user_detail,
+    user_record: mutable.user_record,
+    user_playlist: mutable.user_playlist,
+    playlist_detail: mutable.playlist_detail,
+  };
+  const started = new Set<string>();
+  const releases = new Map<string, () => void>();
+  const wait = (name: string, body: unknown) => new Promise<unknown>((resolve) => {
+    started.add(name);
+    releases.set(name, () => resolve({ status: 200, body }));
+  });
+  mutable.user_detail = () => wait("profile", { code: 200, profile: { userId: 42, nickname: "user" } });
+  mutable.user_record = () => wait("record", { code: 200, allData: [] });
+  mutable.user_playlist = () => wait("likes-list", {
+    code: 200,
+    playlist: [{ id: 9, specialType: 5, trackCount: 0, creator: { userId: 42 } }],
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: { code: 200, playlist: { trackCount: 0, creator: { userId: 42 }, trackIds: [] } },
+  });
+
+  try {
+    const request = probeUser("42", undefined, join(tmpdir(), "missing-ncm-cookie"));
+    const firstWave = await Promise.race([
+      (async () => {
+        while (started.size < 3) await new Promise((resolve) => setTimeout(resolve, 10));
+        return true;
+      })(),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 800)),
+    ]);
+    assert.equal(firstWave, true, "independent user reads should overlap instead of waiting serially");
+    for (const release of releases.values()) release();
+    const result = await request;
+    assert.equal(result.profile.nickname, "user");
+    assert.equal(result.record.status, "available");
+    assert.equal(result.likes.status, "available");
+  } finally {
+    mutable.user_detail = originals.user_detail;
+    mutable.user_record = originals.user_record;
+    mutable.user_playlist = originals.user_playlist;
+    mutable.playlist_detail = originals.playlist_detail;
+  }
+});
+
+test("reports a hidden NetEase liked playlist as privacy rather than cooldown", async () => {
+  const mutable = upstream as unknown as {
+    user_detail: () => Promise<unknown>;
+    user_record: () => Promise<unknown>;
+    user_playlist: () => Promise<unknown>;
+  };
+  const originals = {
+    user_detail: mutable.user_detail,
+    user_record: mutable.user_record,
+    user_playlist: mutable.user_playlist,
+  };
+  mutable.user_detail = async () => ({
+    status: 200,
+    body: { code: 200, profile: { userId: 42, nickname: "private-user" } },
+  });
+  mutable.user_record = async () => ({ status: 200, body: { code: 200, allData: [] } });
+  mutable.user_playlist = async () => ({ status: 200, body: { code: 200, playlist: [] } });
+
+  try {
+    const result = await probeUser("42", undefined, join(tmpdir(), "missing-private-ncm-cookie"));
+    assert.equal(result.record.status, "available");
+    assert.equal(result.likes.status, "private");
+    assert.match(result.likes.error || "", /隐私/);
+  } finally {
+    mutable.user_detail = originals.user_detail;
+    mutable.user_record = originals.user_record;
+    mutable.user_playlist = originals.user_playlist;
+  }
 });
 
 test("turns user_detail 404 into an actionable UID error without rotating every exit", async () => {

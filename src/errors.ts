@@ -53,6 +53,27 @@ export class AuthenticationRequired extends Error {
   }
 }
 
+/** A source is intentionally hidden by the target user's privacy settings. */
+export class SourcePrivacyRestricted extends Error {
+  readonly status = 422;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SourcePrivacyRestricted";
+  }
+}
+
+export function isSourcePrivacyRestricted(error: unknown): boolean {
+  return findSourcePrivacyRestricted(error, new Set<object>());
+}
+
+function findSourcePrivacyRestricted(error: unknown, visited: Set<object>): boolean {
+  if (error instanceof SourcePrivacyRestricted) return true;
+  if (!error || typeof error !== "object" || visited.has(error)) return false;
+  visited.add(error);
+  return findSourcePrivacyRestricted((error as { cause?: unknown }).cause, visited);
+}
+
 export class RunCancelled extends Error {
   constructor() {
     super("Run cancelled");

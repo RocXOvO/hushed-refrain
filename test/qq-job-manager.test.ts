@@ -600,7 +600,7 @@ test("cancels an in-flight QQ song search and releases its global lease", async 
   assert.equal(coordinator.isBusy(), false);
 });
 
-test("bounds ordinary QQ lookups to eight seconds without changing scanner timeouts", async () => {
+test("bounds ordinary QQ lookups to four seconds without changing scanner timeouts", async () => {
   const root = await mkdtemp(join(tmpdir(), "qq-manager-search-timeout-"));
   const coordinator = new TaskCoordinator();
   let calls = 0;
@@ -620,7 +620,7 @@ test("bounds ordinary QQ lookups to eight seconds without changing scanner timeo
     manager.searchSongs("search song", 10, undefined, true, undefined, true),
     (error) => error instanceof QQJobManagerError
       && error.status === 504
-      && /8 秒/.test(error.message),
+      && /4 秒/.test(error.message),
   );
   assert.equal(coordinator.isBusy(), false);
   assert.deepEqual(

@@ -78,6 +78,9 @@ const qqTargetPreviewVersions = Object.fromEntries(["qq:song", "qq:likes"].map((
 const qqTargetPreviewTimers = Object.fromEntries(["qq:song", "qq:likes"].map((key) => [key, undefined]));
 const liveIdentityCache = new Map();
 const LIVE_IDENTITY_CACHE_LIMIT = 128;
+const neteaseUserProbeCache = new Map();
+const NETEASE_USER_PROBE_CACHE_LIMIT = 24;
+const NETEASE_USER_PROBE_CACHE_TTL_MS = 60_000;
 let liveIdentityRequestVersion = 0;
 let resultExportInProgress = false;
 let resultExportStartedAt = 0;
@@ -122,6 +125,7 @@ let desktopSettings = { version: 1, closeBehavior: "ask" };
 let taskStartupProgressVersion = 0;
 let taskStartupPhaseTimers = [];
 let taskStartupHideTimer;
+let pendingStartupSettlement;
 const activeSongRows = new Map();
 const inspectorOverlayQuery = matchMedia("(max-width: 1280px)");
 
@@ -481,9 +485,8 @@ async function startParallel() {
       syncRuntimeTimer(job);
     } else void refresh();
     setTaskPanelCollapsed(true);
-    toast("并行扫描已启动");
     finishTaskStartup(true, "单曲并行任务已启动");
-  } catch (error) { finishTaskStartup(false, `启动失败：${error.message}`); toast(error.message); } finally { setBusy(false); }
+  } catch (error) { finishTaskStartup(false, `启动失败：${error.message}`); } finally { setBusy(false); }
 }
 
 async function startSource(dryRun) {
@@ -518,11 +521,9 @@ async function startSource(dryRun) {
       syncRuntimeTimer(job);
     } else void refresh();
     setTaskPanelCollapsed(true);
-    toast(dryRun ? "正在读取候选歌曲" : "来源扫描已启动");
     finishTaskStartup(true, dryRun ? "候选歌曲读取已启动" : "用户来源任务已启动");
   } catch (error) {
     finishTaskStartup(false, `启动失败：${error.message}`);
-    toast(error.message);
     if (error.status === 401) void startAuth();
   } finally { setBusy(false); }
 }
@@ -568,9 +569,8 @@ async function startQQ(qqMode) {
       syncRuntimeTimer(job);
     } else void refresh();
     setTaskPanelCollapsed(true);
-    toast(qqMode === "song" ? "QQ 音乐单曲扫描已启动" : "QQ 音乐喜欢歌曲扫描已启动");
     finishTaskStartup(true, qqMode === "song" ? "QQ 音乐单曲任务已启动" : "QQ 音乐喜欢歌曲任务已启动");
-  } catch (error) { finishTaskStartup(false, `启动失败：${error.message}`); toast(error.message); } finally { setBusy(false); }
+  } catch (error) { finishTaskStartup(false, `启动失败：${error.message}`); } finally { setBusy(false); }
 }
 
 function clearTaskStartupTimers() {
@@ -583,6 +583,7 @@ function clearTaskStartupTimers() {
 function beginTaskStartup(phases) {
   const version = ++taskStartupProgressVersion;
   clearTaskStartupTimers();
+  pendingStartupSettlement = undefined;
   el.taskStartupProgress.classList.remove("is-complete", "is-error");
   el.taskStartupStage.textContent = phases[0] || "正在启动任务";
   el.taskStartupProgress.hidden = false;
@@ -603,6 +604,11 @@ function finishTaskStartup(success, message) {
   taskStartupHideTimer = setTimeout(() => {
     el.taskStartupProgress.hidden = true;
     el.taskStartupProgress.classList.remove("is-complete", "is-error");
+    const settlement = pendingStartupSettlement;
+    pendingStartupSettlement = undefined;
+    if (settlement) {
+      taskStartupHideTimer = setTimeout(() => renderSettlement(settlement.job, settlement.viewKey), 240);
+    }
   }, success ? 900 : 3_200);
 }
 
@@ -871,9 +877,11 @@ function openParameterHelp(key) {
 
 async function lookupUser() {
   if (!el.uid.reportValidity()) return;
+  const uid = el.uid.value.trim();
   el.lookup.disabled = true;
   try {
-    const result = await api(`/api/user?uid=${encodeURIComponent(el.uid.value.trim())}`);
+    const result = await loadNeteaseUserProbe(uid);
+    if (uid !== el.uid.value.trim()) return;
     el.userNickname.textContent = result.profile.nickname;
     const probeRoute = result.route === "managed-pool"
       ? `代理池 ${result.routeName || "节点"}${Number(result.routeAttempts) > 1 ? `（第 ${fmt(result.routeAttempts)} 个出口成功）` : ""}`
@@ -883,7 +891,34 @@ async function lookupUser() {
   } catch (error) { el.userPreview.hidden = true; toast(error.message); } finally { el.lookup.disabled = false; }
 }
 
-function probe(target, label, value) { target.className = value.status; target.textContent = value.status === "available" ? `${label} ${fmt(value.songs)}` : `${label} ${value.status === "cooldown" ? "冷却" : "受限"}`; }
+function loadNeteaseUserProbe(uid) {
+  const now = Date.now();
+  const cached = neteaseUserProbeCache.get(uid);
+  if (cached?.value && cached.expiresAt > now) return Promise.resolve(cached.value);
+  if (cached?.pending) return cached.pending;
+  const pending = api(`/api/user?uid=${encodeURIComponent(uid)}`)
+    .then((value) => {
+      neteaseUserProbeCache.delete(uid);
+      neteaseUserProbeCache.set(uid, { value, expiresAt: Date.now() + NETEASE_USER_PROBE_CACHE_TTL_MS });
+      while (neteaseUserProbeCache.size > NETEASE_USER_PROBE_CACHE_LIMIT) {
+        neteaseUserProbeCache.delete(neteaseUserProbeCache.keys().next().value);
+      }
+      return value;
+    })
+    .catch((error) => {
+      if (neteaseUserProbeCache.get(uid)?.pending === pending) neteaseUserProbeCache.delete(uid);
+      throw error;
+    });
+  neteaseUserProbeCache.set(uid, { pending });
+  return pending;
+}
+
+function probe(target, label, value) {
+  target.className = value.status;
+  target.textContent = value.status === "available"
+    ? `${label} ${fmt(value.songs)}`
+    : `${label} ${value.status === "private" ? "已开启隐私" : value.status === "cooldown" ? "冷却" : "查询受限"}`;
+}
 
 function resetQQUserProbe(probe) {
   probe.generation += 1;
@@ -1515,6 +1550,10 @@ function observeTaskSettlement(job, viewKey) {
   }
   if (job.status === "idle" || settlementPending[viewKey] !== job.id) return;
   settlementPending[viewKey] = undefined;
+  if (!el.taskStartupProgress.hidden) {
+    pendingStartupSettlement = { job, viewKey };
+    return;
+  }
   renderSettlement(job, viewKey);
 }
 
@@ -3626,6 +3665,7 @@ addEventListener("pagehide", () => {
   clearTimeout(authRefreshTimer);
   clearInterval(runtimeTimerInterval);
   clearTaskStartupTimers();
+  pendingStartupSettlement = undefined;
   el.taskStartupProgress.hidden = true;
   inspectorOverlayQuery.removeEventListener("change", syncInspectorForViewport);
 });

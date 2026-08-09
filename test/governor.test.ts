@@ -6,7 +6,9 @@ import {
   RequestBudgetExhausted,
   RequestExecutionError,
   RunCancelled,
+  SourcePrivacyRestricted,
   errorStatus,
+  isSourcePrivacyRestricted,
 } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
@@ -355,4 +357,24 @@ test("allows requests to overlap while serializing their start slots", async () 
 
   assert.equal(maxActive, 2);
   assert.equal(governor.requestsUsed, 2);
+});
+
+test("keeps an intentional source privacy error distinguishable through governor wrapping", async () => {
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 1,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 10,
+  });
+  let attempts = 0;
+
+  await assert.rejects(
+    governor.execute("target_likes_playlist", async () => {
+      attempts += 1;
+      throw new SourcePrivacyRestricted("喜欢歌曲已开启隐私");
+    }),
+    (error: unknown) => isSourcePrivacyRestricted(error) && errorStatus(error) === 422,
+  );
+  assert.equal(attempts, 1);
 });

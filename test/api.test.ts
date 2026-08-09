@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import upstream = require("@neteasecloudmusicapienhanced/api");
 import { EnhancedNcmClient } from "../src/api";
-import { ApiResponseError, AuthenticationRequired } from "../src/errors";
+import { ApiResponseError, AuthenticationRequired, SourcePrivacyRestricted } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
 test("searches NetEase songs through cloudsearch and normalizes lookup metadata", async () => {
@@ -136,6 +136,28 @@ test("turns NetEase 301 responses into a clear login requirement", async () => {
     await assert.rejects(
       new EnhancedNcmClient().getLikedSongs("42"),
       (error: unknown) => error instanceof AuthenticationRequired && /二维码登录/.test(error.message),
+    );
+  } finally {
+    mutable.user_playlist = original;
+  }
+});
+
+test("classifies a hidden target-owned liked playlist as privacy instead of rate limiting", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.user_playlist;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { code: 200, playlist: [] },
+  });
+
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getTargetLikedPlaylist("42"),
+      (error: unknown) => error instanceof SourcePrivacyRestricted
+        && error.status === 422
+        && /隐私/.test(error.message),
     );
   } finally {
     mutable.user_playlist = original;

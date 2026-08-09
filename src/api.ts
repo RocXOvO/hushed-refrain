@@ -1,5 +1,5 @@
 import api = require("@neteasecloudmusicapienhanced/api");
-import { ApiResponseError, AuthenticationRequired } from "./errors";
+import { ApiResponseError, AuthenticationRequired, SourcePrivacyRestricted } from "./errors";
 import type {
   CommentPage,
   CommentRecord,
@@ -159,7 +159,9 @@ export class EnhancedNcmClient implements NcmClient {
       );
     const playlistId = stringId(targetPlaylist?.id);
     if (!playlistId) {
-      throw new ApiResponseError("目标用户的“喜欢的音乐”歌单不可见，未使用当前登录账号的喜欢列表代替", 403, listing);
+      throw new SourcePrivacyRestricted(
+        "目标用户已开启“喜欢的音乐”隐私，未使用当前登录账号的喜欢列表代替",
+      );
     }
     return { id: playlistId, trackCount: numberOrUndefined(targetPlaylist?.trackCount) };
   }

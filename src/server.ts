@@ -7,7 +7,13 @@ import lockfile from "proper-lockfile";
 import { EnhancedNcmClient, type NcmUserProfile } from "./api";
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 import { CommentRateTracker } from "./comment-rate";
-import { AuthenticationRequired, CooldownRequired, RunCancelled, errorStatus } from "./errors";
+import {
+  AuthenticationRequired,
+  CooldownRequired,
+  RunCancelled,
+  errorStatus,
+  isSourcePrivacyRestricted,
+} from "./errors";
 import { estimateCommentScan } from "./estimate";
 import { RequestGovernor } from "./governor";
 import {
@@ -287,7 +293,7 @@ interface AuthSnapshot {
 }
 
 interface SourceProbe {
-  status: "available" | "restricted" | "cooldown";
+  status: "available" | "private" | "restricted" | "cooldown";
   songs?: number;
   error?: string;
 }
@@ -2261,14 +2267,22 @@ function cachedUpdateChecker(checker: () => Promise<UpdateSnapshot>): () => Prom
   };
 }
 
-async function probeUser(uid: string, proxy: string | undefined, cookiePath: string): Promise<UserProbe> {
+const DIRECT_USER_PROBE_TIMEOUT_MS = 2_000;
+const DIRECT_USER_PROBE_START_DELAY_MS = 100;
+
+export async function probeUser(uid: string, proxy: string | undefined, cookiePath: string): Promise<UserProbe> {
   const started = Date.now();
   const cookie = await readCookie(cookiePath);
-  const client = new EnhancedNcmClient({ proxy });
-  const governor = new RequestGovernor({ requestBudget: 4, minDelayMs: 800, jitterMs: 200, maxRetries: 1, forbiddenCooldownMs: 900_000 });
+  const client = new EnhancedNcmClient({ proxy, requestTimeoutMs: DIRECT_USER_PROBE_TIMEOUT_MS });
+  const governor = new RequestGovernor({
+    requestBudget: 4,
+    minDelayMs: DIRECT_USER_PROBE_START_DELAY_MS,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 900_000,
+  });
   // Public profile lookup does not need the operator's cookie. Keeping it out
   // prevents an expired login session from breaking a public UID switch.
-  const profile = await governor.execute("user_detail", () => client.getUserProfile(uid));
   const inspect = async (source: "record" | "likes"): Promise<SourceProbe> => {
     try {
       const songs = source === "record"
@@ -2278,10 +2292,23 @@ async function probeUser(uid: string, proxy: string | undefined, cookiePath: str
           return governor.execute("target_likes_tracks", () => client.getTargetLikedPlaylistSongs!(uid, target, cookie));
         })();
       return { status: "available", songs: songs.length };
-    } catch (error) { return { status: error instanceof CooldownRequired ? "cooldown" : "restricted", error: message(error) }; }
+    } catch (error) {
+      return {
+        status: isSourcePrivacyRestricted(error)
+          ? "private"
+          : error instanceof CooldownRequired ? "cooldown" : "restricted",
+        error: message(error),
+      };
+    }
   };
-  const record = await inspect("record");
-  const likes = record.status === "cooldown" ? { status: "cooldown" as const, error: "record probe entered cooldown" } : await inspect("likes");
+  // These are independent reads. Start them together through one lightly
+  // paced direct governor so normal network latency overlaps instead of
+  // accumulating profile -> record -> playlist -> tracks serially.
+  const [profile, record, likes] = await Promise.all([
+    governor.execute("user_detail", () => client.getUserProfile(uid)),
+    inspect("record"),
+    inspect("likes"),
+  ]);
   return {
     profile,
     record,
@@ -2297,11 +2324,14 @@ async function probeUserProfile(uid: string, proxy: string | undefined): Promise
   const started = Date.now();
   const profile = await new RequestGovernor({
     requestBudget: 1,
-    minDelayMs: 800,
-    jitterMs: 200,
-    maxRetries: 1,
+    minDelayMs: DIRECT_USER_PROBE_START_DELAY_MS,
+    jitterMs: 0,
+    maxRetries: 0,
     forbiddenCooldownMs: 900_000,
-  }).execute("user_detail", () => new EnhancedNcmClient({ proxy }).getUserProfile(uid));
+  }).execute("user_detail", () => new EnhancedNcmClient({
+    proxy,
+    requestTimeoutMs: DIRECT_USER_PROBE_TIMEOUT_MS,
+  }).getUserProfile(uid));
   return { profile, elapsedMs: Date.now() - started };
 }
 

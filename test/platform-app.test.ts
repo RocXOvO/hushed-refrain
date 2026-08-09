@@ -325,6 +325,110 @@ test("task startup capsule advances phases and settles without an elapsed-time s
   assert.equal(appSource.includes("taskStartupElapsed"), false);
 });
 
+test("task completion waits for the startup capsule to leave before opening settlement", () => {
+  let nextTimer = 0;
+  const timers = new Map<number, () => void>();
+  const classes = new Set<string>();
+  const rendered: string[] = [];
+  const context: Record<string, unknown> = {
+    el: {
+      taskStartupProgress: {
+        hidden: true,
+        classList: {
+          add(name: string) { classes.add(name); },
+          remove(...names: string[]) { for (const name of names) classes.delete(name); },
+          contains(name: string) { return classes.has(name); },
+        },
+      },
+      taskStartupStage: { textContent: "" },
+    },
+    taskStartupProgressVersion: 0,
+    taskStartupPhaseTimers: [],
+    taskStartupHideTimer: undefined,
+    pendingStartupSettlement: undefined,
+    settlementPending: { "netease:parallel": "job-1" },
+    setTimeout(callback: () => void) { const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearTimeout(id: number | undefined) { if (id) timers.delete(id); },
+    renderSettlement(_job: unknown, viewKey: string) { rendered.push(viewKey); },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("clearTaskStartupTimers")}
+    ${extractFunction("beginTaskStartup")}
+    ${extractFunction("finishTaskStartup")}
+    ${extractFunction("observeTaskSettlement")}
+    globalThis.api = { beginTaskStartup, finishTaskStartup, observeTaskSettlement };
+  `, context);
+  const api = context.api as {
+    beginTaskStartup(phases: string[]): void;
+    finishTaskStartup(success: boolean, message: string): void;
+    observeTaskSettlement(job: { id: string; status: string }, viewKey: string): void;
+  };
+
+  api.beginTaskStartup(["提交", "准备", "启动"]);
+  api.observeTaskSettlement({ id: "job-1", status: "complete" }, "netease:parallel");
+  assert.deepEqual(rendered, []);
+  api.finishTaskStartup(true, "已启动");
+  const hide = [...timers.entries()].at(-1);
+  assert.ok(hide);
+  timers.delete(hide![0]);
+  hide![1]();
+  assert.deepEqual(rendered, [], "settlement keeps a short visual gap after the capsule");
+  const followup = [...timers.entries()].at(-1);
+  assert.ok(followup);
+  followup![1]();
+  assert.deepEqual(rendered, ["netease:parallel"]);
+});
+
+test("NetEase user probe is single-flight, cached for a minute, and bounded", async () => {
+  let calls = 0;
+  let resolveFirst = (_value: unknown): void => {};
+  const first = new Promise((resolve) => { resolveFirst = resolve; });
+  const cache = new Map();
+  const context: Record<string, unknown> = {
+    Date,
+    encodeURIComponent,
+    neteaseUserProbeCache: cache,
+    NETEASE_USER_PROBE_CACHE_LIMIT: 24,
+    NETEASE_USER_PROBE_CACHE_TTL_MS: 60_000,
+    api: async () => {
+      calls += 1;
+      return calls === 1 ? first : { profile: { userId: String(calls) } };
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`${extractFunction("loadNeteaseUserProbe")} globalThis.load = loadNeteaseUserProbe;`, context);
+  const load = context.load as (uid: string) => Promise<unknown>;
+
+  const pendingA = load("42");
+  const pendingB = load("42");
+  assert.equal(calls, 1);
+  resolveFirst({ profile: { userId: "42" } });
+  assert.deepEqual(await pendingA, await pendingB);
+  await load("42");
+  assert.equal(calls, 1);
+  (cache.get("42") as { expiresAt: number }).expiresAt = 0;
+  await load("42");
+  assert.equal(calls, 2);
+  for (let uid = 100; uid < 130; uid += 1) await load(String(uid));
+  assert.equal(cache.size, 24);
+  assert.equal(cache.has("42"), false, "old previews are evicted when the cache reaches its bound");
+});
+
+test("source preview distinguishes privacy from cooldown and generic restrictions", () => {
+  const target = { className: "", textContent: "" };
+  const context: Record<string, unknown> = { fmt: (value: number) => String(value) };
+  context.globalThis = context;
+  vm.runInNewContext(`${extractFunction("probe")} globalThis.renderProbe = probe;`, context);
+  const render = context.renderProbe as (target: typeof target, label: string, value: unknown) => void;
+
+  render(target, "喜欢歌曲", { status: "private" });
+  assert.equal(target.className, "private");
+  assert.equal(target.textContent, "喜欢歌曲 已开启隐私");
+  render(target, "喜欢歌曲", { status: "restricted" });
+  assert.equal(target.textContent, "喜欢歌曲 查询受限");
+});
+
 test("ordinary song search is single-flight, cached for a minute, and bounded", async () => {
   let apiCalls = 0;
   let completeFirst = (_value: unknown): void => {};

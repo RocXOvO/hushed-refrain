@@ -60,7 +60,7 @@ import { readTaskLog, TaskLogger, type TaskLogEntry } from "./task-log";
 const ACTIVE_SONG_LIMIT = 64;
 const MAX_RESULT_REPORT_BYTES = 64 * 1024 * 1024;
 const MAX_RESULT_REPORT_RECORDS = 20_000;
-const DEFAULT_LOOKUP_TIMEOUT_MS = 8_000;
+const DEFAULT_LOOKUP_TIMEOUT_MS = 4_000;
 
 export interface QQJobManagerPaths {
   data: string;
@@ -915,7 +915,7 @@ export class QQJobManager {
       return await abortRace(operation(prepared.lanes), controller.signal);
     } catch (error) {
       if (timedOut) {
-        throw new QQJobManagerError(504, "普通查询超过 8 秒仍未完成；已停止本次本机直连，请检查网络后重试。");
+        throw new QQJobManagerError(504, "普通查询超过 4 秒仍未完成；已停止本次本机直连，请检查网络后重试。");
       }
       throw error;
     } finally {
@@ -1070,7 +1070,7 @@ export class QQJobManager {
       return await abortRace(operation(lane), controller.signal);
     } catch (error) {
       if (timedOut) {
-        throw new QQJobManagerError(504, "QQ 音乐普通直连查询超过 8 秒，已停止。");
+        throw new QQJobManagerError(504, "QQ 音乐普通直连查询超过 4 秒，已停止。");
       }
       throw error;
     } finally {

@@ -13,7 +13,7 @@ QQ 音乐当前支持两种任务：
 
 领域实现位于 `src/qq-music/**`。`src/qq-cli.ts` 是独立命令行入口；桌面端由共享 `QQJobManager` 组装 Lane、任务路径和展示事件。QQ Scanner 不依赖 Server 或 DOM。
 
-歌曲搜索属于 lookup-only 控制请求，不是第三种扫描模式。`QQMusicClient.searchSongs` 优先使用公开桌面搜索 CGI 并严格校验 `data.body.song.list`；仅当该列表结构合法且为空时，才通过同一 fetch 和取消 signal 回退到官方 Smartbox 的 `data.song.itemlist`，非空畸形主结果不得被回退掩盖。两条路径都把歌曲 ID/MID 原样保留为字符串。Dashboard 的歌名/数字歌曲普通查询始终走一条本机直连 Lane，不读代理池或扫描表单里的手动代理；Manager 仍用 `TaskCoordinator` lease、Governor、Gate、取消和 8 秒超时路径，不创建或改写扫描 generation、结果或检查点。前端同关键词单飞、60 秒/24 项小缓存，并在请求期间显示加载/失败状态。
+歌曲搜索属于 lookup-only 控制请求，不是第三种扫描模式。`QQMusicClient.searchSongs` 优先使用公开桌面搜索 CGI 并严格校验 `data.body.song.list`；仅当该列表结构合法且为空时，才通过同一 fetch 和取消 signal 回退到官方 Smartbox 的 `data.song.itemlist`，非空畸形主结果不得被回退掩盖。两条路径都把歌曲 ID/MID 原样保留为字符串。Dashboard 的歌名/数字歌曲普通查询始终走一条本机直连 Lane，不读代理池或扫描表单里的手动代理；Manager 仍用 `TaskCoordinator` lease、Governor、Gate、取消和 4 秒超时路径，不创建或改写扫描 generation、结果或检查点。前端同关键词单飞、60 秒/24 项小缓存，并在请求期间显示加载/失败状态。
 
 ## 数据流
 
@@ -41,11 +41,11 @@ QQ 音乐当前支持两种任务：
  命中 JSONL write+sync --> 取消屏障 --> 状态提交与 checkpoint
 ```
 
-扫描主流程始终把 `EncryptUin` 当作不透明作者标识，只做完整字符串相等匹配。任务路径由 canonical `EncryptUin`、模式和 song 模式下的原始十进制 `requestedSongId` 稳定派生；下面的单次身份解析实验不会替换 canonical target、stable task key、generation、状态路径或评论匹配条件。正式 start 遇数字目标时，canonical 解析使用独立 8 秒本机直连辅助 Lane；opaque EncryptUin 已是 canonical，保持本地零请求。只有后续评论页和来源分页进入正式扫描代理拓扑。
+扫描主流程始终把 `EncryptUin` 当作不透明作者标识，只做完整字符串相等匹配。任务路径由 canonical `EncryptUin`、模式和 song 模式下的原始十进制 `requestedSongId` 稳定派生；下面的单次身份解析实验不会替换 canonical target、stable task key、generation、状态路径或评论匹配条件。正式 start 遇数字目标时，canonical 解析使用独立 4 秒本机直连辅助 Lane；opaque EncryptUin 已是 canonical，保持本地零请求。只有后续评论页和来源分页进入正式扫描代理拓扑。
 
 ## EncryptUin 与官方主页单次解析实验
 
-QQ song/likes 表单另有启动前用户探测：loopback-only `POST /api/qq/user` 始终使用一条 8 秒有界的本机直连 Lane，即使代理池运行或表单已填手动代理也不读它们。它在任务启动前返回公开昵称和受信头像；具体数字 QQ 的头像来自确定的腾讯公开 `qlogo.cn` 地址，`wechat-user` 为本地零请求的固定展示。该探测不发布或改变扫描 generation/checkpoint。
+QQ song/likes 表单另有启动前用户探测：loopback-only `POST /api/qq/user` 始终使用一条 4 秒有界的本机直连 Lane，即使代理池运行或表单已填手动代理也不读它们。它在任务启动前返回公开昵称和受信头像；具体数字 QQ 的头像来自确定的腾讯公开 `qlogo.cn` 地址，`wechat-user` 为本地零请求的固定展示。该探测不发布或改变扫描 generation/checkpoint。
 
 Dashboard 的 QQ 两个任务表单共用生产目标预览和“EncryptUin 解析实验”。`src/qq-music/target-display.ts` 只负责展示：任何直接纯数字（包括 19 位）、官方 URL 中的数字以及可逆 8/12/16 字符 classic EncryptUin 都显示完整 `QQ <number>`；只有可逆 28 字符 classic Token 显示“微信用户”，不显示其解码出的内部 ID；其他生产 parser 接受但不可逆的 opaque 值显示完整 `EncryptUin <value>`。官方 URL 只显示提取后的身份，不回显 URL。上述展示、昵称和头像都不进入 canonical target、task key、generation、checkpoint、结果路径或作者匹配。
 
@@ -53,9 +53,9 @@ Dashboard 的 QQ 两个任务表单共用生产目标预览和“EncryptUin 解�
 
 本地解码只支持冻结字符表中的两类严格格式：8/12/16 字符的经典 QQ 短格式必须解码为 5..12 位、非 `0` 开头数字，内部标为 `qq-number-candidate` 并显示完整 QQ；28 字符格式必须解码为恰好 19 位、非 `0` 开头数字，内部标为 `wxuin-candidate`，但界面只显示“微信用户”。后者既不显示内部 ID，也不称为微信号或 QQ 号；公开资料不提供到 `wxid/openid/unionid` 的转换。逆替换必须是规范标准 Base64 且只产生 ASCII 数字；未知字符、非规范 Base64、32 位新式 ID 和其他 opaque token 会被实验拒绝，但符合生产 parser 的 established opaque 值仍可作为扫描目标。
 
-官方 URL allowlist 固定为 `https://y.qq.com/n/ryqq/profile/<identity>`、`https://y.qq.com/n/ryqq_v2/profile?uin=<identity>` 和 `https://y.qq.com/portal/profile.html?uin=<identity>`。解析器在 WHATWG 规范化前拒绝原始 authority 中的任何端口语义和原始路径中的 dot-segment（含编码变体），不访问 URL、不跟随重定向，并拒绝 HTTP、非精确 `y.qq.com` host、userinfo、fragment、非 profile path、缺失/空/重复 `uin`、任意 `id` 身份参数、额外查询参数和非法百分号编码。URL 中直接携带 EncryptUin 时 `resolution=local`，不获取 lease、Lane 或网络；直接数字或 URL 数字时 `resolution=network`，用户显式点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经一条本机直连 Lane 的 lookup lease、Governor、TransportGate、8 秒超时与取消只访问固定 QQ 公开资料端点，获得 canonical EncryptUin 后用同一严格解码器对账。QQ Client 对这些请求设置 `redirect:"error"`，不会访问用户提供的 URL 或跟转到外域/私网。生产扫描使用独立 parser，可安全提取同一 allowlist URL 中的数字或 established opaque EncryptUin，但不要求 opaque 值可被本实验解码；正式评论/来源分页仍按任务配置使用代理池/静态代理并 fail-closed。scanner promise 建立后，普通 QQ/opaque 目标通过另一条独立 8 秒本机直连辅助 Lane 后台补全昵称和受信头像，补全失败或长期未返回都不阻塞评论扫描；`微信用户` 跳过补全，固定显示该称谓、元信息和默认头像。
+官方 URL allowlist 固定为 `https://y.qq.com/n/ryqq/profile/<identity>`、`https://y.qq.com/n/ryqq_v2/profile?uin=<identity>` 和 `https://y.qq.com/portal/profile.html?uin=<identity>`。解析器在 WHATWG 规范化前拒绝原始 authority 中的任何端口语义和原始路径中的 dot-segment（含编码变体），不访问 URL、不跟随重定向，并拒绝 HTTP、非精确 `y.qq.com` host、userinfo、fragment、非 profile path、缺失/空/重复 `uin`、任意 `id` 身份参数、额外查询参数和非法百分号编码。URL 中直接携带 EncryptUin 时 `resolution=local`，不获取 lease、Lane 或网络；直接数字或 URL 数字时 `resolution=network`，用户显式点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经一条本机直连 Lane 的 lookup lease、Governor、TransportGate、4 秒超时与取消只访问固定 QQ 公开资料端点，获得 canonical EncryptUin 后用同一严格解码器对账。QQ Client 对这些请求设置 `redirect:"error"`，不会访问用户提供的 URL 或跟转到外域/私网。生产扫描使用独立 parser，可安全提取同一 allowlist URL 中的数字或 established opaque EncryptUin，但不要求 opaque 值可被本实验解码；正式评论/来源分页仍按任务配置使用代理池/静态代理并 fail-closed。scanner promise 建立后，普通 QQ/opaque 目标通过另一条独立 4 秒本机直连辅助 Lane 后台补全昵称和受信头像，补全失败或长期未返回都不阻塞评论扫描；`微信用户` 跳过补全，固定显示该称谓、元信息和默认头像。
 
-用户可另行点击“在线正向验证”。loopback-only 的 `POST /api/qq/encrypt-uin/verify` 使用一条 8 秒有界的本机直连 Lane，分别以上一步得到的 canonical EncryptUin 和解码候选访问官方公开资料，同时比较 canonical EncryptUin、昵称和头像。三项全部一致才是 `match`，任一差异是 `mismatch`，缺失昵称/头像是不可验证的上游响应。响应只返回 `{format,identityKind,status,maskedIdentifier,checks}`，不返回完整候选值。解析和验证都不创建/修改扫描 generation；匹配只证明当次公开响应一致，不证明账号所有权或任何私密数据访问权。完整目标可按上述规则出现在可信本地界面，但不得进入日志、错误、诊断、导出文件名、真实文档示例或 Release 说明；测试只用合成数据。
+用户可另行点击“在线正向验证”。loopback-only 的 `POST /api/qq/encrypt-uin/verify` 使用一条 4 秒有界的本机直连 Lane，分别以上一步得到的 canonical EncryptUin 和解码候选访问官方公开资料，同时比较 canonical EncryptUin、昵称和头像。三项全部一致才是 `match`，任一差异是 `mismatch`，缺失昵称/头像是不可验证的上游响应。响应只返回 `{format,identityKind,status,maskedIdentifier,checks}`，不返回完整候选值。解析和验证都不创建/修改扫描 generation；匹配只证明当次公开响应一致，不证明账号所有权或任何私密数据访问权。完整目标可按上述规则出现在可信本地界面，但不得进入日志、错误、诊断、导出文件名、真实文档示例或 Release 说明；测试只用合成数据。
 
 ## 分页与身份不变量
 
@@ -146,4 +146,4 @@ npm run bench:qq
 git diff --check
 ```
 
-专项测试覆盖 Client、状态、writer、Scanner、CLI、代理、TransportGate、benchmark、严格歌曲搜索协议以及共享 QQJobManager 的接口联调。所有辅助资料查询测试必须覆盖空结果、畸形响应、超大字符串 ID、取消/lease 释放、8 秒上限，以及运行池与手动代理均被明确绕过；正式评论/来源扫描继续覆盖代理失败不直连。身份展示/解析测试覆盖合成的直接数字（含 19 位）、可逆 8/12/16 与 28 字符 Token、不可逆 opaque 输入和三个官方 URL；必须证明正式 start 的数字 canonical 解析与 post-scanner 资料补全也固定直连、opaque canonical 本地零请求、补全不阻塞 scanner、微信用户不发补全请求且保持固定展示，并覆盖 URL/Base64/网络拒绝边界、在线 match/mismatch、generation 不变和错误/文件名脱敏。真实 QQ CGI 是非公开且可能变化的上游，低频实网只能作为兼容性观察，不能替代确定性测试。
+专项测试覆盖 Client、状态、writer、Scanner、CLI、代理、TransportGate、benchmark、严格歌曲搜索协议以及共享 QQJobManager 的接口联调。所有辅助资料查询测试必须覆盖空结果、畸形响应、超大字符串 ID、取消/lease 释放、4 秒上限，以及运行池与手动代理均被明确绕过；正式评论/来源扫描继续覆盖代理失败不直连。身份展示/解析测试覆盖合成的直接数字（含 19 位）、可逆 8/12/16 与 28 字符 Token、不可逆 opaque 输入和三个官方 URL；必须证明正式 start 的数字 canonical 解析与 post-scanner 资料补全也固定直连、opaque canonical 本地零请求、补全不阻塞 scanner、微信用户不发补全请求且保持固定展示，并覆盖 URL/Base64/网络拒绝边界、在线 match/mismatch、generation 不变和错误/文件名脱敏。真实 QQ CGI 是非公开且可能变化的上游，低频实网只能作为兼容性观察，不能替代确定性测试。
