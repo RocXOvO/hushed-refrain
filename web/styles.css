@@ -366,7 +366,8 @@ body[data-platform="qq"] .navigation-item.active { background: #2d3731; border-c
 body[data-platform="qq"] .navigation-item.active::before { background: #31c27c; }
 
 .global-settings-dialog { width: min(560px, calc(100vw - 28px)); max-height: min(720px, calc(100dvh - 28px)); padding: 0; overflow: hidden; }
-.global-settings-content { padding: 22px; overflow: auto; }
+.global-settings-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.global-settings-content { min-height: 0; padding: 22px; overflow: auto; overscroll-behavior: contain; }
 .settings-section { display: grid; gap: 16px; }
 .settings-section > div:first-child > strong { font-size: .9rem; }
 .settings-section > div:first-child > p { margin: 6px 0 0; color: var(--muted); font-size: .74rem; line-height: 1.55; }
@@ -980,6 +981,7 @@ dialog::backdrop { background: rgb(20 20 22 / 52%); }
 .uid-help-dialog { width: min(520px, calc(100vw - 32px)); }
 .uid-help-dialog > .dialog-heading,
 .classic-encrypt-uin-dialog > .dialog-heading,
+.global-settings-dialog > .dialog-heading,
 .update-dialog-heading,
 .settlement-heading { padding: 17px 19px; background: var(--surface-subtle); border-bottom: 1px solid var(--line); }
 .uid-help-content,

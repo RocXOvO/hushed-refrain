@@ -692,7 +692,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=56/);
+  assert.match(pageText, /styles\.css\?v=57/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /app\.js\?v=67/);
   assert.match(pageText, /id="liveTaskIdentity"/);
@@ -989,6 +989,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.task-startup-track\s*\{[^}]*height:\s*2px/s);
   assert.match(styleText, /\.navigation-footer/);
   assert.match(styleText, /\.global-settings-dialog/);
+  assert.match(styleText, /\.global-settings-dialog\[open\]\s*\{[^}]*display:\s*grid[^}]*grid-template-rows:\s*auto minmax\(0,\s*1fr\)/s);
+  assert.match(styleText, /\.global-settings-dialog\s*>\s*\.dialog-heading,[\s\S]*?padding:\s*17px 19px/);
+  assert.match(styleText, /\.global-settings-content\s*\{[^}]*min-height:\s*0[^}]*overflow:\s*auto/s);
   assert.match(styleText, /\.navigation-rail\s*\{[^}]*position:\s*sticky/s);
   assert.match(styleText, /\.sidebar\s*\{[^}]*position:\s*fixed/s);
   assert.match(styleText, /body\.task-panel-collapsed/);

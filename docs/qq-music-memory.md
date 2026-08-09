@@ -144,7 +144,7 @@ data/logs/qq-<job-id>.jsonl
 - 每个平台任务提交共用右下角点扩胶囊：只显示按时序切换的启动阶段、细进度条与短暂成功/失败结算，不显示耗时，也不替代正式任务进度或检查点。
 - `web/platform-wave.js` 只提供一种约 680 ms 的 WebGL2 Obsidian Silk Aperture；顶栏没有动效按钮，旧 `data/ui-preferences.json` 不再读取。五条确定性绢缎褶皱/等高线按切换方向从源平台色收拢到中性黑曜色，244–404 ms 显式保持全屏 alpha 1，约 326 ms/48% 唯一提交目标工作区，然后再以目标色揭幕。渲染器使用一个 program/VAO、`depth:false` 和每帧一次 fullscreen TRIANGLES draw，不创建 instance、VBO、纹理、FBO 或 readback；高光不用 `pow`/`exp`，grain 不用 sine hash，DPR 不超过 1.25，颜色缓冲不超过 1,200,000 像素，resize 沿 `lastElapsed` 立即重绘但不改变时钟/commit。正常 680 ms 先移除 Canvas 和 busy 标记，下一 compositor RAF 再释放 GPU/监听器并 resolve，避免结束闪屏；异常路径立即完整清理。业务 DOM 和身份/评论数据不进入 Canvas/GPU；提交后所有滚动坐标立即恢复，只有 results table 允许在同 platform/mode/view/switch version 与当前 view 的 result generation revision 下延迟补偿，普通 refresh 不取消，新 generation、2.5 s 超时或用户 wheel/touch/pointer/key 操作即取消。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=56`、`platform-wave.js?v=15`、`app.js?v=67`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=57`、`platform-wave.js?v=15`、`app.js?v=67`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
