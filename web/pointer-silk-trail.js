@@ -1,35 +1,121 @@
+/*!
+ * Follow-trail physics adapted from Makio MeshLine's MIT-licensed demo.
+ * Copyright (c) 2025 David Ronai. https://github.com/Makio64/makio-meshline
+ */
 (() => {
-  const REDUCED_MOTION = "(prefers-reduced-motion: reduce)";
-  const FINE_POINTER = "(pointer: fine)";
-  const SAMPLE_CAPACITY = 28;
-  const SAMPLE_LIFETIME_MS = 260;
+  "use strict";
+
+  const NUM_POINTS = 20;
+  const NUM_LINES = 4;
+  const VERTICES_PER_LINE = NUM_POINTS * 2;
+  const FLOATS_PER_VERTEX = 9;
   const HOLD_MS = 72;
   const FADE_MS = 348;
   const IDLE_STOP_MS = HOLD_MS + FADE_MS;
+  const POINTER_DELTA_RESET_MS = 50;
   const MAX_DPR = 1.25;
   const MAX_COLOR_PIXELS = 800_000;
-  const AMBIENT_SIZE = 148;
-  const RING_SIZE = 88;
+  const MAX_LINE_WIDTH_PX = 11;
+  const CAMERA_WORLD_HEIGHT_AT_PLANE = 10.411;
+  const CONTEXT_OPTIONS = Object.freeze({
+    alpha: true,
+    antialias: false,
+    depth: false,
+    stencil: false,
+    preserveDrawingBuffer: false,
+    premultipliedAlpha: true,
+    powerPreference: "low-power",
+  });
+  // Keep the four lines as one compact cursor cluster. The reference demo
+  // randomizes a wider range, but those extremes bloom during fast circles
+  // in a dense productivity UI, so use four close deterministic samples.
+  const SPRINGS = new Float32Array([0.057, 0.06, 0.063, 0.066]);
+  const FRICTIONS = new Float32Array([0.85, 0.853, 0.856, 0.859]);
+  const RADII = new Float32Array([5, 7, 9, 6]);
+  const OFFSET_X = new Float32Array([RADII[0], 0, -RADII[2], 0]);
+  const OFFSET_Y = new Float32Array([0, RADII[1], 0, -RADII[3]]);
   const PALETTES = Object.freeze({
-    netease: Object.freeze({
-      primary: "#c83f49",
-      secondary: "#8d7476",
-      highlight: "#e7b1a9",
-      glow: "rgba(196, 54, 66, 0.18)",
-      ring: "rgba(231, 177, 169, 0.72)",
-    }),
-    qq: Object.freeze({
-      primary: "#107b55",
-      secondary: "#66736c",
-      highlight: "#8fd5b2",
-      glow: "rgba(49, 194, 124, 0.16)",
-      ring: "rgba(143, 213, 178, 0.70)",
-    }),
+    netease: Object.freeze([
+      new Float32Array([0.843, 0.275, 0.31]),
+      new Float32Array([1, 0.451, 0.408]),
+      new Float32Array([0.549, 0.169, 0.212]),
+      new Float32Array([0.941, 0.627, 0.6]),
+    ]),
+    qq: Object.freeze([
+      new Float32Array([0.192, 0.761, 0.486]),
+      new Float32Array([0.533, 0.91, 0.42]),
+      new Float32Array([0.063, 0.482, 0.333]),
+      new Float32Array([0.459, 0.902, 0.678]),
+    ]),
   });
 
-  function safely(operation) {
-    try { operation(); } catch { /* Best-effort visual teardown. */ }
-  }
+  const VERTEX_SHADER = `#version 300 es
+    precision highp float;
+    layout(location = 0) in vec2 a_previous;
+    layout(location = 1) in vec2 a_current;
+    layout(location = 2) in vec2 a_next;
+    layout(location = 3) in float a_side;
+    layout(location = 4) in float a_progress;
+    layout(location = 5) in float a_lineIndex;
+
+    uniform vec2 u_resolution;
+    uniform float u_lineWidth;
+
+    out float v_side;
+    out float v_progress;
+    flat out int v_lineIndex;
+
+    vec2 safeDirection(vec2 value, vec2 fallbackValue) {
+      float magnitude = length(value);
+      return magnitude > 0.0001 ? value / magnitude : fallbackValue;
+    }
+
+    void main() {
+      vec2 incoming = safeDirection(a_current - a_previous, vec2(1.0, 0.0));
+      vec2 outgoing = safeDirection(a_next - a_current, incoming);
+      vec2 tangent = safeDirection(incoming + outgoing, outgoing);
+      vec2 normal = vec2(-tangent.y, tangent.x);
+      vec2 incomingNormal = vec2(-incoming.y, incoming.x);
+      float miter = clamp(1.0 / max(0.55, dot(normal, incomingNormal)), 1.0, 1.45);
+      float edge = 0.1;
+      float taper = a_progress < edge
+        ? mix(0.1, 1.0, a_progress / edge)
+        : (a_progress > 1.0 - edge
+          ? mix(0.1, 1.0, (1.0 - a_progress) / edge)
+          : 1.0);
+      vec2 position = a_current + normal * a_side * u_lineWidth * 0.5 * taper * miter;
+      vec2 clip = position / u_resolution * 2.0 - 1.0;
+      gl_Position = vec4(clip.x, -clip.y, 0.0, 1.0);
+      v_side = a_side;
+      v_progress = a_progress;
+      v_lineIndex = int(a_lineIndex + 0.5);
+    }
+  `;
+
+  const FRAGMENT_SHADER = `#version 300 es
+    precision highp float;
+
+    uniform vec3 u_color0;
+    uniform vec3 u_color1;
+    uniform vec3 u_color2;
+    uniform vec3 u_color3;
+    uniform float u_opacity;
+
+    in float v_side;
+    in float v_progress;
+    flat in int v_lineIndex;
+    out vec4 outColor;
+
+    void main() {
+      vec3 color = v_lineIndex == 0 ? u_color0
+        : (v_lineIndex == 1 ? u_color1
+        : (v_lineIndex == 2 ? u_color2 : u_color3));
+      color += smoothstep(0.5, 1.0, v_progress) * 0.2;
+      float edgeAlpha = 1.0 - smoothstep(0.76, 1.0, abs(v_side));
+      float alpha = edgeAlpha * u_opacity;
+      outColor = vec4(color * alpha, alpha);
+    }
+  `;
 
   function mediaListen(query, listener) {
     if (typeof query.addEventListener === "function") query.addEventListener("change", listener);
@@ -41,270 +127,351 @@
     else query.removeListener?.(listener);
   }
 
-  function create({ host, platform = "netease", enabled = true } = {}) {
-    if (!host || typeof host.addEventListener !== "function") throw new TypeError("PointerSilkTrail requires a host element");
+  function compileShader(gl, type, source) {
+    const shader = gl.createShader(type);
+    if (!shader) throw new Error("pointer trail shader allocation failed");
+    gl.shaderSource(shader, source);
+    gl.compileShader(shader);
+    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+      const message = gl.getShaderInfoLog(shader) || "pointer trail shader compilation failed";
+      gl.deleteShader(shader);
+      throw new Error(message);
+    }
+    return shader;
+  }
 
-    const reducedMotion = matchMedia(REDUCED_MOTION);
-    const finePointer = matchMedia(FINE_POINTER);
+  function createProgram(gl) {
+    const vertexShader = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
+    let fragmentShader;
+    let program;
+    try {
+      fragmentShader = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+      program = gl.createProgram();
+      if (!program) throw new Error("pointer trail program allocation failed");
+      gl.attachShader(program, vertexShader);
+      gl.attachShader(program, fragmentShader);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        throw new Error(gl.getProgramInfoLog(program) || "pointer trail program link failed");
+      }
+      return program;
+    } catch (error) {
+      if (program) gl.deleteProgram(program);
+      throw error;
+    } finally {
+      gl.deleteShader(vertexShader);
+      if (fragmentShader) gl.deleteShader(fragmentShader);
+    }
+  }
+
+  function create({ host, platform = "netease", enabled = true } = {}) {
+    if (!host || typeof host.addEventListener !== "function") {
+      throw new TypeError("PointerSilkTrail requires a host element");
+    }
+
+    const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)");
+    const finePointer = matchMedia("(hover: hover) and (pointer: fine)");
     const suspensions = new Set();
-    const xs = new Float32Array(SAMPLE_CAPACITY);
-    const ys = new Float32Array(SAMPLE_CAPACITY);
-    const speeds = new Float32Array(SAMPLE_CAPACITY);
-    const normalXs = new Float32Array(SAMPLE_CAPACITY);
-    const normalYs = new Float32Array(SAMPLE_CAPACITY);
-    const times = new Float64Array(SAMPLE_CAPACITY);
+    const pointXs = new Float32Array(NUM_LINES * NUM_POINTS);
+    const pointYs = new Float32Array(NUM_LINES * NUM_POINTS);
+    const velocityXs = new Float32Array(NUM_LINES);
+    const velocityYs = new Float32Array(NUM_LINES);
+    const vertexData = new Float32Array(NUM_LINES * VERTICES_PER_LINE * FLOATS_PER_VERTEX);
+
+    let active = Boolean(enabled);
     let activePlatform = platform === "qq" ? "qq" : "netease";
     let activePalette = PALETTES[activePlatform];
-    let active = Boolean(enabled);
-    let faulted = false;
     let destroyed = false;
-    let canvas;
-    let context;
-    let ambientCanvas;
-    let ringCanvas;
-    let resizeObserver;
+    let faulted = false;
+    let canvas = null;
+    let gl = null;
+    let program = null;
+    let vertexArray = null;
+    let vertexBuffer = null;
+    let uniforms = null;
+    let resizeObserver = null;
     let frame = 0;
-    let head = 0;
-    let count = 0;
-    let lastMoveAt = -Infinity;
-    let lastSampleAt = -Infinity;
-    let lastX = 0;
-    let lastY = 0;
-    let haloX = 0;
-    let haloY = 0;
-    let haloAngle = 0;
-    let haloSpeed = 0;
-    let lastFrameAt = -Infinity;
+    let seeded = false;
     let hostLeft = 0;
     let hostTop = 0;
     let cssWidth = 1;
     let cssHeight = 1;
-    let renderScale = 1;
-    let geometryDirty = true;
+    let targetX = 0;
+    let targetY = 0;
+    let previousPointerX = 0;
+    let previousPointerY = 0;
+    let pointerMoveX = 0;
+    let pointerMoveY = 0;
+    let lastMoveAt = 0;
+    let lastFrameAt = 0;
+    let mouseSpeed = 0;
+    let lineWidthPx = 1;
+    let contextLost = false;
 
     function eligible() {
-      return active
-        && !destroyed
-        && !faulted
-        && suspensions.size === 0
-        && !document.hidden
-        && !reducedMotion.matches
-        && finePointer.matches;
+      return active && !destroyed && !faulted && suspensions.size === 0
+        && !reducedMotion.matches && finePointer.matches && !document.hidden;
     }
 
-    function stopFrame() {
-      if (!frame) return;
-      cancelAnimationFrame(frame);
-      frame = 0;
+    function requireUniform(nextGl, nextProgram, name) {
+      const location = nextGl.getUniformLocation(nextProgram, name);
+      if (location === null) throw new Error(`pointer trail uniform unavailable: ${name}`);
+      return location;
     }
 
-    function clearSamples() {
-      head = 0;
-      count = 0;
-      lastMoveAt = -Infinity;
-      lastSampleAt = -Infinity;
-      lastFrameAt = -Infinity;
-      haloSpeed = 0;
+    function releaseGpu(nextGl, nextProgram, nextVertexArray, nextVertexBuffer, wasLost) {
+      if (!nextGl || wasLost) return;
+      try {
+        if (nextVertexBuffer) nextGl.deleteBuffer(nextVertexBuffer);
+        if (nextVertexArray) nextGl.deleteVertexArray(nextVertexArray);
+        if (nextProgram) nextGl.deleteProgram(nextProgram);
+        nextGl.getExtension("WEBGL_lose_context")?.loseContext();
+      } catch {
+        // Best effort during teardown.
+      }
     }
 
-    function clearSurface() {
-      stopFrame();
-      clearSamples();
-      if (context) safely(() => context.clearRect(0, 0, cssWidth, cssHeight));
+    function releaseSurface(wasLost = contextLost) {
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      if (resizeObserver) {
+        resizeObserver.disconnect();
+        resizeObserver = null;
+      }
+      if (canvas) canvas.removeEventListener("webglcontextlost", onContextLost);
+      releaseGpu(gl, program, vertexArray, vertexBuffer, wasLost);
+      canvas?.remove();
+      canvas = null;
+      gl = null;
+      program = null;
+      vertexArray = null;
+      vertexBuffer = null;
+      uniforms = null;
+      seeded = false;
+      mouseSpeed = 0;
+      lineWidthPx = 1;
+      contextLost = false;
     }
 
-    function releaseSurface() {
-      clearSurface();
-      safely(() => resizeObserver?.disconnect());
-      resizeObserver = undefined;
-      safely(() => canvas?.remove());
-      canvas = undefined;
-      context = undefined;
-      ambientCanvas = undefined;
-      ringCanvas = undefined;
-      geometryDirty = true;
-    }
-
-    function failSurface() {
+    function failSurface(wasLost = contextLost) {
       faulted = true;
-      releaseSurface();
+      releaseSurface(wasLost);
     }
 
-    function buildLightSprites() {
-      if (!context) return;
-      const nextAmbient = document.createElement("canvas");
-      nextAmbient.width = AMBIENT_SIZE;
-      nextAmbient.height = AMBIENT_SIZE;
-      const ambientContext = nextAmbient.getContext("2d", { alpha: true });
-      if (!ambientContext) return;
-      const ambientCenter = AMBIENT_SIZE * 0.5;
-      const gradient = ambientContext.createRadialGradient(ambientCenter, ambientCenter, 0, ambientCenter, ambientCenter, ambientCenter);
-      gradient.addColorStop(0, activePalette.glow);
-      gradient.addColorStop(0.34, activePalette.glow);
-      gradient.addColorStop(0.68, "rgba(0, 0, 0, 0.025)");
-      gradient.addColorStop(1, "rgba(0, 0, 0, 0)");
-      ambientContext.fillStyle = gradient;
-      ambientContext.fillRect(0, 0, AMBIENT_SIZE, AMBIENT_SIZE);
-
-      const nextRing = document.createElement("canvas");
-      nextRing.width = RING_SIZE;
-      nextRing.height = RING_SIZE;
-      const ringContext = nextRing.getContext("2d", { alpha: true });
-      if (!ringContext || typeof ringContext.ellipse !== "function") return;
-      const ringCenter = RING_SIZE * 0.5;
-      ringContext.lineCap = "round";
-      ringContext.strokeStyle = activePalette.ring;
-      ringContext.lineWidth = 1.25;
-      ringContext.beginPath();
-      ringContext.ellipse(ringCenter, ringCenter, 22, 13, 0, -1.05, 2.05);
-      ringContext.stroke();
-      ringContext.globalAlpha = 0.42;
-      ringContext.strokeStyle = activePalette.primary;
-      ringContext.lineWidth = 0.75;
-      ringContext.beginPath();
-      ringContext.ellipse(ringCenter, ringCenter, 28, 17, 0, 2.45, 5.15);
-      ringContext.stroke();
-      ambientCanvas = nextAmbient;
-      ringCanvas = nextRing;
+    function clearSurface(resetMotion = true) {
+      if (frame) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      }
+      if (gl) {
+        try {
+          gl.clear(gl.COLOR_BUFFER_BIT);
+        } catch {
+          failSurface();
+          return;
+        }
+      }
+      if (resetMotion) {
+        seeded = false;
+        pointerMoveX = 0;
+        pointerMoveY = 0;
+        mouseSpeed = 0;
+      }
     }
 
     function refreshGeometry() {
-      if (!canvas || !context) return;
+      if (!canvas || !gl) return;
       const rect = host.getBoundingClientRect();
       hostLeft = rect.left;
       hostTop = rect.top;
       cssWidth = Math.max(1, rect.width);
       cssHeight = Math.max(1, rect.height);
-      const dpr = Math.min(MAX_DPR, Math.max(1, Number(devicePixelRatio) || 1));
-      const rawPixels = cssWidth * cssHeight * dpr * dpr;
-      const budgetScale = rawPixels > MAX_COLOR_PIXELS ? Math.sqrt(MAX_COLOR_PIXELS / rawPixels) : 1;
-      renderScale = dpr * budgetScale;
-      canvas.width = Math.max(1, Math.floor(cssWidth * renderScale));
-      canvas.height = Math.max(1, Math.floor(cssHeight * renderScale));
-      context.setTransform(renderScale, 0, 0, renderScale, 0, 0);
-      context.lineCap = "round";
-      context.lineJoin = "round";
-      geometryDirty = false;
+      const desiredDpr = Math.min(MAX_DPR, Math.max(1, devicePixelRatio || 1));
+      const rawPixels = cssWidth * cssHeight * desiredDpr * desiredDpr;
+      const pixelScale = rawPixels > MAX_COLOR_PIXELS
+        ? Math.sqrt(MAX_COLOR_PIXELS / rawPixels)
+        : 1;
+      const renderDpr = desiredDpr * pixelScale;
+      canvas.width = Math.max(1, Math.floor(cssWidth * renderDpr));
+      canvas.height = Math.max(1, Math.floor(cssHeight * renderDpr));
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.useProgram(program);
+      gl.uniform2f(uniforms.resolution, cssWidth, cssHeight);
+      gl.clear(gl.COLOR_BUFFER_BIT);
     }
 
-    function ensureSurface() {
-      if (canvas) return true;
-      const nextCanvas = document.createElement("canvas");
+    function setupSurface() {
+      if (canvas || !eligible()) return Boolean(canvas);
+      let nextCanvas;
+      let nextGl;
+      let nextProgram;
+      let nextVertexArray;
+      let nextVertexBuffer;
       try {
+        nextCanvas = document.createElement("canvas");
         nextCanvas.className = "pointer-silk-trail-canvas";
         nextCanvas.setAttribute("aria-hidden", "true");
-        const nextContext = nextCanvas.getContext("2d", { alpha: true, desynchronized: true });
-        if (!nextContext) {
-          safely(() => nextCanvas.remove());
-          failSurface();
-          return false;
-        }
+        nextGl = nextCanvas.getContext("webgl2", CONTEXT_OPTIONS);
+        if (!nextGl) throw new Error("WebGL2 unavailable for pointer trail");
+        nextProgram = createProgram(nextGl);
+        nextVertexArray = nextGl.createVertexArray();
+        nextVertexBuffer = nextGl.createBuffer();
+        if (!nextVertexArray || !nextVertexBuffer) throw new Error("pointer trail geometry allocation failed");
+
+        nextGl.bindVertexArray(nextVertexArray);
+        nextGl.bindBuffer(nextGl.ARRAY_BUFFER, nextVertexBuffer);
+        nextGl.bufferData(nextGl.ARRAY_BUFFER, vertexData.byteLength, nextGl.DYNAMIC_DRAW);
+        const stride = FLOATS_PER_VERTEX * Float32Array.BYTES_PER_ELEMENT;
+        nextGl.enableVertexAttribArray(0);
+        nextGl.vertexAttribPointer(0, 2, nextGl.FLOAT, false, stride, 0);
+        nextGl.enableVertexAttribArray(1);
+        nextGl.vertexAttribPointer(1, 2, nextGl.FLOAT, false, stride, 2 * Float32Array.BYTES_PER_ELEMENT);
+        nextGl.enableVertexAttribArray(2);
+        nextGl.vertexAttribPointer(2, 2, nextGl.FLOAT, false, stride, 4 * Float32Array.BYTES_PER_ELEMENT);
+        nextGl.enableVertexAttribArray(3);
+        nextGl.vertexAttribPointer(3, 1, nextGl.FLOAT, false, stride, 6 * Float32Array.BYTES_PER_ELEMENT);
+        nextGl.enableVertexAttribArray(4);
+        nextGl.vertexAttribPointer(4, 1, nextGl.FLOAT, false, stride, 7 * Float32Array.BYTES_PER_ELEMENT);
+        nextGl.enableVertexAttribArray(5);
+        nextGl.vertexAttribPointer(5, 1, nextGl.FLOAT, false, stride, 8 * Float32Array.BYTES_PER_ELEMENT);
+
+        const nextUniforms = Object.freeze({
+          resolution: requireUniform(nextGl, nextProgram, "u_resolution"),
+          lineWidth: requireUniform(nextGl, nextProgram, "u_lineWidth"),
+          opacity: requireUniform(nextGl, nextProgram, "u_opacity"),
+          colors: Object.freeze([
+            requireUniform(nextGl, nextProgram, "u_color0"),
+            requireUniform(nextGl, nextProgram, "u_color1"),
+            requireUniform(nextGl, nextProgram, "u_color2"),
+            requireUniform(nextGl, nextProgram, "u_color3"),
+          ]),
+        });
+
+        nextGl.disable(nextGl.DEPTH_TEST);
+        nextGl.enable(nextGl.BLEND);
+        nextGl.blendFunc(nextGl.ONE, nextGl.ONE_MINUS_SRC_ALPHA);
+        nextGl.clearColor(0, 0, 0, 0);
+        nextCanvas.addEventListener("webglcontextlost", onContextLost);
+        host.appendChild(nextCanvas);
+
         canvas = nextCanvas;
-        context = nextContext;
-        host.appendChild(canvas);
-        resizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(() => {
-          geometryDirty = true;
-          if (count > 0 && eligible()) schedule();
-        }) : undefined;
-        resizeObserver?.observe(host);
+        gl = nextGl;
+        program = nextProgram;
+        vertexArray = nextVertexArray;
+        vertexBuffer = nextVertexBuffer;
+        uniforms = nextUniforms;
+        resizeObserver = new ResizeObserver(refreshGeometry);
+        resizeObserver.observe(host);
         refreshGeometry();
-        buildLightSprites();
         return true;
       } catch {
-        safely(() => nextCanvas.remove());
-        failSurface();
+        try { nextCanvas?.removeEventListener("webglcontextlost", onContextLost); } catch {}
+        releaseGpu(nextGl, nextProgram, nextVertexArray, nextVertexBuffer, false);
+        try { nextCanvas?.remove(); } catch {}
+        faulted = true;
         return false;
       }
     }
 
-    function sampleIndex(order) {
-      return (head - count + order + SAMPLE_CAPACITY) % SAMPLE_CAPACITY;
-    }
-
-    function updateNormals(now) {
-      for (let order = 0; order < count; order += 1) {
-        const index = sampleIndex(order);
-        if (now - times[index] > SAMPLE_LIFETIME_MS) continue;
-        const before = sampleIndex(Math.max(0, order - 1));
-        const after = sampleIndex(Math.min(count - 1, order + 1));
-        const tangentX = xs[after] - xs[before];
-        const tangentY = ys[after] - ys[before];
-        const tangentLength = Math.max(0.001, Math.hypot(tangentX, tangentY));
-        normalXs[index] = -tangentY / tangentLength;
-        normalYs[index] = tangentX / tangentLength;
-      }
-    }
-
-    function strokeRibbon(now, offset, color, width, opacity) {
-      let started = false;
-      let previousX = 0;
-      let previousY = 0;
-      context.beginPath();
-      for (let order = 0; order < count; order += 1) {
-        const index = sampleIndex(order);
-        if (now - times[index] > SAMPLE_LIFETIME_MS) continue;
-        const spread = offset * (0.62 + speeds[index] * 0.38);
-        const x = xs[index] + normalXs[index] * spread;
-        const y = ys[index] + normalYs[index] * spread;
-        if (!started) {
-          context.moveTo(x, y);
-          started = true;
-        } else {
-          context.quadraticCurveTo(previousX, previousY, (previousX + x) * 0.5, (previousY + y) * 0.5);
+    function seedLines() {
+      for (let line = 0; line < NUM_LINES; line += 1) {
+        const x = targetX + OFFSET_X[line];
+        const y = targetY + OFFSET_Y[line];
+        velocityXs[line] = 0;
+        velocityYs[line] = 0;
+        const pointStart = line * NUM_POINTS;
+        for (let point = 0; point < NUM_POINTS; point += 1) {
+          pointXs[pointStart + point] = x;
+          pointYs[pointStart + point] = y;
         }
-        previousX = x;
-        previousY = y;
       }
-      if (!started) return;
-      context.lineTo(previousX, previousY);
-      context.strokeStyle = color;
-      context.lineWidth = width;
-      context.globalAlpha = opacity;
-      context.stroke();
+      seeded = true;
     }
 
-    function draw(now) {
+    function updateLinePhysics() {
+      if (!seeded) seedLines();
+      for (let line = 0; line < NUM_LINES; line += 1) {
+        const pointStart = line * NUM_POINTS;
+        const headX = pointXs[pointStart];
+        const headY = pointYs[pointStart];
+        velocityXs[line] = (velocityXs[line] + (targetX + OFFSET_X[line] - headX) * SPRINGS[line]) * FRICTIONS[line];
+        velocityYs[line] = (velocityYs[line] + (targetY + OFFSET_Y[line] - headY) * SPRINGS[line]) * FRICTIONS[line];
+        pointXs[pointStart] = headX + velocityXs[line];
+        pointYs[pointStart] = headY + velocityYs[line];
+        for (let point = 1; point < NUM_POINTS; point += 1) {
+          const index = pointStart + point;
+          pointXs[index] += (pointXs[index - 1] - pointXs[index]) * 0.9;
+          pointYs[index] += (pointYs[index - 1] - pointYs[index]) * 0.9;
+        }
+      }
+    }
+
+    function writeVertexData() {
+      let cursor = 0;
+      for (let line = 0; line < NUM_LINES; line += 1) {
+        const pointStart = line * NUM_POINTS;
+        for (let point = 0; point < NUM_POINTS; point += 1) {
+          const current = pointStart + point;
+          const previous = pointStart + Math.max(0, point - 1);
+          const next = pointStart + Math.min(NUM_POINTS - 1, point + 1);
+          const progress = point / (NUM_POINTS - 1);
+          for (let sideIndex = 0; sideIndex < 2; sideIndex += 1) {
+            vertexData[cursor] = pointXs[previous];
+            vertexData[cursor + 1] = pointYs[previous];
+            vertexData[cursor + 2] = pointXs[current];
+            vertexData[cursor + 3] = pointYs[current];
+            vertexData[cursor + 4] = pointXs[next];
+            vertexData[cursor + 5] = pointYs[next];
+            vertexData[cursor + 6] = sideIndex === 0 ? -1 : 1;
+            vertexData[cursor + 7] = progress;
+            vertexData[cursor + 8] = line;
+            cursor += FLOATS_PER_VERTEX;
+          }
+        }
+      }
+    }
+
+    function renderFrame(now) {
       frame = 0;
       try {
-        if (!eligible() || !context || count < 1) {
+        if (!eligible() || !gl || !program || !uniforms || !vertexArray || !vertexBuffer) {
           clearSurface();
           return;
         }
-        if (geometryDirty) refreshGeometry();
         const idleFor = Math.max(0, now - lastMoveAt);
         if (idleFor >= IDLE_STOP_MS) {
           clearSurface();
           return;
         }
-        const fade = idleFor <= HOLD_MS ? 1 : 1 - (idleFor - HOLD_MS) / FADE_MS;
-        const frameDelta = Number.isFinite(lastFrameAt) ? Math.min(40, Math.max(0, now - lastFrameAt)) : 16;
-        const follow = Math.min(0.46, 0.20 + frameDelta * 0.008);
-        haloX += (lastX - haloX) * follow;
-        haloY += (lastY - haloY) * follow;
+        const dt = Math.max(1, Math.min(100, lastFrameAt ? now - lastFrameAt : 16));
         lastFrameAt = now;
-        context.clearRect(0, 0, cssWidth, cssHeight);
-        context.globalCompositeOperation = "source-over";
-        if (ambientCanvas) {
-          context.globalAlpha = (0.14 + haloSpeed * 0.04) * fade;
-          context.drawImage(ambientCanvas, haloX - AMBIENT_SIZE * 0.5, haloY - AMBIENT_SIZE * 0.5, AMBIENT_SIZE, AMBIENT_SIZE);
+        updateLinePhysics();
+        writeVertexData();
+        const recentMoveX = idleFor <= POINTER_DELTA_RESET_MS ? pointerMoveX : 0;
+        const recentMoveY = idleFor <= POINTER_DELTA_RESET_MS ? pointerMoveY : 0;
+        const speed = Math.hypot(recentMoveX, recentMoveY) / (dt / 16 || 1) * 0.01;
+        mouseSpeed += (Math.min(1, Math.max(0.01, speed)) - mouseSpeed) * 0.15;
+        const responsiveWidth = 1.1 + 12.5 * mouseSpeed / (0.38 + mouseSpeed);
+        const viewportScale = Math.min(1, cssHeight / (CAMERA_WORLD_HEIGHT_AT_PLANE * 64));
+        const targetWidth = Math.min(MAX_LINE_WIDTH_PX, responsiveWidth * viewportScale);
+        lineWidthPx += (targetWidth - lineWidthPx) * 0.15;
+        const fade = idleFor <= HOLD_MS ? 1 : 1 - (idleFor - HOLD_MS) / FADE_MS;
+
+        gl.clear(gl.COLOR_BUFFER_BIT);
+        gl.useProgram(program);
+        gl.bindVertexArray(vertexArray);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertexData);
+        gl.uniform1f(uniforms.lineWidth, lineWidthPx);
+        gl.uniform1f(uniforms.opacity, Math.max(0, fade) * 0.48);
+        for (let line = 0; line < NUM_LINES; line += 1) {
+          gl.uniform3fv(uniforms.colors[line], activePalette[line]);
         }
-        if (count > 1) {
-          updateNormals(now);
-          strokeRibbon(now, 0, activePalette.primary, 2.4, 0.16 * fade);
-          strokeRibbon(now, 2.15, activePalette.secondary, 0.92, 0.20 * fade);
-          strokeRibbon(now, -1.65, activePalette.highlight, 0.58, 0.17 * fade);
+        for (let line = 0; line < NUM_LINES; line += 1) {
+          gl.drawArrays(gl.TRIANGLE_STRIP, line * VERTICES_PER_LINE, VERTICES_PER_LINE);
         }
-        if (ringCanvas && typeof context.save === "function") {
-          const ringScale = 0.90 + haloSpeed * 0.16;
-          context.save();
-          context.translate(haloX, haloY);
-          context.rotate(haloAngle);
-          context.scale(ringScale, 0.92 + haloSpeed * 0.08);
-          context.globalAlpha = 0.34 * fade;
-          context.drawImage(ringCanvas, -RING_SIZE * 0.5, -RING_SIZE * 0.5, RING_SIZE, RING_SIZE);
-          context.restore();
-        }
-        context.globalAlpha = 1;
         schedule();
       } catch {
         failSurface();
@@ -313,61 +480,43 @@
 
     function schedule() {
       if (frame) return;
-      try { frame = requestAnimationFrame(draw); }
-      catch { failSurface(); }
-    }
-
-    function pushPoint(x, y, now) {
-      if (count > 0) {
-        const dx = x - lastX;
-        const dy = y - lastY;
-        if (dx * dx + dy * dy < 4 && now - lastSampleAt < 18) {
-          lastMoveAt = now;
-          schedule();
-          return;
-        }
-      }
-      const dx = count > 0 ? x - lastX : 0;
-      const dy = count > 0 ? y - lastY : 0;
-      const elapsed = Math.max(8, now - lastSampleAt);
-      const distance = Math.hypot(dx, dy);
-      const speed = Math.min(1, distance / elapsed * 0.72);
-      xs[head] = x;
-      ys[head] = y;
-      speeds[head] = speed;
-      times[head] = now;
-      head = (head + 1) % SAMPLE_CAPACITY;
-      count = Math.min(SAMPLE_CAPACITY, count + 1);
-      lastX = x;
-      lastY = y;
-      if (count === 1) {
-        haloX = x;
-        haloY = y;
-      }
-      if (distance > 0.5) haloAngle = Math.atan2(dy, dx);
-      haloSpeed = haloSpeed * 0.56 + speed * 0.44;
-      lastSampleAt = now;
-      lastMoveAt = now;
-      schedule();
-    }
-
-    function onPointerMove(event) {
-      if (event.pointerType && event.pointerType !== "mouse") return;
-      if (!eligible()) return;
       try {
-        if (!ensureSurface()) return;
-        if (geometryDirty) refreshGeometry();
-        const x = event.clientX - hostLeft;
-        const y = event.clientY - hostTop;
-        if (x < 0 || y < 0 || x > cssWidth || y > cssHeight) return;
-        pushPoint(x, y, performance.now());
+        frame = requestAnimationFrame(renderFrame);
       } catch {
         failSurface();
       }
     }
 
-    function markGeometryDirty() {
-      geometryDirty = true;
+    function onPointerMove(event) {
+      if (event.pointerType && event.pointerType !== "mouse") return;
+      if (!eligible() || !setupSurface()) return;
+      const x = event.clientX - hostLeft;
+      const y = event.clientY - hostTop;
+      if (x < 0 || y < 0 || x > cssWidth || y > cssHeight) return;
+      const now = performance.now();
+      pointerMoveX = seeded ? x - previousPointerX : 0;
+      pointerMoveY = seeded ? y - previousPointerY : 0;
+      previousPointerX = x;
+      previousPointerY = y;
+      targetX = x;
+      targetY = y;
+      lastMoveAt = now;
+      if (!seeded) seedLines();
+      schedule();
+    }
+
+    function onHostGeometryChange() {
+      if (!canvas || !gl) return;
+      try {
+        refreshGeometry();
+      } catch {
+        failSurface();
+      }
+    }
+
+    function onContextLost() {
+      contextLost = true;
+      failSurface(true);
     }
 
     function onCapabilityChange() {
@@ -387,9 +536,6 @@
       activePlatform = next;
       activePalette = PALETTES[next];
       clearSurface();
-      if (context) {
-        try { buildLightSprites(); } catch { failSurface(); }
-      }
     }
 
     function suspend(reason = "manual") {
@@ -406,16 +552,16 @@
       destroyed = true;
       releaseSurface();
       host.removeEventListener("pointermove", onPointerMove);
-      host.removeEventListener("pointerenter", markGeometryDirty);
-      window.removeEventListener("scroll", markGeometryDirty, true);
+      host.removeEventListener("pointerenter", onHostGeometryChange);
+      window.removeEventListener("scroll", onHostGeometryChange, true);
       mediaUnlisten(reducedMotion, onCapabilityChange);
       mediaUnlisten(finePointer, onCapabilityChange);
       suspensions.clear();
     }
 
     host.addEventListener("pointermove", onPointerMove, { passive: true });
-    host.addEventListener("pointerenter", markGeometryDirty, { passive: true });
-    window.addEventListener("scroll", markGeometryDirty, { passive: true, capture: true });
+    host.addEventListener("pointerenter", onHostGeometryChange, { passive: true });
+    window.addEventListener("scroll", onHostGeometryChange, { passive: true, capture: true });
     mediaListen(reducedMotion, onCapabilityChange);
     mediaListen(finePointer, onCapabilityChange);
 

@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.2`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（519/519）、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`node --check web/pointer-silk-trail.js`、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实浏览器已在 1440×900、900×640 与 390×844 验收两平台尾迹、会话开关、快速 N→Q→N 和零 console 错误。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.3`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（529/529）、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`node --check web/pointer-silk-trail.js`、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实浏览器已在 1440×900、900×640 与 390×844 验收两平台尾迹、会话开关、快速 N→Q→N 和零 console 错误。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
 
 ## 未修复的 P1
 

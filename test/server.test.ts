@@ -797,7 +797,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /styles\.css\?v=60/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /pointer-silk-trail\.js\?v=2/);
+  assert.match(pageText, /pointer-silk-trail\.js\?v=5/);
   assert.match(pageText, /app\.js\?v=71/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
@@ -1052,7 +1052,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const pointerTrailText = await pointerTrail.text();
   assert.match(pointerTrailText, /globalThis\.PointerSilkTrail/);
   assert.match(pointerTrailText, /MAX_COLOR_PIXELS = 800_000/);
-  assert.match(pointerTrailText, /new Float32Array\(SAMPLE_CAPACITY\)/);
+  assert.match(pointerTrailText, /NUM_POINTS = 20/);
+  assert.match(pointerTrailText, /NUM_LINES = 4/);
+  assert.match(pointerTrailText, /getContext\("webgl2", CONTEXT_OPTIONS\)/);
+  assert.match(pointerTrailText, /gl\.drawArrays\(gl\.TRIANGLE_STRIP/);
+  assert.match(pointerTrailText, /Copyright \(c\) 2025 David Ronai/);
   assert.doesNotMatch(pointerTrailText, /Math\.random|localStorage|sessionStorage|preventDefault|stopPropagation/);
   assert.match(platformWaveText, /gl\.drawArrays\(gl\.TRIANGLES, 0, 3\)/);
   assert.doesNotMatch(platformWaveText, /drawArraysInstanced/);
