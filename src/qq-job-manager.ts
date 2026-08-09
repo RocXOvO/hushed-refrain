@@ -333,11 +333,13 @@ export class QQJobManager {
       };
       const target = await this.resolveCanonicalTarget(config.target);
       this.throwIfStopped();
-      const targetIdentity = identitySnapshot(
-        requestedDisplay,
-        target.nickname?.trim() || undefined,
-        safeAvatarUrl(target.avatarUrl),
-      );
+      const targetIdentity = requestedDisplay.kind === "wechat-user"
+        ? identitySnapshot(requestedDisplay)
+        : identitySnapshot(
+          requestedDisplay,
+          target.nickname?.trim() || undefined,
+          safeAvatarUrl(target.avatarUrl),
+        );
       const taskPaths = qqTaskPaths(this.paths.data, config.mode, target.encryptUin, config.songId);
       const generation: InternalGeneration = {
         platform: "qq",
@@ -905,6 +907,7 @@ export class QQJobManager {
     display: QQMusicTargetDisplay,
     target: QQMusicUser,
   ): Promise<QQTargetIdentitySnapshot> {
+    if (display.kind === "wechat-user") return identitySnapshot(display);
     let nickname = target.nickname?.trim() || undefined;
     let avatarUrl = safeAvatarUrl(target.avatarUrl);
     if ((!nickname || !avatarUrl) && this.lanes.some((lane) => lane.client.getPublicUserProfile)) {

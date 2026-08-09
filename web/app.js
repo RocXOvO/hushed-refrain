@@ -1002,9 +1002,17 @@ function renderQQLiveIdentity(job) {
     return;
   }
   const identity = job.targetIdentity || {};
+  if (identity.kind === "wechat-user") {
+    renderLiveTaskIdentity({
+      nickname: "微信用户",
+      meta: "微信用户",
+      platform: "qq",
+    });
+    return;
+  }
   const label = identity.label || job.targetLabel || "QQ 音乐用户";
   renderLiveTaskIdentity({
-    nickname: identity.nickname || (identity.kind === "wechat-user" ? "微信用户" : "QQ 音乐用户"),
+    nickname: identity.nickname || "QQ 音乐用户",
     meta: label,
     avatarUrl: identity.avatarUrl,
     platform: "qq",

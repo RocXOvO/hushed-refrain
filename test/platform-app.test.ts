@@ -189,3 +189,36 @@ test("platform switching makes new WAAPI and disclosure motion settle immediatel
   assert.equal(attributes.get("aria-expanded"), "true");
   assert.equal(animationCalls, 0);
 });
+
+test("QQ Live Task suppresses profile details for a WeChat identity", () => {
+  let rendered: unknown;
+  let hidden = 0;
+  const context: Record<string, unknown> = {
+    renderLiveTaskIdentity(value: unknown) { rendered = value; },
+    hideLiveTaskIdentity() { hidden += 1; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("renderQQLiveIdentity")}
+    globalThis.renderQQLiveIdentity = renderQQLiveIdentity;
+  `, context);
+  const renderQQLiveIdentity = context.renderQQLiveIdentity as (job: unknown) => void;
+
+  renderQQLiveIdentity({
+    id: "synthetic-job",
+    targetLabel: "微信用户",
+    targetIdentity: {
+      kind: "wechat-user",
+      label: "微信用户",
+      nickname: "must-not-render",
+      avatarUrl: "https://thirdqq.qlogo.cn/must-not-render",
+    },
+  });
+
+  assert.equal(hidden, 0);
+  const identity = rendered as Record<string, unknown>;
+  assert.equal(identity.nickname, "微信用户");
+  assert.equal(identity.meta, "微信用户");
+  assert.equal(identity.platform, "qq");
+  assert.equal("avatarUrl" in identity, false);
+});

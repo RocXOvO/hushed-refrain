@@ -115,7 +115,7 @@ data/logs/qq-<job-id>.jsonl
 - loopback-only `POST /api/qq/encrypt-uin/decode` 请求 `{input,proxy?,allowDirect?}`，返回 `{inputKind,resolution,format,identityKind,encryptUin,identifier,maskedIdentifier}`。裸/链接 EncryptUin 的 `resolution=local` 不准备 Lane 也不联网；直接/链接数字的 `resolution=network` 在用户点击后由 `QQJobManager.resolveClassicEncryptUinInput` 经 lookup lease、Governor、TransportGate、超时/取消获得 canonical EncryptUin，再与原数字对账。代理池或显式代理存在时请求 fail-closed；只有用户明确 `allowDirect` 才直连，绝不静默回退。QQ Client 设置 `redirect:"error"`，只请求固定 QQ 公开资料端点。
 - Dashboard 的 QQ song/likes 表单共用一个单次手动弹窗。可逆 QQ 候选会直接显示完整数字，复制仍需显式操作；微信登录身份只显示“微信用户”并禁用内部 ID 的显示/复制。输入改变、弹窗关闭或 `pagehide` 清除完整值及相关 DOM，并取消在途解析/验证。不得增加批量导入、枚举、爬取、历史记录或批量反查。
 - loopback-only `POST /api/qq/encrypt-uin/verify` 由 `QQJobManager.verifyClassicEncryptUin` 通过原 canonical EncryptUin 和解码候选两次公开资料请求，比较 EncryptUin、昵称和头像；只返回 `{format,identityKind,status,maskedIdentifier,checks}`。解析/验证不创建或改变扫描 generation。格式失败、网络/限流失败、上游不可验证和 mismatch 必须分开呈现；match 不证明所有权或私密数据访问权。
-- 可信本地界面按展示规则允许出现完整 QQ 或 opaque EncryptUin；日志、错误、诊断、导出文件名、真实文档示例和 Release 说明仍不得泄漏这些值。直接 19 位数字仍完整显示为 QQ；只有 28 字符 Token 解码出的内部 ID 不在界面显示。测试只用合成向量，必须覆盖完整 QQ/opaque、“微信用户”、三个 URL 正例与全部 URL 拒绝边界、本地零网络、数字只请求一次、fail-closed、超时/取消/lease 释放、match/mismatch、后台资料补全不阻塞 scanner 与 generation/checkpoint 不变。
+- 可信本地界面按展示规则允许出现完整 QQ 或 opaque EncryptUin；日志、错误、诊断、导出文件名、真实文档示例和 Release 说明仍不得泄漏这些值。直接 19 位数字仍完整显示为 QQ；只有 28 字符 Token 解码出的内部 ID 不在界面显示。测试只用合成向量，必须覆盖完整 QQ/opaque、“微信用户”、三个 URL 正例与全部 URL 拒绝边界、本地零网络、数字只请求一次、fail-closed、超时/取消/lease 释放、match/mismatch、普通目标后台资料补全不阻塞 scanner、微信用户零补全请求/固定展示，以及 generation/checkpoint 不变。
 
 ## 共享 JobManager、HTTP/SSE、Dashboard 与恢复
 
@@ -123,7 +123,7 @@ data/logs/qq-<job-id>.jsonl
 
 - `src/qq-job-manager.ts` 是独立应用层；`src/server.ts` 只实例化 Manager 并组合路由。Manager 通过 `QQJobManagerOptions` 注入 runtime paths、`TaskCoordinator`、Client factory、runner、pool reader/verifier 和报告快照 reader，便于无实网测试。
 - `QQJobGeneration` 是 `{ platform:"qq", mode:"song"|"likes", jobId, target:{ kind:"encryptUin", value } }`；内部 generation 额外绑定 `statePath/outputPath`。目标解析成 canonical EncryptUin 后才发布新 generation；新启动预检失败时保留上一个可读结果 generation。
-- `QQJobSnapshot` 实际分组字段为：任务身份/时间（id、mode、generation、完整 `targetLabel`、可选 `targetIdentity`、songId/name、started/finished/elapsed）；持久进度（songs、songsProcessed、pagesProcessed、commentsInspected、matches、requestsTotal、coverageComplete）；实时性能（commentsPerSecond 与 `PagePerformanceSnapshot`）；拓扑（configured/participated lanes/workers、peakInFlight、laneSelection、workersPerLane、hostConcurrency、QQ Gate 参数）；以及 activeSongs、logPath、note/error。`targetIdentity` 的昵称/受信头像在 scanner promise 建立后经现有 Lane/Governor/Gate 后台补全，失败或悬挂不阻塞扫描启动。
+- `QQJobSnapshot` 实际分组字段为：任务身份/时间（id、mode、generation、完整 `targetLabel`、可选 `targetIdentity`、songId/name、started/finished/elapsed）；持久进度（songs、songsProcessed、pagesProcessed、commentsInspected、matches、requestsTotal、coverageComplete）；实时性能（commentsPerSecond 与 `PagePerformanceSnapshot`）；拓扑（configured/participated lanes/workers、peakInFlight、laneSelection、workersPerLane、hostConcurrency、QQ Gate 参数）；以及 activeSongs、logPath、note/error。普通 QQ/opaque 目标的昵称与受信头像在 scanner promise 建立后经现有 Lane/Governor/Gate 后台补全，失败或悬挂不阻塞扫描启动；`微信用户` 不发补全请求，`targetIdentity` 固定为该称谓、元信息和默认头像。
 - 活动行合并 `QQMusicRequestActivity` 的瞬时 Worker/页/开始时间和 `QQMusicSongActivity` 的稳定页数/评论数/总数/完成语义；上限 64 行，`done/truncated` 移除进度行。只有成功 `comment-page` 更新 CommentRate/PagePerformance，身份解析、来源发现和元数据不计入读取速度。
 - `TaskCoordinator` 的 `qq` lease 覆盖代理准备、目标解析、扫描、歌曲详情查询和歌曲搜索。lookup-only 搜索复用 `prepareLanes`、Lane Governor、动态 song profile 与 fail-closed 代理轮换，但不读取或改写扫描 generation/snapshot/results/checkpoint。HTTP 连接中止会传入 Manager 的 lookup controller；新 lookup 通过单调版本号取消并等待旧 lookup 释放后接替，绝不能抢占正式扫描。`stop()` 可取消正在进行的 pool verification、resolve、lookup/search 和 scanner；启动期取消/冷却分别结算为 `stopped/cooldown`，所有租约均幂等释放。
 
@@ -142,7 +142,7 @@ data/logs/qq-<job-id>.jsonl
 - QQ song/likes 使用独立表单；评论页默认/最大 25，likes 来源页默认/最大 500。song 始终是一条 SeqNo 链；likes 直接展示主机上限对应的可调度 Worker，并自动显示每出口许可。Worker 只增加跨歌曲调度，每 IP Governor 节奏不变；共享代理池未预先验证 QQ 域，请求保持 fail-closed。QQ 不保存登录 Cookie；工作区固定显示“本地服务”并隐藏网易云二维码登录按钮，网易云已保存会话不得串入 QQ 展示。
 - `web/platform-wave.js` 只提供一种约 680 ms 的 WebGL2 Obsidian Silk Aperture；顶栏没有动效按钮，旧 `data/ui-preferences.json` 不再读取。五条确定性绢缎褶皱/等高线按切换方向从源平台色收拢到中性黑曜色，244–404 ms 显式保持全屏 alpha 1，约 326 ms/48% 唯一提交目标工作区，然后再以目标色揭幕。渲染器使用一个 program/VAO、`depth:false` 和每帧一次 fullscreen TRIANGLES draw，不创建 instance、VBO、纹理、FBO 或 readback；高光不用 `pow`/`exp`，grain 不用 sine hash，DPR 不超过 1.25，颜色缓冲不超过 1,200,000 像素，resize 沿 `lastElapsed` 立即重绘但不改变时钟/commit。正常 680 ms 先移除 Canvas 和 busy 标记，下一 compositor RAF 再释放 GPU/监听器并 resolve，避免结束闪屏；异常路径立即完整清理。业务 DOM 和身份/评论数据不进入 Canvas/GPU；提交后所有滚动坐标立即恢复，只有 results table 允许在同 platform/mode/view/switch version 与当前 view 的 result generation revision 下延迟补偿，普通 refresh 不取消，新 generation、2.5 s 超时或用户 wheel/touch/pointer/key 操作即取消。
 - `pagehide` 会暂停轮询、SSE、运行计时和响应式媒体监听；Chromium 从 BFCache 恢复时，持久化 `pageshow` 路径会重新绑定监听、重启单例计时器、连接当前 generation 的 SSE 并补交待渲染结果，不重复创建循环。
-- 当前缓存版本是 `styles.css?v=53`、`platform-wave.js?v=14`、`app.js?v=65`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
+- 当前缓存版本是 `styles.css?v=53`、`platform-wave.js?v=14`、`app.js?v=66`；修改资源后只递增对应 token，并与 `web/index.html` 同步。
 
 ### 恢复与估算
 
@@ -152,4 +152,4 @@ data/logs/qq-<job-id>.jsonl
 
 ### 完整交付门禁
 
-运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`npm run desktop:smoke:mac` 与 `git diff --check`。浏览器需验收双平台/四 viewKey、QQ 完整目标/微信用户/后台资料补全、NetEase 活动任务资料 fail-closed、PDF 阶段/耗时/取消与隐藏窗口释放、平台/模式/启动竞态隔离、旧请求/SSE 抑制、Obsidian Silk Aperture 的 326 ms 唯一提交、680 ms 脱离与下一 compositor RAF 资源回收、无结束闪屏、单次 fullscreen draw、1.2M 像素、各异常降级、结果表延迟滚动代际、双轴缩放、overlay 互斥、窄屏/矮屏和 0 console error。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。
+运行 `npm run check`、`npm test`、`npm run build`、`npm run bench:qq`、`node --check web/app.js`、`node --check web/platform-wave.js`、`npm run desktop:smoke:mac` 与 `git diff --check`。浏览器需验收双平台/四 viewKey、QQ 完整目标、普通目标后台资料补全、微信用户固定元信息/默认头像且零补全请求、NetEase 活动任务资料 fail-closed、PDF 阶段/耗时/取消与隐藏窗口释放、平台/模式/启动竞态隔离、旧请求/SSE 抑制、Obsidian Silk Aperture 的 326 ms 唯一提交、680 ms 脱离与下一 compositor RAF 资源回收、无结束闪屏、单次 fullscreen draw、1.2M 像素、各异常降级、结果表延迟滚动代际、双轴缩放、overlay 互斥、窄屏/矮屏和 0 console error。通过本地门禁不等于已 commit、push、打包或发布；Release 仍需独立核对版本、tag、提交和平台资产。

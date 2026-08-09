@@ -74,15 +74,19 @@ test("publishes full QQ, WeChat-user, and opaque target presentation without cha
   const wxIdentifier = "1150000000000000472";
   const wxToken = encodeClassicEncryptUin(wxIdentifier);
   const opaque = "opaque-user_1234";
+  const profileInputs: string[] = [];
   const fixture = await managerFixture({
     clientFactory: () => fakeClient({
       resolveUser: async (input) => ({ input, encryptUin: normalizeUserInput(input).value }),
-      getPublicUserProfile: async (input) => ({
-        input,
-        encryptUin: input === qq ? qqToken : input === wxIdentifier ? wxToken : opaque,
-        nickname: input === wxIdentifier ? "synthetic-wechat-user" : "synthetic-qq-user",
-        avatarUrl: "https://thirdqq.qlogo.cn/synthetic-avatar",
-      }),
+      getPublicUserProfile: async (input) => {
+        profileInputs.push(input);
+        return {
+          input,
+          encryptUin: input === qq ? qqToken : input === wxIdentifier ? wxToken : opaque,
+          nickname: input === wxIdentifier ? "synthetic-wechat-user" : "synthetic-qq-user",
+          avatarUrl: "https://thirdqq.qlogo.cn/synthetic-avatar",
+        };
+      },
     }),
   });
 
@@ -101,8 +105,8 @@ test("publishes full QQ, WeChat-user, and opaque target presentation without cha
 
   const wxJob = await fixture.manager.start({ mode: "likes", target: wxToken, allowDirect: true, minDelayMs: 0, jitterMs: 0 });
   assert.equal(wxJob.targetLabel, "微信用户");
-  const enrichedWxJob = await waitForJob(fixture.manager, (job) => job.targetIdentity?.nickname === "synthetic-wechat-user");
-  assert.equal(enrichedWxJob.targetIdentity?.nickname, "synthetic-wechat-user");
+  assert.deepEqual(wxJob.targetIdentity, { kind: "wechat-user", label: "微信用户" });
+  assert.equal(profileInputs.includes(wxIdentifier), false);
   assert.doesNotMatch(wxJob.targetLabel ?? "", /QQ|微信号/);
   assert.equal(wxJob.generation?.target.value, wxToken);
   fixture.finish(reportFor(fixture.options[1]));
@@ -111,6 +115,14 @@ test("publishes full QQ, WeChat-user, and opaque target presentation without cha
   const opaqueJob = await fixture.manager.start({ mode: "likes", target: opaque, allowDirect: true, minDelayMs: 0, jitterMs: 0 });
   assert.equal(opaqueJob.targetLabel, `EncryptUin ${opaque}`);
   assert.equal(opaqueJob.targetIdentity?.kind, "encrypt-uin");
+  const enrichedOpaqueJob = await waitForJob(fixture.manager, (job) => job.targetIdentity?.nickname === "synthetic-qq-user");
+  assert.deepEqual(enrichedOpaqueJob.targetIdentity, {
+    kind: "encrypt-uin",
+    label: `EncryptUin ${opaque}`,
+    nickname: "synthetic-qq-user",
+    avatarUrl: "https://thirdqq.qlogo.cn/synthetic-avatar",
+  });
+  assert.equal(profileInputs.includes(opaque), true);
   assert.equal(opaqueJob.generation?.target.value, opaque);
   fixture.finish(reportFor(fixture.options[2]));
   await fixture.settled();

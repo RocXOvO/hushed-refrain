@@ -578,7 +578,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /styles\.css\?v=53/);
   assert.match(pageText, /platform-wave\.js\?v=14/);
-  assert.match(pageText, /app\.js\?v=65/);
+  assert.match(pageText, /app\.js\?v=66/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
   assert.match(pageText, /id="pdfExportDialog"/);
@@ -712,6 +712,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /PDF_EXPORT_STAGE_LABELS/);
   assert.match(appText, /showPdfExportProgress/);
   assert.match(appText, /renderQQLiveIdentity/);
+  assert.match(appText, /if \(identity\.kind === "wechat-user"\)[\s\S]*nickname: "微信用户"[\s\S]*meta: "微信用户"/);
   assert.match(appText, /renderNeteaseLiveIdentity/);
   assert.match(appText, /\/api\/user\/profile/);
   assert.match(appText, /\/api\/user\/profile\?uid=\$\{encodeURIComponent\(uid\)\}&mode=\$\{encodeURIComponent\(taskMode\)\}&jobId=\$\{encodeURIComponent\(jobId\)\}/);
