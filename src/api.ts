@@ -163,7 +163,10 @@ export class EnhancedNcmClient implements NcmClient {
         "目标用户已开启“喜欢的音乐”隐私，未使用当前登录账号的喜欢列表代替",
       );
     }
-    return { id: playlistId, trackCount: numberOrUndefined(targetPlaylist?.trackCount) };
+    return {
+      id: playlistId,
+      trackCount: playlistTrackCount(targetPlaylist?.trackCount, "列表", listing),
+    };
   }
 
   async getTargetLikedPlaylistSongs(
@@ -179,28 +182,52 @@ export class EnhancedNcmClient implements NcmClient {
     if (ownerId !== uid) {
       throw new ApiResponseError("喜欢歌单所属用户与目标 UID 不一致，已阻止使用错误的登录账号数据", 409, body);
     }
-    const listingCount = target.trackCount;
-    const detailCount = numberOrUndefined(playlist.trackCount);
-    if (listingCount !== undefined && detailCount !== undefined && listingCount !== detailCount) {
+    const listingCount = playlistTrackCount(target.trackCount, "列表", body);
+    const detailCount = playlistTrackCount(playlist.trackCount, "详情", body);
+    if (!Array.isArray(playlist.trackIds)) {
+      throw new ApiResponseError("目标用户喜欢歌单详情缺少 trackIds，可能是隐私限制或响应截断", 502, body);
+    }
+    const ids = playlist.trackIds.map((value) => positiveDecimalId(object(value).id));
+    if (ids.some((id) => !id)) {
+      throw new ApiResponseError("目标用户喜欢歌单包含无法识别的歌曲 ID，已阻止写入不完整目录", 502, body);
+    }
+    const uniqueIds = [...new Set(ids as string[])];
+    if (uniqueIds.length !== ids.length) {
+      throw new ApiResponseError("目标用户喜欢歌单包含重复歌曲 ID，无法确认目录是否完整", 502, body);
+    }
+    const declaredCounts = [listingCount, detailCount]
+      .filter((count): count is number => count !== undefined);
+    const minimumCompleteCount = declaredCounts.length > 0 ? Math.max(...declaredCounts) : undefined;
+    // user_playlist and playlist_detail are separate snapshots. NetEase can
+    // publish a newer explicit trackIds vector before either trackCount catches
+    // up (for example 1105 declared versus 1106 IDs). One newer validated ID
+    // is safe to scan; fewer unique IDs than any declaration still proves
+    // truncation and must fail rather than checkpoint a partial catalog.
+    if (minimumCompleteCount !== undefined && uniqueIds.length < minimumCompleteCount) {
+      const declarations = [
+        listingCount === undefined ? undefined : `列表声明 ${listingCount} 首`,
+        detailCount === undefined ? undefined : `详情声明 ${detailCount} 首`,
+      ].filter((value): value is string => Boolean(value));
       throw new ApiResponseError(
-        `目标用户喜欢歌单数量前后不一致：列表声明 ${listingCount} 首，详情声明 ${detailCount} 首`,
+        `目标用户喜欢歌单响应不完整：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
         502,
         body,
       );
     }
-    const expectedCount = detailCount ?? listingCount;
-    if (!Array.isArray(playlist.trackIds)) {
-      throw new ApiResponseError("目标用户喜欢歌单详情缺少 trackIds，可能是隐私限制或响应截断", 502, body);
+    const staleCounts = declaredCounts.filter((count) => uniqueIds.length > count + 1);
+    if (staleCounts.length > 0) {
+      const declarations = [
+        listingCount === undefined ? undefined : `列表声明 ${listingCount} 首`,
+        detailCount === undefined ? undefined : `详情声明 ${detailCount} 首`,
+      ].filter((value): value is string => Boolean(value));
+      throw new ApiResponseError(
+        `目标用户喜欢歌单计数差异过大：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
+        502,
+        body,
+      );
     }
-    const ids = playlist.trackIds.map((value) => stringId(object(value).id));
-    if (ids.some((id) => !id)) {
-      throw new ApiResponseError("目标用户喜欢歌单包含无法识别的歌曲 ID，已阻止写入不完整目录", 502, body);
-    }
-    if (expectedCount !== undefined && ids.length !== expectedCount) {
-      throw new ApiResponseError(`目标用户喜欢歌单响应不完整：声明 ${expectedCount} 首，实际返回 ${ids.length} 个 ID`, 502, body);
-    }
-    return ids.map((id, index) => ({
-      id: id!,
+    return uniqueIds.map((id, index) => ({
+      id,
       sources: ["likes" as const],
       sourceRank: index + 1,
     }));
@@ -479,6 +506,24 @@ function numberOrUndefined(value: unknown): number | undefined {
   if (value === null || value === undefined || value === "" || typeof value === "boolean") return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function playlistTrackCount(value: unknown, source: "列表" | "详情", response: unknown): number | undefined {
+  if (value === null || value === undefined || (typeof value === "string" && value.trim() === "")) return undefined;
+  const parsed = typeof value === "number"
+    ? value
+    : typeof value === "string" && /^\d+$/.test(value.trim())
+    ? Number(value.trim())
+    : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new ApiResponseError(`目标用户喜欢歌单${source} trackCount 无效`, 502, response);
+  }
+  return parsed;
+}
+
+function positiveDecimalId(value: unknown): string | undefined {
+  const id = stringId(value);
+  return id && /^[1-9]\d*$/.test(id) ? id : undefined;
 }
 
 function nonNegativeIntegerOrUndefined(value: unknown): number | undefined {

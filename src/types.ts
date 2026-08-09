@@ -188,6 +188,7 @@ export interface ParallelCheckpointActivity {
 export interface ScanCheckpointActivity {
   songs: number;
   songsProcessed: number;
+  catalogLoaded: boolean;
   catalogSongs: number;
   reusedSongs: number;
   historicalCompletedSongs: number;
@@ -355,6 +356,7 @@ export interface RunReport {
   uid: string;
   songs: number;
   songsProcessed: number;
+  catalogLoaded: boolean;
   catalogSongs: number;
   reusedSongs: number;
   historicalCompletedSongs: number;

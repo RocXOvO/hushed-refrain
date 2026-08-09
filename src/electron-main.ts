@@ -339,8 +339,8 @@ async function createWindow(): Promise<void> {
       updateState: await window.ncmDesktop?.getUpdateState?.(),
       settings: await window.ncmDesktop?.getSettings?.(),
       exportReady: typeof window.ncmDesktop?.exportResultsPdf === "function"
-    }))()` ) as { platform?: string; maximized?: boolean; updateState?: { supported?: boolean }; settings?: { closeBehavior?: string }; exportReady?: boolean };
-    if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean" || !["ask", "background", "exit"].includes(bridge.settings?.closeBehavior ?? "") || bridge.exportReady !== true) {
+    }))()` ) as { platform?: string; maximized?: boolean; updateState?: { supported?: boolean }; settings?: { closeBehavior?: string; cursorTrailEnabled?: boolean }; exportReady?: boolean };
+    if (bridge.platform !== process.platform || typeof bridge.maximized !== "boolean" || typeof bridge.updateState?.supported !== "boolean" || !["ask", "background", "exit"].includes(bridge.settings?.closeBehavior ?? "") || typeof bridge.settings?.cursorTrailEnabled !== "boolean" || bridge.exportReady !== true) {
       throw new Error("Desktop window preload bridge is unavailable.");
     }
     if (process.platform === "win32" && app.isPackaged && bridge.updateState.supported !== true) {

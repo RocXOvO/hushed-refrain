@@ -26,19 +26,25 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 - `PlatformWaveTransition.create({ sourcePlatform, targetPlatform, direction, commit })` 返回 `{ finished, cancel }`。内部状态固定为 `idle → preparing → covering → covered/commit → revealing → settled`；`commit()` 是唯一允许修改 platform/mode、`hidden`/`inert`、结果/SSE 和 ARIA 的入口，只调用一次并显式返回布尔值。
 - 一次过渡约 680 ms。深色绢幕按 Tab 方向收拢，244 ms 已完整遮住视口；shader 在 244–404 ms 遮罩窗口显式返回 `alpha=1`，约 326 ms/48% 在源色经中性黑曜过渡到目标色的交界处唯一提交 DOM，404 ms 才开始揭幕。网易云使用深红/暖色绢光，QQ 使用石墨绿/品牌绿/柔和薄荷绢光；不使用粒子、无限环、方格铺屏、模式选择、紫色渐变、模糊玻璃、弹跳或循环长尾。
 - Fragment shader 直接生成五条确定性绢缎褶皱/等高线、门帘边缘、轻微箔线与暗部颗粒，以 `fwidth` 给边界抗锯齿，颜色从源平台继续收敛到中性 void 再进入目标平台。高光用有界乘法近似而不用 `pow`/`exp`，grain 使用低成本算术 hash 而不用 sine hash。它不读取、截图、分割或移动真实页面，也不接收身份和结果数据。
-- 顶栏和设置中没有动效模式入口，前端不读写 localStorage 动效键，服务端也不提供 `/api/preferences`。旧版留下的 `data/ui-preferences.json` 被安全忽略而不主动删除。reduced-motion、隐藏页面或无 WebGL 时直接完成切换。
-- Canvas 是唯一动画元素；不对 `platform-surface`、`main-pane`、任务栏、指标、表格、导航或 Inspector 写入 `transform`/`opacity`/`filter`/`will-change`，不读取或截图业务 DOM，不生成 DOM 纹理，UID、EncryptUin 和评论不得进入 GPU。`platform-switching` 期间只暂停 `.platform-surface` 工作区自身的 CSS animation/transition，不禁用 `pointer-events`；此时新触发的 WAAPI 界面动效直接收敛，工作区外新出现的弹窗或 Toast 也禁用入场动画。平台 Tab 仍可用于反向切换，停止按钮始终优先可用。两平台的 main-pane padding、intro 外框、command bar、metric 和输出 Tab 共享几何必须一致，切换前后关键矩形误差不超过 0.5 CSS px；应用层提交后立即恢复所有捕获的滚动坐标。只有 results table 可在非空结果异步回填后延迟再恢复一次；该机会同时绑定 platform/mode/view/switch version 和每个 view 的 result generation revision，普通 refresh 不取消，只有确认新 job generation 才会失效。2.5 s 超时，且用户在结果表上的 wheel/touch/pointer/key 任一操作会立即取消，避免覆盖新滚动意图。Layout Shift 为 0。
+- 顶栏和设置中没有平台切换动效模式入口，前端不读写 localStorage 切换动效键，服务端也不提供 `/api/preferences`。旧版留下的 `data/ui-preferences.json` 被安全忽略而不主动删除。reduced-motion、隐藏页面或无 WebGL 时直接完成切换。
+- 平台切换的 WebGL Canvas 是该交接中唯一动画元素；不对 `platform-surface`、`main-pane`、任务栏、指标、表格、导航或 Inspector 写入 `transform`/`opacity`/`filter`/`will-change`，不读取或截图业务 DOM，不生成 DOM 纹理，UID、EncryptUin 和评论不得进入 GPU。`platform-switching` 期间只暂停 `.platform-surface` 工作区自身的 CSS animation/transition，不禁用 `pointer-events`；此时新触发的 WAAPI 界面动效直接收敛，工作区外新出现的弹窗或 Toast 也禁用入场动画。平台 Tab 仍可用于反向切换，停止按钮始终优先可用。两平台的 main-pane padding、intro 外框、command bar、metric 和输出 Tab 共享几何必须一致，切换前后关键矩形误差不超过 0.5 CSS px；应用层提交后立即恢复所有捕获的滚动坐标。只有 results table 可在非空结果异步回填后延迟再恢复一次；该机会同时绑定 platform/mode/view/switch version 和每个 view 的 result generation revision，普通 refresh 不取消，只有确认新 job generation 才会失效。2.5 s 超时，且用户在结果表上的 wheel/touch/pointer/key 任一操作会立即取消，避免覆盖新滚动意图。Layout Shift 为 0。
 - WebGL2 使用一个 program/VAO，`depth:false`，每帧仅一次 `drawArrays(TRIANGLES,0,3)` 全屏绘制。没有 instance、VBO、纹理、FBO、readback 或 CPU 粒子数组。使用 `low-power`、premultiplied alpha，DPR 不超过 1.25，颜色缓冲不超过 1,200,000 像素；RAF 中不创建数组/对象/字符串也不查询布局，resize 沿用原 `startedAt` 并在更新分辨率 uniform 后按 `lastElapsed` 立即重绘，时钟和 commit 状态不变。
 - 提交前取消保留源平台，提交后取消保留目标平台；快速 N→Q→N 只收敛到最后选择。应用层在全不透明 backing 内捕获首次提交异常并同栈重试一次；若约326ms的 `commit()` 仍返回 `false` 或抛错，过渡立即结算且不继续揭幕，只有当前应用代际可同步收敛。初始或运行中 reduced-motion、页面隐藏、WebGL2/context/shader/program/VAO/append/resize/任一draw失败、首次RAF申请失败或context loss都立即提交并单次结算Promise。正常到达 680 ms 时先将 Canvas 从合成树移除并清除 `platform-switching`/`aria-busy`，让目标页面稳定接管；下一 compositor RAF 才释放 GPU/监听器并 resolve `finished`，避免透明清屏或销毁 backing 形成末帧闪屏。异常路径仍立即完整清理；`pagehide`清理，`pageshow`若desired platform与当前不同则无动画收敛，并通过提交返回值保证当前generation的SSE只连接一次。取消平台或其他界面动画时，正在过渡的`<details>`依`data-expanded`同步`open`/`aria-expanded`并清理动画状态。
+
+### 主工作区绢缎鼠标尾迹
+
+- `PointerSilkTrail.create({ host, platform, enabled })` 仅在 `#mainWorkspace` 内惰性创建一张 `pointer-events:none` 的 Canvas2D，返回 `setEnabled` / `setPlatform` / `suspend(reason)` / `resume(reason)` / `destroy`。它只接受 `pointer:fine` 的 mouse 移动，不捕获指针、不阻断业务交互，也不覆盖导航、顶栏、右侧 Inspector 或弹窗。两平台分别使用克制的红/绿调色板，每帧只绘制三条确定性低对比绢线和一层微弱预制柔光；不读取、截图或纹理化业务 DOM。
+- 热路径使用 28 点 `Float32Array`/`Float64Array` 环形采样，单点寿命 260 ms；最后一次移动后保持 72 ms，再用 348 ms 淡出，到 420 ms 立即清空并将空闲 RAF 降为 0。渲染 DPR 不超过 1.25，颜色缓冲不超过 800,000 像素；Canvas 与 ResizeObserver 只在首次合格移动后分配，绘制/RAF 异常会立即释放表面。
+- 关闭开关、reduced-motion 或粗指针会立即释放表面；任意弹窗打开、平台切换、页面 hidden/blur 则通过可叠加 reason 停止 RAF 并清空采样/画面，可保留已惰性分配的空 Canvas。恢复时不重放旧轨迹，只等新移动。`pagehide` 彻底 `destroy()`；BFCache `pageshow` 重建单例。桌面 `desktop-settings.json` v2 持久化 `closeBehavior` 与默认开启的 `cursorTrailEnabled`，v1 迁移保留关闭行为并补默认值，partial update 不重置未提交字段。无 Electron bridge 的浏览器模式只修改当前会话内存，刷新后默认开启，不写 localStorage/sessionStorage 或调用服务端偏好 API。
 
 ## 歌曲搜索
 
 - 统一响应 DTO：`{ platform, query, songs: [{ id, mid?, name, artists, album?, durationMs? }] }`。
-- 网易云使用 `cloudsearch` 的单曲类型；QQ 使用现有 QQ Client 和代理 Lane 请求搜索 CGI。
+- 网易云使用 `cloudsearch` 的单曲类型；QQ 使用现有 QQ Client，并通过固定的本机直连 lookup Lane 请求搜索 CGI。
 - 搜索输入 2–80 字符，返回上限 10 条，新请求会取消旧请求。候选项用歌名、歌手、专辑和 ID 帮助消歧。
 - 选中后将 ID 写入隐藏字段，只有当前查询与候选代际匹配时才允许启动。用户继续修改文本会清除旧 ID。
 - 纯数字输入继续作为高级兼容路径，并查询元数据后显示确认结果。
-- 所有 QQ 搜索在代理池运行时 fail-closed，不回退直连；与正在运行的扫描任务共享全局任务互斥。
+- Dashboard 的 QQ 歌名搜索与数字歌曲详情属于低频 lookup-only 控制请求，固定使用一条 4 秒有界的本机直连 Lane；它们忽略运行中的代理池、手动代理字段和伪造的代理参数，但仍保留全局任务 lease、Governor、Gate、取消与旧响应代际保护。只有正式评论/来源扫描按任务配置使用代理池或显式代理，并在该代理路径上保持 fail-closed。
 
 ## 用户参数与进度词汇
 
@@ -56,6 +62,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 ## 验收不变量
 
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
+- 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，28 点/260 ms/420 ms 与 DPR/像素上限不可回归；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。
 - 搜索的旧响应不能覆盖新查询；平台、查询和选中 ID 必须同代。

@@ -3,13 +3,15 @@ import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 export type DesktopCloseBehavior = "ask" | "background" | "exit";
 
 export interface DesktopSettings {
-  version: 1;
+  version: 2;
   closeBehavior: DesktopCloseBehavior;
+  cursorTrailEnabled: boolean;
 }
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = Object.freeze({
-  version: 1,
+  version: 2,
   closeBehavior: "ask",
+  cursorTrailEnabled: true,
 });
 
 export function decodeDesktopSettings(value: unknown): DesktopSettings {
@@ -17,22 +19,35 @@ export function decodeDesktopSettings(value: unknown): DesktopSettings {
     return { ...DEFAULT_DESKTOP_SETTINGS };
   }
   const candidate = value as Record<string, unknown>;
+  if (candidate.version !== undefined && candidate.version !== 1 && candidate.version !== 2) {
+    return { ...DEFAULT_DESKTOP_SETTINGS };
+  }
   const closeBehavior = candidate.closeBehavior;
   return {
-    version: 1,
+    version: 2,
     closeBehavior: closeBehavior === "background" || closeBehavior === "exit" ? closeBehavior : "ask",
+    cursorTrailEnabled: typeof candidate.cursorTrailEnabled === "boolean" ? candidate.cursorTrailEnabled : true,
   };
 }
 
-export function parseDesktopSettingsPatch(value: unknown): Pick<DesktopSettings, "closeBehavior"> {
+export function parseDesktopSettingsPatch(value: unknown): Partial<Pick<DesktopSettings, "closeBehavior" | "cursorTrailEnabled">> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("全局设置格式错误。");
   }
   const input = value as Record<string, unknown>;
-  if (input.closeBehavior !== "ask" && input.closeBehavior !== "background" && input.closeBehavior !== "exit") {
-    throw new Error("关闭窗口行为无效。");
+  const patch: Partial<Pick<DesktopSettings, "closeBehavior" | "cursorTrailEnabled">> = {};
+  if (Object.prototype.hasOwnProperty.call(input, "closeBehavior")) {
+    if (input.closeBehavior !== "ask" && input.closeBehavior !== "background" && input.closeBehavior !== "exit") {
+      throw new Error("关闭窗口行为无效。");
+    }
+    patch.closeBehavior = input.closeBehavior;
   }
-  return { closeBehavior: input.closeBehavior };
+  if (Object.prototype.hasOwnProperty.call(input, "cursorTrailEnabled")) {
+    if (typeof input.cursorTrailEnabled !== "boolean") throw new Error("鼠标绢缎尾迹开关无效。");
+    patch.cursorTrailEnabled = input.cursorTrailEnabled;
+  }
+  if (!Object.keys(patch).length) throw new Error("全局设置没有可更新的字段。");
+  return patch;
 }
 
 export class DesktopSettingsStore {
@@ -63,7 +78,7 @@ export class DesktopSettingsStore {
   async update(patch: unknown): Promise<DesktopSettings> {
     const parsed = parseDesktopSettingsPatch(patch);
     return this.enqueue(async () => {
-      const next = { ...this.value, ...parsed, version: 1 } as DesktopSettings;
+      const next = { ...this.value, ...parsed, version: 2 } as DesktopSettings;
       await writeAtomicJson(this.path, next);
       this.value = next;
       return this.get();

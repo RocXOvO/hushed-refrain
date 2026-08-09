@@ -190,6 +190,53 @@ test("platform switching makes new WAAPI and disclosure motion settle immediatel
   assert.equal(animationCalls, 0);
 });
 
+test("global settings keep the browser trail session-only while desktop close controls stay disabled", () => {
+  const closeInputs = [
+    { value: "ask", checked: false, disabled: false },
+    { value: "background", checked: false, disabled: false },
+    { value: "exit", checked: false, disabled: false },
+  ];
+  const trailInput = { checked: true, disabled: false };
+  const applied: boolean[] = [];
+  const context: Record<string, unknown> = {
+    window: {},
+    el: {
+      cursorTrailEnabled: trailInput,
+      cursorTrailSupport: { textContent: "" },
+      saveGlobalSettings: { disabled: true },
+      resetGlobalSettings: { disabled: true },
+      globalSettingsSupport: { textContent: "" },
+    },
+    pointerSilkTrail: { setEnabled(value: boolean) { applied.push(value); } },
+    PointerSilkTrail: { create() {} },
+    $(selector: string) {
+      const match = selector.match(/desktopCloseBehavior"\]\[value="([^"]+)/);
+      return match ? closeInputs.find((input) => input.value === match[1]) : undefined;
+    },
+    $$(selector: string) { return selector.includes("desktopCloseBehavior") ? closeInputs : []; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    var desktopSettings = { version: 2, closeBehavior: "ask", cursorTrailEnabled: true };
+    ${extractFunction("applyCursorTrailSetting")}
+    ${extractFunction("renderGlobalSettings")}
+    globalThis.renderGlobalSettings = renderGlobalSettings;
+  `, context);
+  const render = context.renderGlobalSettings as (settings: unknown) => void;
+
+  render({ version: 2, closeBehavior: "background", cursorTrailEnabled: false });
+  assert.equal(closeInputs[1].checked, true);
+  assert.ok(closeInputs.every((input) => input.disabled));
+  assert.equal(trailInput.checked, false);
+  assert.equal(trailInput.disabled, false);
+  assert.deepEqual(applied, [false]);
+  const el = context.el as Record<string, { disabled?: boolean; textContent?: string }>;
+  assert.equal(el.saveGlobalSettings.disabled, false);
+  assert.equal(el.resetGlobalSettings.disabled, false);
+  assert.match(el.cursorTrailSupport.textContent ?? "", /当前会话.*刷新后恢复/);
+  assert.match(el.globalSettingsSupport.textContent ?? "", /仅在桌面客户端/);
+});
+
 test("QQ Live Task suppresses profile details for a WeChat identity", () => {
   let rendered: unknown;
   let hidden = 0;
@@ -415,7 +462,7 @@ test("NetEase user probe is single-flight, cached for a minute, and bounded", as
   assert.equal(cache.has("42"), false, "old previews are evicted when the cache reaches its bound");
 });
 
-test("source preview distinguishes privacy from cooldown and generic restrictions", () => {
+test("source preview distinguishes privacy from cooldown and inconclusive preflight failures", () => {
   const target = { className: "", textContent: "" };
   const context: Record<string, unknown> = { fmt: (value: number) => String(value) };
   context.globalThis = context;
@@ -426,7 +473,30 @@ test("source preview distinguishes privacy from cooldown and generic restriction
   assert.equal(target.className, "private");
   assert.equal(target.textContent, "喜欢歌曲 已开启隐私");
   render(target, "喜欢歌曲", { status: "restricted" });
-  assert.equal(target.textContent, "喜欢歌曲 查询受限");
+  assert.equal(target.textContent, "喜欢歌曲 暂时无法确认");
+});
+
+test("source coverage distinguishes an unread catalog from a confirmed empty catalog", () => {
+  const context: Record<string, unknown> = { fmt: (value: number) => String(value) };
+  context.globalThis = context;
+  vm.runInNewContext(`${extractFunction("sourceCoverageSummary")} globalThis.summary = sourceCoverageSummary;`, context);
+  const summary = context.summary as (job: Record<string, unknown>) => string;
+
+  assert.equal(summary({
+    uid: "42",
+    catalogLoaded: false,
+    catalogSongs: 0,
+    songs: 0,
+  }), "目录未读取 · 数量未知");
+  assert.equal(summary({
+    uid: "42",
+    catalogLoaded: true,
+    catalogSongs: 0,
+    songs: 0,
+    historicalCompletedSongs: 0,
+    reusedSongs: 0,
+    newPendingSongs: 0,
+  }), "目录总数 0 · 历史已完成 0 · 已复用/跳过 0 · 新增待扫 0");
 });
 
 test("ordinary song search is single-flight, cached for a minute, and bounded", async () => {

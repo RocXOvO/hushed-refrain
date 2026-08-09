@@ -377,6 +377,25 @@ test("both mode keeps the available source and reports partial coverage", async 
   assert.match(report.sourceErrors[0], /^record:/);
 });
 
+test("an initial source failure persists an unloaded catalog instead of a confirmed zero", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-unloaded-catalog-"));
+  const config = await options(directory);
+  config.source = "record";
+  let lastCheckpoint: Parameters<NonNullable<ScanOptions["onCheckpoint"]>>[0] | undefined;
+  config.onCheckpoint = (activity) => { lastCheckpoint = activity; };
+  const client = new FakeClient();
+  client.getUserRecord = async () => { throw new Error("catalog unavailable"); };
+
+  await assert.rejects(
+    runCommentFinder(client, governor(10), config),
+    /catalog unavailable/,
+  );
+  assert.equal(lastCheckpoint?.catalogLoaded, false);
+  assert.equal(lastCheckpoint?.catalogSongs, 0);
+  const saved = JSON.parse(await readFile(config.statePath, "utf8")) as { sourcesLoaded?: boolean };
+  assert.equal(saved.sourcesLoaded, false);
+});
+
 test("an empty source list is refreshed on the next normal start without comment requests", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-empty-"));
   const config = await options(directory);

@@ -29,10 +29,10 @@ const el = {
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
-  globalSettingsButton: $("#globalSettingsButton"), globalSettingsDialog: $("#globalSettingsDialog"), globalSettingsSupport: $("#globalSettingsSupport"), globalSettingsStatus: $("#globalSettingsStatus"), saveGlobalSettings: $("#saveGlobalSettingsButton"), resetGlobalSettings: $("#resetGlobalSettingsButton"),
+  globalSettingsButton: $("#globalSettingsButton"), globalSettingsDialog: $("#globalSettingsDialog"), globalSettingsSupport: $("#globalSettingsSupport"), globalSettingsStatus: $("#globalSettingsStatus"), cursorTrailEnabled: $("#cursorTrailEnabled"), cursorTrailSupport: $("#cursorTrailSupport"), saveGlobalSettings: $("#saveGlobalSettingsButton"), resetGlobalSettings: $("#resetGlobalSettingsButton"),
   taskStartupProgress: $("#taskStartupProgress"), taskStartupStage: $("#taskStartupStage"),
   activeSongCount: $("#activeSongCount"), activeWorkerCount: $("#activeWorkerCount"), activeSongSummary: $("#activeSongSummary"), activeSongsList: $("#activeSongsList"),
-  appSplash: $("#appSplash"), platformIdentity: $("#platformIdentity"), platformSurface: $("#platformSurface"), platformLiveRegion: $("#platformLiveRegion"),
+  appSplash: $("#appSplash"), mainWorkspace: $("#mainWorkspace"), platformIdentity: $("#platformIdentity"), platformSurface: $("#platformSurface"), platformLiveRegion: $("#platformLiveRegion"),
   neteaseWorkbench: $("#neteaseWorkbench"), qqWorkbench: $("#qqWorkbench"),
 };
 const statusLabels = { idle: "空闲", running: "运行中", stopping: "停止中", complete: "已完成", matched: "已命中", paused: "已暂停", cooldown: "冷却中", "dry-run": "歌曲已读取", stopped: "已停止", error: "错误" };
@@ -121,7 +121,9 @@ const activeDisclosureDetails = new Set();
 const interfaceAnimations = new Set();
 const fallbackMotionElements = new Set();
 let activeSongsSignature = "";
-let desktopSettings = { version: 1, closeBehavior: "ask" };
+let desktopSettings = { version: 2, closeBehavior: "ask", cursorTrailEnabled: true };
+let pointerSilkTrail;
+let pointerTrailDialogObserver;
 let taskStartupProgressVersion = 0;
 let taskStartupPhaseTimers = [];
 let taskStartupHideTimer;
@@ -917,7 +919,7 @@ function probe(target, label, value) {
   target.className = value.status;
   target.textContent = value.status === "available"
     ? `${label} ${fmt(value.songs)}`
-    : `${label} ${value.status === "private" ? "已开启隐私" : value.status === "cooldown" ? "冷却" : "查询受限"}`;
+    : `${label} ${value.status === "private" ? "已开启隐私" : value.status === "cooldown" ? "冷却" : "暂时无法确认"}`;
 }
 
 function resetQQUserProbe(probe) {
@@ -1381,6 +1383,7 @@ function renderProgress({ globalPercent, globalContext, note }) {
 
 function sourceCoverageSummary(job) {
   if (!job?.uid) return "";
+  if (!job.catalogLoaded) return "目录未读取 · 数量未知";
   return `目录总数 ${fmt(job.catalogSongs ?? job.songs)} · 历史已完成 ${fmt(job.historicalCompletedSongs)} · 已复用/跳过 ${fmt(job.reusedSongs)} · 新增待扫 ${fmt(job.newPendingSongs)}`;
 }
 
@@ -2967,6 +2970,7 @@ function commitPlatformSelection(value, switchVersion, options = {}) {
       modeSwitchVersion += 1;
     }
     applyPlatformPresentation({ announce: changed && options.announce !== false });
+    pointerSilkTrail?.setPlatform(platform);
     resetVisibleResults();
     resetVisibleLogs();
     renderSelectedTaskSnapshot();
@@ -2999,6 +3003,8 @@ async function switchPlatform(value) {
   }
   const restorePlatformFocus = el.taskSidebar.contains(document.activeElement) || document.activeElement === el.login;
   const restoreScroll = capturePlatformScrollState();
+  const pointerTrailReason = `platform:${switchVersion}`;
+  pointerSilkTrail?.suspend(pointerTrailReason);
   let commitRecovered = false;
   const transition = createPlatformTransition(value, () => {
     const commitOptions = {
@@ -3023,7 +3029,14 @@ async function switchPlatform(value) {
     }
   });
   platformTransition = transition;
-  const outcome = await transition.finished;
+  let outcome;
+  try {
+    outcome = await transition.finished;
+  } catch (commitError) {
+    outcome = { committed: false, completed: true, renderer: "none", commitError };
+  } finally {
+    pointerSilkTrail?.resume(pointerTrailReason);
+  }
   if (platformTransition === transition) platformTransition = undefined;
   if (switchVersion !== platformSwitchVersion || desiredPlatform !== value) return;
   if (!outcome.completed) return;
@@ -3200,20 +3213,66 @@ async function setupDesktopWindowControls() {
   renderMaximized(await desktop.isMaximized());
 }
 
+function syncPointerTrailDialogState() {
+  if (!pointerSilkTrail) return;
+  if (document.querySelector("dialog[open]")) pointerSilkTrail.suspend("dialog");
+  else pointerSilkTrail.resume("dialog");
+}
+
+function setupPointerSilkTrail() {
+  if (pointerSilkTrail || !el.mainWorkspace) return;
+  const engine = globalThis.PointerSilkTrail;
+  if (!engine?.create) return;
+  try {
+    pointerSilkTrail = engine.create({
+      host: el.mainWorkspace,
+      platform,
+      enabled: desktopSettings.cursorTrailEnabled,
+    });
+  } catch {
+    pointerSilkTrail = undefined;
+    return;
+  }
+  pointerTrailDialogObserver ??= new MutationObserver(syncPointerTrailDialogState);
+  pointerTrailDialogObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ["open"] });
+  syncPointerTrailDialogState();
+  if (document.hidden) pointerSilkTrail.suspend("hidden");
+  if (typeof document.hasFocus === "function" && !document.hasFocus()) pointerSilkTrail.suspend("blur");
+}
+
+function destroyPointerSilkTrail() {
+  pointerTrailDialogObserver?.disconnect();
+  pointerSilkTrail?.destroy();
+  pointerSilkTrail = undefined;
+}
+
+function applyCursorTrailSetting(enabled) {
+  desktopSettings.cursorTrailEnabled = Boolean(enabled);
+  pointerSilkTrail?.setEnabled(desktopSettings.cursorTrailEnabled);
+}
+
 function renderGlobalSettings(settings = desktopSettings) {
   desktopSettings = {
-    version: 1,
+    version: 2,
     closeBehavior: ["ask", "background", "exit"].includes(settings?.closeBehavior) ? settings.closeBehavior : "ask",
+    cursorTrailEnabled: typeof settings?.cursorTrailEnabled === "boolean" ? settings.cursorTrailEnabled : true,
   };
   const selected = $(`input[name="desktopCloseBehavior"][value="${desktopSettings.closeBehavior}"]`);
   if (selected) selected.checked = true;
-  const supported = typeof window.ncmDesktop?.getSettings === "function";
-  $$('input[name="desktopCloseBehavior"]').forEach((input) => { input.disabled = !supported; });
-  el.saveGlobalSettings.disabled = !supported;
-  el.resetGlobalSettings.disabled = !supported;
-  el.globalSettingsSupport.textContent = supported
+  el.cursorTrailEnabled.checked = desktopSettings.cursorTrailEnabled;
+  applyCursorTrailSetting(desktopSettings.cursorTrailEnabled);
+  const desktopSupported = typeof window.ncmDesktop?.getSettings === "function";
+  const trailSupported = Boolean(pointerSilkTrail || globalThis.PointerSilkTrail?.create);
+  $$('input[name="desktopCloseBehavior"]').forEach((input) => { input.disabled = !desktopSupported; });
+  el.cursorTrailEnabled.disabled = !trailSupported;
+  el.saveGlobalSettings.disabled = !desktopSupported && !trailSupported;
+  el.resetGlobalSettings.disabled = !desktopSupported && !trailSupported;
+  el.globalSettingsSupport.textContent = desktopSupported
     ? "该选择保存在本机，关闭确认中勾选“记住我的选择”也会同步到这里。"
     : "此设置仅在桌面客户端中生效。";
+  el.cursorTrailSupport.textContent = desktopSupported
+    ? "桌面客户端会保存这项选择。"
+    : "浏览器模式仅对当前会话生效，刷新后恢复默认开启。";
 }
 
 async function setupDesktopSettings() {
@@ -3226,31 +3285,41 @@ async function setupDesktopSettings() {
 }
 
 async function openGlobalSettings() {
+  if (el.globalSettingsDialog.open) return;
   el.globalSettingsStatus.textContent = "";
   await setupDesktopSettings();
-  el.globalSettingsDialog.showModal();
+  if (!el.globalSettingsDialog.open) el.globalSettingsDialog.showModal();
 }
 
 async function saveGlobalSettings() {
   const selected = $('input[name="desktopCloseBehavior"]:checked')?.value;
-  if (!selected || typeof window.ncmDesktop?.updateSettings !== "function") return;
+  const cursorTrailEnabled = el.cursorTrailEnabled.checked;
+  const desktopSupported = typeof window.ncmDesktop?.updateSettings === "function";
+  if (desktopSupported && !selected) return;
   el.saveGlobalSettings.disabled = true;
   try {
-    renderGlobalSettings(await window.ncmDesktop.updateSettings({ closeBehavior: selected }));
+    if (desktopSupported) {
+      renderGlobalSettings(await window.ncmDesktop.updateSettings({ closeBehavior: selected, cursorTrailEnabled }));
+    } else {
+      renderGlobalSettings({ ...desktopSettings, cursorTrailEnabled });
+    }
     el.globalSettingsDialog.close();
-    toast("全局设置已保存");
+    toast(desktopSupported ? "全局设置已保存" : "鼠标效果已应用到当前会话");
   } catch (error) { el.globalSettingsStatus.textContent = `保存失败：${error.message}`; }
-  finally { el.saveGlobalSettings.disabled = typeof window.ncmDesktop?.updateSettings !== "function"; }
+  finally { el.saveGlobalSettings.disabled = false; }
 }
 
 async function resetGlobalSettings() {
-  if (typeof window.ncmDesktop?.resetSettings !== "function") return;
+  const desktopSupported = typeof window.ncmDesktop?.resetSettings === "function";
   el.resetGlobalSettings.disabled = true;
   try {
-    renderGlobalSettings(await window.ncmDesktop.resetSettings());
-    el.globalSettingsStatus.textContent = "已恢复默认：关闭窗口时每次询问。";
+    if (desktopSupported) renderGlobalSettings(await window.ncmDesktop.resetSettings());
+    else renderGlobalSettings({ version: 2, closeBehavior: "ask", cursorTrailEnabled: true });
+    el.globalSettingsStatus.textContent = desktopSupported
+      ? "已恢复默认：每次询问关闭行为，并开启绢缎尾迹。"
+      : "已在当前会话恢复默认开启绢缎尾迹。";
   } catch (error) { el.globalSettingsStatus.textContent = `恢复失败：${error.message}`; }
-  finally { el.resetGlobalSettings.disabled = typeof window.ncmDesktop?.resetSettings !== "function"; }
+  finally { el.resetGlobalSettings.disabled = false; }
 }
 
 function syncTaskStartAvailability() {
@@ -3467,6 +3536,7 @@ function dismissSplash() {
 
 async function boot() {
   await Promise.all([setupDesktopUpdates(), setupDesktopSettings()]);
+  setupPointerSilkTrail();
   const restored = await restoreResumeTask();
   connectResultStream();
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
@@ -3638,7 +3708,9 @@ function scheduleAuthRefreshLoop(delay = el.qrDialog.open ? 1_500 : document.hid
   }, delay);
 }
 
-addEventListener("visibilitychange", () => {
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) pointerSilkTrail?.suspend("hidden");
+  else pointerSilkTrail?.resume("hidden");
   scheduleRefreshLoop();
   scheduleAuthRefreshLoop();
   if (!document.hidden) {
@@ -3668,10 +3740,12 @@ addEventListener("pagehide", () => {
   pendingStartupSettlement = undefined;
   el.taskStartupProgress.hidden = true;
   inspectorOverlayQuery.removeEventListener("change", syncInspectorForViewport);
+  destroyPointerSilkTrail();
 });
 addEventListener("pageshow", (event) => {
   if (!event.persisted || !pageLifecycleSuspended) return;
   pageLifecycleSuspended = false;
+  setupPointerSilkTrail();
   let streamConnected = false;
   if (desiredPlatform !== platform) {
     try {
@@ -3695,6 +3769,9 @@ addEventListener("pageshow", (event) => {
   if (!streamConnected) connectResultStream();
   if (resultsRenderPending) scheduleResultsRender();
 });
+
+addEventListener("blur", () => pointerSilkTrail?.suspend("blur"));
+addEventListener("focus", () => pointerSilkTrail?.resume("blur"));
 
 async function activateTaskTab(tab) {
   const switchVersion = ++tabSwitchVersion;

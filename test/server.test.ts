@@ -694,9 +694,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=58/);
+  assert.match(pageText, /styles\.css\?v=59/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /app\.js\?v=68/);
+  assert.match(pageText, /pointer-silk-trail\.js\?v=1/);
+  assert.match(pageText, /app\.js\?v=70/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
@@ -724,6 +725,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="logPath"[^>]*class="log-path is-placeholder"/);
   assert.match(pageText, /class="navigation-footer"[^>]*>[\s\S]*id="globalSettingsButton"/);
   assert.match(pageText, /id="globalSettingsDialog"/);
+  assert.match(pageText, /id="mainWorkspace"[^>]*class="main-pane/);
+  assert.match(pageText, /id="cursorTrailEnabled"[^>]*type="checkbox"[^>]*checked/);
+  assert.match(pageText, /id="cursorTrailSupport"/);
   assert.match(pageText, /name="desktopCloseBehavior" value="ask"/);
   assert.match(pageText, /name="desktopCloseBehavior" value="background"/);
   assert.match(pageText, /name="desktopCloseBehavior" value="exit"/);
@@ -857,8 +861,16 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /function beginTaskStartup/);
   assert.match(appText, /function finishTaskStartup/);
   assert.match(appText, /setupDesktopSettings/);
-  assert.match(appText, /updateSettings\(\{ closeBehavior: selected \}\)/);
+  assert.match(appText, /updateSettings\(\{ closeBehavior: selected, cursorTrailEnabled \}\)/);
   assert.match(appText, /resetSettings\(\)/);
+  assert.match(appText, /function setupPointerSilkTrail/);
+  assert.match(appText, /PointerSilkTrail/);
+  assert.match(appText, /pointerSilkTrail\?\.suspend\(pointerTrailReason\)/);
+  assert.match(appText, /pointerSilkTrail\?\.resume\(pointerTrailReason\)/);
+  assert.match(appText, /document\.querySelector\("dialog\[open\]"\)/);
+  assert.match(appText, /destroyPointerSilkTrail\(\)/);
+  assert.match(appText, /document\.addEventListener\("visibilitychange"/);
+  assert.match(appText, /addEventListener\("blur", \(\) => pointerSilkTrail\?\.suspend\("blur"\)\)/);
   assert.doesNotMatch(appText, /taskStartupElapsed/);
   assert.match(appText, /inspectorBody\.inert/);
   assert.match(appText, /\/api\/song\/search/);
@@ -933,6 +945,14 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(platformWaveText, /gl_VertexID/);
   assert.doesNotMatch(platformWaveText, /gl_InstanceID/);
   assert.match(platformWaveText, /createVertexArray/);
+
+  const pointerTrail = await fetch(`${base}/pointer-silk-trail.js`);
+  assert.equal(pointerTrail.status, 200);
+  const pointerTrailText = await pointerTrail.text();
+  assert.match(pointerTrailText, /globalThis\.PointerSilkTrail/);
+  assert.match(pointerTrailText, /MAX_COLOR_PIXELS = 800_000/);
+  assert.match(pointerTrailText, /new Float32Array\(SAMPLE_CAPACITY\)/);
+  assert.doesNotMatch(pointerTrailText, /Math\.random|localStorage|sessionStorage|preventDefault|stopPropagation/);
   assert.match(platformWaveText, /gl\.drawArrays\(gl\.TRIANGLES, 0, 3\)/);
   assert.doesNotMatch(platformWaveText, /drawArraysInstanced/);
   assert.match(platformWaveText, /const DURATION_MS = 680/);
@@ -1023,6 +1043,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.ok(contrast(qqToken("accent"), qqToken("accent-soft")) >= 4.5);
   assert.match(styleText, /\.platform-transition-canvas/);
   assert.match(styleText, /\.platform-portal/);
+  assert.match(styleText, /\.main-pane\s*\{[^}]*position:\s*relative[^}]*isolation:\s*isolate/s);
+  assert.match(styleText, /\.pointer-silk-trail-canvas\s*\{[^}]*position:\s*absolute[^}]*pointer-events:\s*none/s);
+  assert.match(styleText, /body\.platform-switching \.pointer-silk-trail-canvas\s*\{[^}]*visibility:\s*hidden/s);
+  assert.match(styleText, /\.settings-toggle-track/);
   assert.doesNotMatch(styleText, /body\[data-platform="qq"\] \.app-shell\s*\{/s);
   assert.doesNotMatch(styleText, /body\[data-platform="qq"\] \.navigation-label\s*\{/s);
   assert.doesNotMatch(styleText, /body\[data-platform="qq"\] \.sidebar\s*\{[^}]*left:/s);
@@ -1366,6 +1390,54 @@ test("starts NetEase profile, record, and liked-source probes concurrently", asy
     assert.equal(result.profile.nickname, "user");
     assert.equal(result.record.status, "available");
     assert.equal(result.likes.status, "available");
+  } finally {
+    mutable.user_detail = originals.user_detail;
+    mutable.user_record = originals.user_record;
+    mutable.user_playlist = originals.user_playlist;
+    mutable.playlist_detail = originals.playlist_detail;
+  }
+});
+
+test("reports liked songs available when explicit IDs are newer than declared counts", async () => {
+  const mutable = upstream as unknown as {
+    user_detail: () => Promise<unknown>;
+    user_record: () => Promise<unknown>;
+    user_playlist: () => Promise<unknown>;
+    playlist_detail: () => Promise<unknown>;
+  };
+  const originals = {
+    user_detail: mutable.user_detail,
+    user_record: mutable.user_record,
+    user_playlist: mutable.user_playlist,
+    playlist_detail: mutable.playlist_detail,
+  };
+  mutable.user_detail = async () => ({
+    status: 200,
+    body: { code: 200, profile: { userId: 42, nickname: "user" } },
+  });
+  mutable.user_record = async () => ({ status: 200, body: { code: 200, allData: [] } });
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: {
+      code: 200,
+      playlist: [{ id: 9, specialType: 5, trackCount: 1105, creator: { userId: 42 } }],
+    },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      code: 200,
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 1105,
+        trackIds: Array.from({ length: 1106 }, (_, index) => ({ id: index + 1 })),
+      },
+    },
+  });
+
+  try {
+    const result = await probeUser("42", undefined, join(tmpdir(), "missing-stale-count-cookie"));
+    assert.deepEqual(result.likes, { status: "available", songs: 1106 });
   } finally {
     mutable.user_detail = originals.user_detail;
     mutable.user_record = originals.user_record;

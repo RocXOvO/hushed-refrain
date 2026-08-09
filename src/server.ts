@@ -169,6 +169,7 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   finishedAt?: string;
   songs: number;
   songsProcessed: number;
+  catalogLoaded: boolean;
   catalogSongs: number;
   reusedSongs: number;
   historicalCompletedSongs: number;
@@ -834,6 +835,7 @@ class JobManager {
         this.snapshotValue = {
           ...this.snapshotValue, status: report.status, finishedAt: new Date().toISOString(),
           songs: report.songs, songsProcessed: report.songsProcessed, matches: report.matches,
+          catalogLoaded: report.catalogLoaded,
           catalogSongs: report.catalogSongs, reusedSongs: report.reusedSongs,
           historicalCompletedSongs: report.historicalCompletedSongs, newPendingSongs: report.newPendingSongs,
           requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
@@ -923,6 +925,7 @@ class JobManager {
         this.snapshotValue = {
           ...this.snapshotValue, songs: state.songs.length,
           songsProcessed: progress.length > 0 ? progress.filter((item) => item.done).length : state.songIndex,
+          catalogLoaded: state.sourcesLoaded,
           catalogSongs: state.sourceSongCount,
           reusedSongs: state.reusedSongs ?? 0,
           historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
@@ -1007,11 +1010,11 @@ class JobManager {
       requestsTotal: snapshot.requestsTotal,
       pagesProcessed: snapshot.pagesProcessed,
       commentsInspected: snapshot.commentsInspected,
-      coverageLabel: snapshot.songs > 0
+      coverageLabel: snapshot.catalogLoaded
         ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲；`
           + `目录 ${snapshot.catalogSongs.toLocaleString("zh-CN")}，历史完成 ${snapshot.historicalCompletedSongs.toLocaleString("zh-CN")}，`
           + `复用 ${snapshot.reusedSongs.toLocaleString("zh-CN")}，新增待扫 ${snapshot.newPendingSongs.toLocaleString("zh-CN")}`
-        : "等待歌曲目录",
+        : "歌曲目录未读取，数量未知",
       exportedAt: new Date().toISOString(),
       comments: comments.reverse(),
     };
@@ -2493,7 +2496,7 @@ function requestStartedAt(value: string | undefined): number {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Date.now();
 }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";

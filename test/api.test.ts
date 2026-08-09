@@ -213,6 +213,212 @@ test("accepts an explicitly empty target liked playlist", async () => {
   }
 });
 
+test("accepts a newer explicit liked-song ID vector when declared counts lag behind", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 1105, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 1105,
+        trackIds: Array.from({ length: 1106 }, (_, index) => ({ id: index + 1 })),
+      },
+    },
+  });
+  try {
+    const songs = await new EnhancedNcmClient().getLikedSongs("42", "MUSIC_U=operator");
+    assert.equal(songs.length, 1106);
+    assert.deepEqual(songs[0], { id: "1", sources: ["likes"], sourceRank: 1 });
+    assert.deepEqual(songs.at(-1), { id: "1106", sources: ["likes"], sourceRank: 1106 });
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+test("accepts disagreeing liked-song declarations when the unique ID vector satisfies both", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 2, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 3,
+        trackIds: [{ id: 101 }, { id: 102 }, { id: 103 }],
+      },
+    },
+  });
+  try {
+    assert.equal((await new EnhancedNcmClient().getLikedSongs("42")).length, 3);
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+test("rejects a liked-song ID vector that is shorter than either declared count", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 3, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 2,
+        trackIds: [{ id: 101 }, { id: 102 }],
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getLikedSongs("42"),
+      (error: unknown) => error instanceof ApiResponseError
+        && error.status === 502
+        && /列表声明 3 首/.test(error.message)
+        && /详情声明 2 首/.test(error.message)
+        && /2 个有效唯一 ID/.test(error.message),
+    );
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+test("rejects duplicate liked-song IDs instead of silently shrinking the catalog", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 3, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 3,
+        trackIds: [{ id: 101 }, { id: 102 }, { id: 102 }],
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getLikedSongs("42"),
+      (error: unknown) => error instanceof ApiResponseError
+        && error.status === 502
+        && /重复歌曲 ID/.test(error.message),
+    );
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+test("rejects a liked-song count that differs from explicit IDs by more than one", async () => {
+  const mutable = upstream as unknown as {
+    user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+    playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const originalListing = mutable.user_playlist;
+  const originalDetail = mutable.playlist_detail;
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: { playlist: [{ id: 9, specialType: 5, trackCount: 2, creator: { userId: 42 } }] },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 2,
+        trackIds: [{ id: 101 }, { id: 102 }, { id: 103 }, { id: 104 }],
+      },
+    },
+  });
+  try {
+    await assert.rejects(
+      new EnhancedNcmClient().getLikedSongs("42"),
+      (error: unknown) => error instanceof ApiResponseError
+        && error.status === 502
+        && /计数差异过大/.test(error.message),
+    );
+  } finally {
+    mutable.user_playlist = originalListing;
+    mutable.playlist_detail = originalDetail;
+  }
+});
+
+for (const [label, listingCount, detailCount] of [
+  ["negative listing", -1, 1],
+  ["fractional detail", 1, 1.5],
+  ["scientific-notation listing", "1e3", 1],
+  ["hexadecimal detail", 1, "0x10"],
+] as const) {
+  test(`rejects ${label} liked-song counts`, async () => {
+    const mutable = upstream as unknown as {
+      user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
+      playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
+    };
+    const originalListing = mutable.user_playlist;
+    const originalDetail = mutable.playlist_detail;
+    mutable.user_playlist = async () => ({
+      status: 200,
+      body: { playlist: [{ id: 9, specialType: 5, trackCount: listingCount, creator: { userId: 42 } }] },
+    });
+    mutable.playlist_detail = async () => ({
+      status: 200,
+      body: {
+        playlist: {
+          creator: { userId: 42 },
+          trackCount: detailCount,
+          trackIds: [{ id: 101 }],
+        },
+      },
+    });
+    try {
+      await assert.rejects(
+        new EnhancedNcmClient().getLikedSongs("42"),
+        (error: unknown) => error instanceof ApiResponseError
+          && error.status === 502
+          && /trackCount 无效/.test(error.message),
+      );
+    } finally {
+      mutable.user_playlist = originalListing;
+      mutable.playlist_detail = originalDetail;
+    }
+  });
+}
+
 for (const detailTrackCount of [0, null] as const) {
   test(`rejects an empty liked-playlist detail when the listing declares songs (${String(detailTrackCount)})`, async () => {
     const mutable = upstream as unknown as {

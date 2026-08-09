@@ -1298,6 +1298,7 @@ function report(
     uid: state.uid,
     songs: state.songs.length,
     songsProcessed: completedSongs(state),
+    catalogLoaded: state.sourcesLoaded,
     catalogSongs: state.sourceSongCount,
     reusedSongs: state.reusedSongs ?? 0,
     historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
@@ -1330,6 +1331,7 @@ function pooledReport(
     uid: state.uid,
     songs: state.songs.length,
     songsProcessed: completedSongs(state),
+    catalogLoaded: state.sourcesLoaded,
     catalogSongs: state.sourceSongCount,
     reusedSongs: state.reusedSongs ?? 0,
     historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
@@ -1567,6 +1569,7 @@ function publishCheckpointProgress(options: ScanOptions, state: ScanState): void
     options.onCheckpoint?.({
       songs: state.songs.length,
       songsProcessed: completedSongs(state),
+      catalogLoaded: state.sourcesLoaded,
       catalogSongs: state.sourceSongCount,
       reusedSongs: state.reusedSongs ?? 0,
       historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
