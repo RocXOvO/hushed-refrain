@@ -4,7 +4,7 @@ This is the compact, durable map for `ncm-comment-finder`. It records current co
 
 ## Current baseline and authorities
 
-- Current release line: `v1.1.7`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
+- Current release line: `v1.1.8`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
 - Display brand: `乐评寻踪 / MUSIC COMMENT TRACE`; `productName=乐评寻踪`.
 - Stable technical identity: package `ncm-comment-finder`, appId `cn.local.ncm.commentfinder`, repository `RocXOvO/ncm-comment-finder`, artifact stem `NCM-Comment-Finder`, Electron data directory `appData/ncm-comment-finder`. Do not change these as part of a visual rename.
 - Current web cache-busters are `styles.css?v=65`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=6`, and `app.js?v=77`; keep them synchronized with `web/index.html`.
@@ -142,7 +142,7 @@ git diff --check
 
 - Before handoff, run at least check, test, build, and diff-check; add the focused tests for changed behavior. Desktop/preload/updater/build changes also require the relevant desktop smoke/package path. Tests currently lack a strict `check:test` TypeScript gate; do not treat transpile-only execution as type coverage.
 - Routine tests use stubs and loopback services. Real NetEase/QQ/proxy traffic must be explicit, bounded, and never a default gate.
-- The `v1.1.7` release baseline is 541/541 tests with check, build, benchmark, all three renderer syntax checks, macOS desktop smoke, and diff-check passing; real browser QA covered retained per-song completion rows and the collapsed-Inspector pool notice at 1440×900, 1280×800, 900×640, 821×700, 820×844, and 390×844 with positive right-side clearance, no new horizontal overflow, and zero console errors. GitHub publication still requires the exact commit/tag/assets checks below.
+- The `v1.1.8` release baseline is 549/549 tests with check, build, benchmark, all three renderer syntax checks, macOS desktop smoke, and diff-check passing; real browser QA covered the comment-count progress presentation, retained per-song completion rows, and responsive activity-table scrolling at wide and 390×844 layouts with no new document overflow or console errors. GitHub publication still requires the exact commit/tag/assets checks below.
 - Windows packaging is a manual `workflow_dispatch`: it checks/tests, builds unpacked and NSIS forms, runs packaged startup/PDF smoke, and uploads a seven-day Actions artifact. It does not publish a GitHub Release.
 - Release from one exact final commit/version. Verify tag, `origin/main`, workflow `headSha`, manifests, and assets all agree. Validate `latest.yml` version/path/size/SHA-512 against the installer; build both macOS architectures from the same commit.
 - Publish only exact current-version files from a clean staging set. Local `release/` is non-authoritative and may contain historical files.

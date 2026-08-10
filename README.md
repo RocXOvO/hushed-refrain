@@ -140,7 +140,7 @@ npm run desktop:smoke:mac
 git diff --check
 ```
 
-`v1.1.7` 的完整测试基线为 541/541。Windows 安装器由 GitHub Actions 在真实 Windows 环境中执行完整测试、打包应用启动/PDF 冒烟与 NSIS 资产验证；自动化测试默认使用内存桩和回环代理，不会向音乐平台发起真实批量扫描。
+`v1.1.8` 的完整测试基线为 549/549。Windows 安装器由 GitHub Actions 在真实 Windows 环境中执行完整测试、打包应用启动/PDF 冒烟与 NSIS 资产验证；自动化测试默认使用内存桩和回环代理，不会向音乐平台发起真实批量扫描。
 
 ## License
 

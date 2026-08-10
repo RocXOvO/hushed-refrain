@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.7`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（541/541）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实浏览器已验证并行歌曲活动行、折叠 Inspector 的代理池提示与 1440×900、1280×800、900×640、821×700、820×844、390×844 布局：提示到右栏始终保留正间距，未新增横向溢出，console warning/error 为零；既有 Follow 尾迹、会话开关与快速 N→Q→N 边界保持不变。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.8`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（549/549）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实浏览器已验证评论数量进度、保留的歌曲终态行与宽屏/390×844 下的活动表格内部滚动，无新增文档横向溢出，console warning/error 为零；既有 Follow 尾迹、会话开关与快速 N→Q→N 边界保持不变。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
 
 ## 未修复的 P1
 
