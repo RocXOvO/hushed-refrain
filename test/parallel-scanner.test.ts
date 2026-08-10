@@ -3,6 +3,7 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { CooldownRequired } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 import { ProxyTransportGate } from "../src/proxy-transport-gate";
 import {
@@ -137,6 +138,221 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.equal(result.songId, "186016");
   assert.deepEqual(liveMatches, ["comment-75"]);
   assert.ok(checkpoints.some((activity) => activity.shardsComplete === 2 && activity.pagesProcessed === 2 && activity.requestsTotal === 2));
+});
+
+test("parallel scanning expands floor replies before completing a shard", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-floor-"));
+  const client = new ParallelFakeClient();
+  client.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "root", userId: "9", content: "root", time: 50, replyCount: 1 }],
+    hasMore: false,
+    total: 2,
+  });
+  client.getCommentFloor = async (_songId, parentCommentId) => ({
+    parentCommentId,
+    comments: [{ commentId: "nested", parentCommentId, userId: "42", content: "nested", time: 51 }],
+    hasMore: false,
+    total: 1,
+  });
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  const report = await runParallelSongScan([{ name: "lane", client, governor: governor() }], config);
+  assert.equal(report.status, "complete");
+  assert.equal(report.pagesProcessed, 1);
+  assert.equal(report.floorPagesProcessed, 1);
+  assert.equal(report.commentsInspected, 2);
+  assert.equal(report.replyCommentsInspected, 1);
+  const record = JSON.parse((await readFile(config.outputPath, "utf8")).trim());
+  assert.equal(record.route, "song-comment-floor");
+  assert.equal(record.parentCommentId, "root");
+  const state = await loadParallelState(config.statePath);
+  assert.equal(state?.version, 2);
+  assert.equal(state?.floorPagesProcessed, 1);
+});
+
+test("a floor cooldown belongs only to its owner lane while a healthy waiter takes over", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-floor-takeover-"));
+  let announceOwner!: () => void;
+  const ownerStarted = new Promise<void>((resolve) => { announceOwner = resolve; });
+  let ownerFloorCalls = 0;
+  let healthyFloorCalls = 0;
+
+  const owner = new ParallelFakeClient();
+  owner.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "shared-parent", userId: "9", content: "root", replyCount: 1 }],
+    hasMore: false,
+    total: 2,
+  });
+  owner.getCommentFloor = async () => {
+    ownerFloorCalls += 1;
+    announceOwner();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    throw new CooldownRequired(429, 60_000);
+  };
+
+  const healthy = new ParallelFakeClient();
+  healthy.getSongCommentsByCursor = async () => {
+    await ownerStarted;
+    return {
+      comments: [{ commentId: "shared-parent", userId: "9", content: "root", replyCount: 1 }],
+      hasMore: false,
+      total: 2,
+    };
+  };
+  healthy.getCommentFloor = async (_songId, parentCommentId) => {
+    healthyFloorCalls += 1;
+    return {
+      parentCommentId,
+      comments: [{ commentId: "nested", parentCommentId, userId: "42", content: "match" }],
+      hasMore: false,
+      total: 1,
+    };
+  };
+
+  const config = await options(directory);
+  config.shardCount = 2;
+  config.workersPerLane = 1;
+  config.maxWorkers = 2;
+  // Two root pages, one logical floor page, and one root replay after the
+  // owner's interrupted transaction. The healthy takeover must reuse the
+  // failed owner's floor reservation instead of consuming a fifth slot.
+  config.requestBudget = 4;
+  const report = await runParallelSongScan([
+    { name: "cooldown-lane", client: owner, governor: governor() },
+    { name: "healthy-lane", client: healthy, governor: governor() },
+  ], config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(ownerFloorCalls, 1);
+  assert.equal(healthyFloorCalls, 1);
+  const state = await loadParallelState(config.statePath);
+  assert.equal(state?.floorThreads[0].done, true);
+  assert.equal(state?.floorThreads[0].pagesProcessed, 1);
+});
+
+test("parallel root failover reuses one logical request and max-page reservation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-root-budget-failover-"));
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  config.maxWorkers = 1;
+  config.requestBudget = 1;
+  config.maxPages = 1;
+  let failedCalls = 0;
+  let healthyCalls = 0;
+  const failed = new ParallelFakeClient();
+  failed.getSongCommentsByCursor = async () => {
+    failedCalls += 1;
+    throw new Error("lane failed");
+  };
+  const healthy = new ParallelFakeClient();
+  healthy.getSongCommentsByCursor = async () => {
+    healthyCalls += 1;
+    return { comments: [], hasMore: false, total: 0 };
+  };
+
+  const report = await runParallelSongScan([
+    { name: "failed", client: failed, governor: governor() },
+    { name: "healthy", client: healthy, governor: governor() },
+  ], config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.coverageComplete, true);
+  assert.equal(report.pagesProcessed, 1);
+  assert.equal(failedCalls, 1);
+  assert.equal(healthyCalls, 1);
+});
+
+test("parallel resume drains a persisted floor even when its parent leaves the replayed root page", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-floor-resume-"));
+  const client = new ParallelFakeClient();
+  let rootStillVisible = true;
+  let rootCalls = 0;
+  client.getSongCommentsByCursor = async () => {
+    rootCalls += 1;
+    return {
+      comments: rootStillVisible
+        ? [{ commentId: "root", userId: "9", content: "root", time: 50, replyCount: 2 }]
+        : [{ commentId: "replacement", userId: "9", content: "replacement", time: 50 }],
+      hasMore: false,
+      total: 3,
+    };
+  };
+  const floorTimes: number[] = [];
+  client.getCommentFloor = async (_songId, parentCommentId, _limit, time) => {
+    floorTimes.push(time);
+    if (time === -1) {
+      return {
+        parentCommentId,
+        comments: [{ commentId: "nested-1", parentCommentId, userId: "42", content: "first" }],
+        hasMore: true,
+        nextTime: 10,
+        total: 2,
+      };
+    }
+    return {
+      parentCommentId,
+      comments: [{ commentId: "nested-2", parentCommentId, userId: "42", content: "second" }],
+      hasMore: false,
+      total: 0,
+    };
+  };
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  config.requestBudget = 2;
+
+  const pausedReport = await runParallelSongScan([{ name: "lane", client, governor: governor() }], config);
+  assert.equal(pausedReport.status, "paused");
+  const paused = await loadParallelState(config.statePath);
+  assert.equal(paused?.finished, false);
+  assert.equal(paused?.floorThreads[0].nextTime, 10);
+  assert.equal(paused?.floorThreads[0].done, false);
+
+  const checkpoint = JSON.parse(await readFile(config.statePath, "utf8"));
+  checkpoint.rootDone = true;
+  checkpoint.shards.forEach((shard: { done: boolean }) => { shard.done = true; });
+  checkpoint.finished = false;
+  await writeFile(config.statePath, `${JSON.stringify(checkpoint)}\n`, "utf8");
+  rootStillVisible = false;
+  config.requestBudget = 1;
+  const report = await runParallelSongScan([{ name: "lane", client, governor: governor() }], config);
+  assert.equal(report.status, "complete");
+  assert.deepEqual(floorTimes, [-1, 10]);
+  const completed = await loadParallelState(config.statePath);
+  assert.equal(completed?.floorThreads[0].done, true);
+  assert.equal(completed?.rootDone, true);
+  assert.equal(completed?.finished, true);
+  assert.equal(rootCalls, 1);
+});
+
+test("parallel stop-after-first skips a large floor when the root itself matches", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-root-first-match-"));
+  const client = new ParallelFakeClient();
+  let rootCalls = 0;
+  let floorCalls = 0;
+  client.getSongCommentsByCursor = async () => {
+    rootCalls += 1;
+    return {
+      comments: [{ commentId: "target-root", userId: "42", content: "match", time: 50, replyCount: 9_999 }],
+      hasMore: false,
+      total: 10_000,
+    };
+  };
+  client.getCommentFloor = async (_songId, parentCommentId) => {
+    floorCalls += 1;
+    return { parentCommentId, comments: [], hasMore: false, total: 9_999 };
+  };
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  config.stopAfterFirst = true;
+
+  assert.equal((await runParallelSongScan([{ name: "lane", client, governor: governor() }], config)).status, "matched");
+  assert.equal((await runParallelSongScan([{ name: "lane", client, governor: governor() }], config)).status, "matched");
+  assert.equal(rootCalls, 1);
+  assert.equal(floorCalls, 0);
 });
 
 test("assigns comments without timestamps to the shard that returned them", async () => {

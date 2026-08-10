@@ -19,7 +19,12 @@ import {
   type ParallelCommentLane,
 } from "./parallel-scanner";
 import { runCommentFinder } from "./scanner";
-import { migrateLegacyWeekState, SOURCE_CATALOG_VERSION } from "./state";
+import {
+  migrateLegacyWeekState,
+  SOURCE_COVERAGE_VERSION,
+  SOURCE_RESULT_VERSION,
+  SOURCE_STATE_VERSION,
+} from "./state";
 import type { ScanOptions, SourceSelection, Strategy } from "./types";
 
 const help = `
@@ -38,11 +43,11 @@ Scan options:
   --record-scope all|week|both       default: all
   --cookie-file PATH                 default: .ncm/cookie.txt
   --output PATH                      default: data/comments-UID-target-v3.jsonl
-  --state PATH                       default: data/state-UID-SOURCE-target-v3.json
-  --coverage PATH                    default: data/song-coverage-UID-target-v3.json
+  --state PATH                       default: data/state-UID-SOURCE-target-v4.json
+  --coverage PATH                    default: data/song-coverage-UID-target-v4.json
   --comment-page-size N              default: 1000, maximum: 2000
   --history-page-size N              default: 50
-  --max-comment-pages-per-song N     default: 0 (all pages)
+  --max-comment-pages-per-song N     default: 0 (all top-level pages; floor replies use request budget)
   --max-songs N                      default: 0 (all source songs)
   --request-budget N                 default: 250 per run
   --min-delay-ms N                   default: 2500
@@ -65,7 +70,7 @@ Parallel song options:
   --start-time TIME                 epoch milliseconds or ISO date
   --end-time TIME                   epoch milliseconds or ISO date
   --request-budget N                default: 5000
-  --max-pages N                     default: 0 (all pages)
+  --max-pages N                     default: 0 (all top-level pages; floor replies use request budget)
   --min-delay-ms N                  default: 111 between starts on one exit
   --jitter-ms N                     default: 34 added to that start interval
   --stop-after-first
@@ -241,7 +246,7 @@ async function scanSongCommand(args: string[]): Promise<void> {
     1_000,
   );
   const statePath = resolve(
-    parsed.values.state ?? `data/parallel-state-${uid}-${songId}.json`,
+    parsed.values.state ?? `data/parallel-state-${uid}-${songId}-v2.json`,
   );
   const outputPath = resolve(
     parsed.values.output ?? `data/parallel-comments-${uid}-${songId}.jsonl`,
@@ -384,11 +389,12 @@ async function scanCommand(args: string[]): Promise<void> {
     source: source as SourceSelection,
     recordScope,
     cookie,
-    statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}${(source === "record" || source === "both" || source === "all") && recordScope !== "all" ? `-record-${recordScope}` : ""}-target-v${SOURCE_CATALOG_VERSION}.json`),
-    outputPath: resolve(parsed.values.output ?? `data/comments-${uid}-target-v${SOURCE_CATALOG_VERSION}.jsonl`),
-    coveragePath: resolve(parsed.values.coverage ?? `data/song-coverage-${uid}-target-v${SOURCE_CATALOG_VERSION}.json`),
+    statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}${(source === "record" || source === "both" || source === "all") && recordScope !== "all" ? `-record-${recordScope}` : ""}-target-v${SOURCE_STATE_VERSION}.json`),
+    outputPath: resolve(parsed.values.output ?? `data/comments-${uid}-target-v${SOURCE_RESULT_VERSION}.jsonl`),
+    coveragePath: resolve(parsed.values.coverage ?? `data/song-coverage-${uid}-target-v${SOURCE_COVERAGE_VERSION}.json`),
     commentPageSize: integer(parsed.values["comment-page-size"], "comment-page-size", 1, 2_000),
     historyPageSize: integer(parsed.values["history-page-size"], "history-page-size", 1, 100),
+    requestBudget: integer(parsed.values["request-budget"], "request-budget", 1),
     maxCommentPagesPerSong: integer(parsed.values["max-comment-pages-per-song"], "max-comment-pages-per-song", 0),
     maxSongs: integer(parsed.values["max-songs"], "max-songs", 0),
     stopAfterFirst: parsed.values["stop-after-first"]!,
@@ -396,13 +402,16 @@ async function scanCommand(args: string[]): Promise<void> {
     dryRun: parsed.values["dry-run"]!,
   };
   if (!parsed.values.state && (source === "record" || source === "both")) {
-    const legacyPath = resolve(`data/state-${uid}-${source}-target-v${SOURCE_CATALOG_VERSION}.json`);
-    const scopedPath = resolve(`data/state-${uid}-${source}-record-week-target-v${SOURCE_CATALOG_VERSION}.json`);
+    const legacyPath = resolve(`data/state-${uid}-${source}-target-v${SOURCE_STATE_VERSION}.json`);
+    const scopedPath = resolve(`data/state-${uid}-${source}-record-week-target-v${SOURCE_STATE_VERSION}.json`);
     await migrateLegacyWeekState(legacyPath, scopedPath, uid, source);
   }
 
   const governor = new RequestGovernor({
-    requestBudget: integer(parsed.values["request-budget"], "request-budget", 1),
+    // The source scanner owns the public logical-page budget. The Governor
+    // remains responsible for physical retry pacing without double-charging
+    // catalog, hydration, or failover requests.
+    requestBudget: 0,
     minDelayMs: integer(parsed.values["min-delay-ms"], "min-delay-ms", 0),
     jitterMs: integer(parsed.values["jitter-ms"], "jitter-ms", 0),
     maxRetries: integer(parsed.values["max-retries"], "max-retries", 0),

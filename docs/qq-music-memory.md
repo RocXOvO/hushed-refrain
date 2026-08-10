@@ -46,7 +46,7 @@
 - Generation 至少绑定 platform、mode、jobId、canonical target 和 owned state/output path。REST/SSE/log/report 异步读取前后都要复核；新启动预检失败不得偷换旧结果 generation。
 - 四个前端 viewKey 始终完整隔离；QQ Manager 只在自身单 Manager 语义需要时使 QQ sibling generation 失效。
 - `/api/tasks/active` 与 `/api/tasks/stop` 是真实全局任务事实源。更新、窗口退出和顶部停止不能根据当前可见平台猜测要停止的 Manager。
-- 当前 web cache-busters 为 styles 65、platform-wave 15、pointer-silk-trail 6、app 77；GUI/WebGL 平台交接、网易云来源切换/活动进度、折叠 Inspector 提示与鼠标 MeshLine 细节只维护在 `platform-gui-architecture.md`。
+- 当前 web cache-busters 为 styles 65、platform-wave 15、pointer-silk-trail 6、app 78；GUI/WebGL 平台交接、网易云来源切换/活动进度、折叠 Inspector 提示与鼠标 MeshLine 细节只维护在 `platform-gui-architecture.md`。
 
 ## 变更复验
 

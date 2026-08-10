@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { readAtomicJson, writeAtomicJson } from "./atomic-file";
 
-export const SONG_COVERAGE_VERSION = 3 as const;
+export const SONG_COVERAGE_VERSION = 4 as const;
 
 export interface SongCoverageEntry {
   completedAt: string;

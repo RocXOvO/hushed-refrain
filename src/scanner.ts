@@ -24,6 +24,12 @@ import { createTimeShards, SOURCE_SCAN_START_TIME, splitRemainingTimeShard } fro
 import { AsyncWorkQueue } from "./work-queue";
 import { workerCountForTopology } from "./worker-topology";
 import {
+  COMMENT_FLOOR_PAGE_SIZE,
+  commentFloorsComplete,
+  pendingCommentFloorRoots,
+  processCommentFloors,
+} from "./comment-floor";
+import {
   assertCompatibleState,
   createState,
   loadState,
@@ -32,6 +38,7 @@ import {
 } from "./state";
 import type {
   FoundComment,
+  CommentRecord,
   CommentTimeShard,
   NcmClient,
   RunReport,
@@ -101,6 +108,13 @@ export async function runCommentFinder(
   const writer = new JsonlResultWriter(options.outputPath, options.onMatch);
   await writer.initialize();
   const results = new ResultAccumulator(writer, state);
+  let logicalRequestsUsed = 0;
+  const reserveLogicalRequest = (): void => {
+    const budget = options.requestBudget;
+    if (budget === undefined || budget === 0) return;
+    if (logicalRequestsUsed >= budget) throw new RequestBudgetExhausted(budget);
+    logicalRequestsUsed += 1;
+  };
 
   const checkpoint = async (): Promise<void> => {
     state.requestCount = initialRequests + governor.requestsUsed;
@@ -121,10 +135,10 @@ export async function runCommentFinder(
       if (!options.cookie) {
         throw new Error("The history strategy requires a logged-in cookie.");
       }
-      return await runHistory(client, governor, options, state, results, checkpoint, initialRequests);
+      return await runHistory(client, governor, options, state, results, checkpoint, initialRequests, reserveLogicalRequest);
     }
 
-    return await runSongScan(client, governor, options, state, results, checkpoint, initialRequests);
+    return await runSongScan(client, governor, options, state, results, checkpoint, initialRequests, reserveLogicalRequest);
   } catch (error) {
     if (error instanceof CooldownRequired) {
       state.blockedUntil = new Date(Date.now() + error.retryAfterMs).toISOString();
@@ -148,6 +162,8 @@ export async function runCommentFinder(
     }
     await checkpoint();
     throw error;
+  } finally {
+    await writer.close();
   }
 }
 
@@ -168,10 +184,12 @@ export async function runPooledCommentFinder(
   if (state.blockedUntil) {
     const resumeAt = Date.parse(state.blockedUntil);
     if (Number.isFinite(resumeAt) && resumeAt > Date.now()) {
-      return pooledReport(state, lanes, options, initialRequests, "cooldown", {
+      const cooldownReport = pooledReport(state, lanes, options, initialRequests, "cooldown", {
         resumeAfter: state.blockedUntil,
         note: "Remote cooldown is still active; the checkpoint was left unchanged.",
       });
+      await writer.close();
+      return cooldownReport;
     }
     delete state.blockedUntil;
   }
@@ -191,6 +209,170 @@ export async function runPooledCommentFinder(
   try {
     state.strategy = "scan";
     state.strategyResolved = true;
+    if (options.stopAfterFirst && state.matchCount > 0) {
+      return pooledReport(state, lanes, options, initialRequests, "paused", {
+        note: "A matching comment is already present in the checkpoint.",
+      });
+    }
+    if (options.signal?.aborted) throw new RunCancelled();
+    ensureSongProgress(state);
+    if (options.dryRun) {
+      if (!hasPendingCommentFloors(state)) {
+        const sourcesChanged = await refreshSongCatalogPooled(lanes, options, state);
+        const hydratedSongs = await hydrateSongsFromPool(lanes, state.songs);
+        publishSongCatalog(options, state.songs);
+        if (sourcesChanged || hydratedSongs > 0) await checkpoint(true);
+        ensureSongProgress(state);
+      }
+      return pooledReport(state, lanes, options, initialRequests, "dry-run", {
+        note: estimateNote(state, options),
+      });
+    }
+
+    // Resume every durable floor cursor before refreshing the source catalog.
+    // This phase is global across songs: a later song's pending floor cannot be
+    // starved by an earlier song's root page when the run budget is only one.
+    let logicalRequestsReserved = 0;
+    let recoveryLaneIndex = 0;
+    while (true) {
+      if (options.signal?.aborted) throw new RunCancelled();
+      const songIndex = state.songProgress!.findIndex((progress) =>
+        !commentFloorsComplete(progress.floorThreads)
+      );
+      if (songIndex < 0) break;
+      if (options.requestBudget > 0 && logicalRequestsReserved >= options.requestBudget) {
+        throw new RequestBudgetExhausted(options.requestBudget);
+      }
+      logicalRequestsReserved += 1;
+      const song = state.songs[songIndex];
+      const progress = state.songProgress![songIndex];
+      progress.floorThreads ??= [];
+      const root = pendingCommentFloorRoots(progress.floorThreads)[0];
+      if (!root) break;
+      let pageMatched = false;
+      let processed = false;
+      let lastError: unknown;
+      for (let offset = 0; offset < lanes.length; offset += 1) {
+        if (options.signal?.aborted) throw new RunCancelled();
+        const lane = lanes[(recoveryLaneIndex + offset) % lanes.length];
+        try {
+          await processCommentFloors({
+            roots: [root],
+            threads: progress.floorThreads,
+            fetchPage: async (_root, thread) => {
+              if (!lane.client.getCommentFloor) {
+                throw new Error("Comment floor API is unavailable on this lane.");
+              }
+              const startedAt = Date.now();
+              const activity = {
+                lane: lane.name,
+                workerId: "floor-recovery",
+                operation: "comment-floor" as const,
+                songId: song.id,
+                songName: song.name,
+                page: thread.pageNo,
+                parentCommentId: root.commentId,
+                startedAt: new Date(startedAt).toISOString(),
+              };
+              publishRequestActivity(options, { ...activity, phase: "start" });
+              let attempts = 0;
+              let networkElapsedMs = 0;
+              try {
+                const page = await waitForRunSignal(executeProxyRequest(
+                  lane,
+                  `comment_floor:${song.id}:${root.commentId}`,
+                  async () => {
+                    attempts += 1;
+                    const networkStartedAt = Date.now();
+                    try {
+                      return await lane.client.getCommentFloor!(
+                        song.id,
+                        root.commentId,
+                        COMMENT_FLOOR_PAGE_SIZE,
+                        thread.nextTime,
+                      );
+                    } finally {
+                      networkElapsedMs += Date.now() - networkStartedAt;
+                    }
+                  },
+                ), options.signal);
+                publishRequestActivity(options, {
+                  ...activity,
+                  phase: "success",
+                  elapsedMs: Date.now() - startedAt,
+                  networkElapsedMs,
+                  attempts,
+                  comments: page.comments.length,
+                  effectiveComments: page.comments.length,
+                  totalComments: page.total,
+                  hasMore: page.hasMore,
+                });
+                return page;
+              } catch (error) {
+                const status = remoteStatus(error);
+                publishRequestActivity(options, {
+                  ...activity,
+                  phase: "failure",
+                  elapsedMs: Date.now() - startedAt,
+                  networkElapsedMs,
+                  attempts,
+                  status,
+                  rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
+                  error: errorMessage(error),
+                });
+                throw error;
+              }
+            },
+            persistPage: async (_root, _thread, page) => {
+              const added = await appendMatches(results, page.comments
+                .filter((comment) => comment.userId === options.uid)
+                .map<FoundComment>((comment) => ({
+                  ...comment,
+                  songId: song.id,
+                  songName: song.name,
+                  sources: song.sources,
+                  sourceRank: song.sourceRank,
+                  playCount: song.playCount,
+                  route: "song-comment-floor",
+                  capturedAt: new Date().toISOString(),
+                })));
+              pageMatched ||= added > 0;
+            },
+            checkpointPage: async (_root, _thread, page) => {
+              progress.floorPagesProcessed = (progress.floorPagesProcessed ?? 0) + 1;
+              progress.replyCommentsProcessed = (progress.replyCommentsProcessed ?? 0) + page.comments.length;
+              state.floorPagesProcessed = (state.floorPagesProcessed ?? 0) + 1;
+              state.replyCommentsInspected = (state.replyCommentsInspected ?? 0) + page.comments.length;
+              progress.done = Boolean(progress.rootDone) && commentFloorsComplete(progress.floorThreads);
+              syncSongCursor(state);
+              await checkpoint(true);
+            },
+            shouldStopAfterPage: () => true,
+          });
+          recoveryLaneIndex = (recoveryLaneIndex + offset + 1) % lanes.length;
+          processed = true;
+          break;
+        } catch (error) {
+          if (error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
+          lastError = error;
+        }
+      }
+      if (!processed) throw lastError ?? new Error(`No lane could resume comment floor ${root.commentId}.`);
+      if (progress.done) await persistSongCoverageIfEligible(options, state, songIndex);
+      if (pageMatched && options.stopAfterFirst) {
+        return pooledReport(state, lanes, options, initialRequests, "paused", {
+          note: "找到首条评论后已暂停；关闭“首条命中后暂停”可继续完整扫描。",
+        });
+      }
+    }
+
+    // A run that spent its complete logical budget on durable floor work must
+    // pause here. A later run refreshes the catalog before it may claim full
+    // coverage, so newly added songs cannot be hidden by an old catalog.
+    if (options.requestBudget > 0 && logicalRequestsReserved >= options.requestBudget) {
+      throw new RequestBudgetExhausted(options.requestBudget);
+    }
+
     const sourcesChanged = await refreshSongCatalogPooled(lanes, options, state);
     const hydratedSongs = await hydrateSongsFromPool(lanes, state.songs);
     publishSongCatalog(options, state.songs);
@@ -198,11 +380,6 @@ export async function runPooledCommentFinder(
 
     ensureSongProgress(state);
     await persistEligibleCompletedCoverage(options, state);
-    if (options.dryRun) {
-      return pooledReport(state, lanes, options, initialRequests, "dry-run", {
-        note: estimateNote(state, options),
-      });
-    }
     if (state.finished) return pooledReport(state, lanes, options, initialRequests, "complete");
 
     const configuredWorkers = workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers);
@@ -226,12 +403,18 @@ export async function runPooledCommentFinder(
       state.songProgress!.map((progress, index) => [index, progress.pageInSong]),
     );
     const songPermitWaiters = new Map<number, Set<() => void>>();
-    let reservedRequests = pooledRequestsUsed(lanes);
+    // This counter owns the request-budget contract and counts only logical
+    // comment_new/comment_floor pages. Physical retries and catalog/metadata
+    // control requests remain visible in state.requestCount but do not spend it.
+    let reservedRequests = logicalRequestsReserved;
     let stopRequested = false;
     let budgetReached = false;
     let cancelled = false;
     let matched = false;
     let fatalError: unknown;
+    const floorThreadTasks = new Map<string, Promise<void>>();
+    const reservedFloorPages = new Set<string>();
+    const reservedRootPages = new Set<string>();
     const allLanesUnavailable = (): boolean => lanes.every((lane) =>
       blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)
     );
@@ -288,8 +471,9 @@ export async function runPooledCommentFinder(
       }
     });
 
-    const reserveRequest = (songIndex: number): "reserved" | "wait" | "stopped" => {
+    const reserveRequest = (songIndex: number, taskKey: string): "reserved" | "wait" | "stopped" => {
       if (stopRequested) return "stopped";
+      if (reservedRootPages.has(taskKey)) return "reserved";
       const progress = state.songProgress![songIndex];
       const reservedPages = reservedSongPages.get(songIndex) ?? progress.pageInSong;
       if (options.maxCommentPagesPerSong > 0 && reservedPages >= options.maxCommentPagesPerSong) {
@@ -299,7 +483,7 @@ export async function runPooledCommentFinder(
             options,
             state.songs[songIndex],
             progress.pageInSong,
-            progress.commentOffset,
+            songCommentsProcessed(progress),
             progress.totalComments,
             undefined,
             undefined,
@@ -319,7 +503,137 @@ export async function runPooledCommentFinder(
       }
       reservedRequests += 1;
       reservedSongPages.set(songIndex, reservedPages + 1);
+      reservedRootPages.add(taskKey);
       return "reserved";
+    };
+
+    const reserveFloorRequest = (taskKey: string): void => {
+      if (reservedFloorPages.has(taskKey)) return;
+      if (stopRequested || (options.requestBudget > 0 && reservedRequests >= options.requestBudget)) {
+        budgetReached = true;
+        stopScheduling();
+        throw new RequestBudgetExhausted(options.requestBudget);
+      }
+      reservedRequests += 1;
+      reservedFloorPages.add(taskKey);
+    };
+
+    const scanPendingFloorPage = async (
+      lane: SourceScanLane,
+      workerId: string,
+      songIndex: number,
+    ): Promise<"none" | "processed" | "matched"> => {
+      const progress = state.songProgress![songIndex];
+      progress.floorThreads ??= [];
+      const root = pendingCommentFloorRoots(progress.floorThreads)[0];
+      if (!root) return "none";
+      const song = state.songs[songIndex];
+      const taskKey = `${song.id}:${root.commentId}`;
+      const current = floorThreadTasks.get(taskKey);
+      if (current) {
+        try {
+          await current;
+        } catch (error) {
+          // A waiter did not use the failing owner's lane. Let it take over the
+          // same durable cursor with its own healthy lane instead of poisoning
+          // every lane with the owner's cooldown/failure.
+          if (!(error instanceof SourceLaneFailure || error instanceof CooldownRequired)) throw error;
+        }
+        return scanPendingFloorPage(lane, workerId, songIndex);
+      }
+      let pageMatched = false;
+      const task = processCommentFloors({
+        roots: [root],
+        threads: progress.floorThreads,
+        fetchPage: async (_root, thread) => {
+          if (!lane.client.getCommentFloor) throw new Error("Comment floor API is unavailable on this lane.");
+          reserveFloorRequest(taskKey);
+          const startedAt = Date.now();
+          const activity = {
+            lane: lane.name,
+            workerId,
+            operation: "comment-floor" as const,
+            songId: song.id,
+            songName: song.name,
+            page: thread.pageNo,
+            parentCommentId: root.commentId,
+            startedAt: new Date(startedAt).toISOString(),
+          };
+          publishRequestActivity(options, { ...activity, phase: "start" });
+          let attempts = 0;
+          let networkElapsedMs = 0;
+          try {
+            const page = await executeProxyRequest(lane, `comment_floor:${song.id}:${root.commentId}`, async () => {
+              attempts += 1;
+              const networkStartedAt = Date.now();
+              try {
+                return await lane.client.getCommentFloor!(song.id, root.commentId, COMMENT_FLOOR_PAGE_SIZE, thread.nextTime);
+              } finally {
+                networkElapsedMs += Date.now() - networkStartedAt;
+              }
+            });
+            publishRequestActivity(options, {
+              ...activity,
+              phase: "success",
+              elapsedMs: Date.now() - startedAt,
+              networkElapsedMs,
+              attempts,
+              comments: page.comments.length,
+              effectiveComments: page.comments.length,
+              totalComments: page.total,
+              hasMore: page.hasMore,
+            });
+            return page;
+          } catch (error) {
+            const status = remoteStatus(error);
+            publishRequestActivity(options, {
+              ...activity,
+              phase: "failure",
+              elapsedMs: Date.now() - startedAt,
+              networkElapsedMs,
+              attempts,
+              status,
+              rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
+              error: errorMessage(error),
+            });
+            if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
+            throw new SourceLaneFailure(lane.name, error);
+          }
+        },
+        persistPage: async (_root, _thread, page) => {
+          const added = await appendMatches(results, page.comments
+            .filter((comment) => comment.userId === options.uid)
+            .map<FoundComment>((comment) => ({
+              ...comment,
+              songId: song.id,
+              songName: song.name,
+              sources: song.sources,
+              sourceRank: song.sourceRank,
+              playCount: song.playCount,
+              route: "song-comment-floor",
+              capturedAt: new Date().toISOString(),
+            })));
+          pageMatched ||= added > 0;
+        },
+        checkpointPage: async (_root, _thread, page) => {
+          progress.floorPagesProcessed = (progress.floorPagesProcessed ?? 0) + 1;
+          progress.replyCommentsProcessed = (progress.replyCommentsProcessed ?? 0) + page.comments.length;
+          state.floorPagesProcessed = (state.floorPagesProcessed ?? 0) + 1;
+          state.replyCommentsInspected = (state.replyCommentsInspected ?? 0) + page.comments.length;
+          progress.done = Boolean(progress.rootDone) && commentFloorsComplete(progress.floorThreads);
+          syncSongCursor(state);
+          await checkpoint(true);
+          reservedFloorPages.delete(taskKey);
+          if (pageMatched && options.stopAfterFirst) {
+            matched = true;
+            stopScheduling();
+          }
+        },
+        shouldStopAfterPage: () => true,
+      }).finally(() => floorThreadTasks.delete(taskKey));
+      floorThreadTasks.set(taskKey, task);
+      await task;
+      return pageMatched && options.stopAfterFirst ? "matched" : "processed";
     };
 
     const scanSongPage = async (
@@ -327,6 +641,32 @@ export async function runPooledCommentFinder(
       workerId: string,
       work: SourceScanWork,
     ): Promise<SourceScanWork[]> => {
+      if (stopRequested) return [];
+      const pendingSongIndex = state.songProgress!.findIndex((candidate) =>
+        !commentFloorsComplete(candidate.floorThreads)
+      );
+      if (pendingSongIndex >= 0) {
+        const pendingFloor = await scanPendingFloorPage(lane, workerId, pendingSongIndex);
+        if (pendingFloor === "matched") return [];
+        if (pendingFloor === "processed") {
+          const pendingProgress = state.songProgress![pendingSongIndex];
+          if (pendingProgress.done) {
+            await persistSongCoverageIfEligible(options, state, pendingSongIndex);
+          }
+          const originalProgress = state.songProgress![work.songIndex];
+          const originalShard = work.shardId === undefined
+            ? undefined
+            : originalProgress.commentShards?.find((candidate) => candidate.id === work.shardId);
+          if (!originalProgress.done && (work.shardId === undefined || (originalShard && !originalShard.done))) {
+            return [work];
+          }
+          const nextPendingIndex = state.songProgress!.findIndex((candidate) =>
+            !commentFloorsComplete(candidate.floorThreads)
+          );
+          return nextPendingIndex < 0 ? [] : [{ songIndex: nextPendingIndex }];
+        }
+      }
+
       const { songIndex } = work;
       const song = state.songs[songIndex];
       const progress = state.songProgress![songIndex];
@@ -334,8 +674,11 @@ export async function runPooledCommentFinder(
         ? undefined
         : progress.commentShards?.find((candidate) => candidate.id === work.shardId);
       if (stopRequested || progress.done || (work.shardId !== undefined && (!shard || shard.done))) return [];
+      const requestedCursor = shard?.cursor ?? progress.commentCursor!;
+      const requestedPageNo = shard?.pageNo ?? progress.commentPageNo!;
+      const rootTaskKey = `${song.id}:${shard ? `shard-${shard.id}` : "root"}:${requestedPageNo}:${requestedCursor}`;
       while (true) {
-        const reservation = reserveRequest(songIndex);
+        const reservation = reserveRequest(songIndex, rootTaskKey);
         if (reservation === "reserved") break;
         if (reservation === "stopped") {
           syncSongCursor(state);
@@ -345,8 +688,6 @@ export async function runPooledCommentFinder(
         await waitForSongPermit(songIndex);
         if (stopRequested || progress.done || shard?.done) return [];
       }
-      const requestedCursor = shard?.cursor ?? progress.commentCursor!;
-      const requestedPageNo = shard?.pageNo ?? progress.commentPageNo!;
       const requestStartedAt = Date.now();
       const requestActivity = {
         lane: lane.name,
@@ -368,7 +709,7 @@ export async function runPooledCommentFinder(
             options,
             song,
             progress.pageInSong,
-            progress.commentOffset,
+            songCommentsProcessed(progress),
             progress.totalComments,
             workerId,
             requestedPageNo,
@@ -389,9 +730,6 @@ export async function runPooledCommentFinder(
           }
         });
       } catch (error) {
-        const reservedPages = reservedSongPages.get(songIndex) ?? progress.pageInSong;
-        reservedSongPages.set(songIndex, Math.max(progress.pageInSong, reservedPages - 1));
-        notifySongPermit(songIndex);
         const status = remoteStatus(error);
         publishRequestActivity(options, {
           ...requestActivity,
@@ -442,17 +780,8 @@ export async function runPooledCommentFinder(
         totalComments: page.total,
         hasMore: page.hasMore,
       });
-      progress.pageInSong += 1;
-      progress.commentOffset += scannedComments.length;
-      progress.totalComments = mergeCommentTotal(progress.totalComments, page.total, progress.commentOffset);
-      if (shard) {
-        shard.pagesProcessed += 1;
-        shard.pageNo = requestedPageNo + 1;
-      } else {
-        progress.commentPageNo = requestedPageNo + 1;
-      }
-      state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
-      const matches = scannedComments
+      progress.floorThreads ??= [];
+      const rootMatches = scannedComments
         .filter((comment) => comment.userId === options.uid)
         .map<FoundComment>((comment) => ({
           ...comment,
@@ -463,8 +792,157 @@ export async function runPooledCommentFinder(
           playCount: song.playCount,
           route: "song-comments",
           capturedAt: new Date().toISOString(),
-      }));
-      const added = await appendMatches(results, matches);
+        }));
+      const rootAdded = await appendMatches(results, rootMatches);
+      if (rootAdded > 0 && options.stopAfterFirst) {
+        await checkpoint(true);
+        matched = true;
+        stopScheduling();
+        return [];
+      }
+      let floorAdded = 0;
+      let floorMatched = false;
+      const processRootFloor = async (root: typeof scannedComments[number]): Promise<void> => {
+        const taskKey = `${song.id}:${root.commentId}`;
+        const current = floorThreadTasks.get(taskKey);
+        if (current) {
+          try {
+            await current;
+          } catch (error) {
+            if (!(error instanceof SourceLaneFailure || error instanceof CooldownRequired)) throw error;
+          }
+          return processRootFloor(root);
+        }
+        const task = processCommentFloors({
+          roots: [root],
+          threads: progress.floorThreads!,
+          fetchPage: async (_root, thread) => {
+          if (!lane.client.getCommentFloor) throw new Error("Comment floor API is unavailable on this lane.");
+          reserveFloorRequest(taskKey);
+          const floorStartedAt = Date.now();
+          const floorActivity = {
+            lane: lane.name,
+            workerId,
+            operation: "comment-floor" as const,
+            songId: song.id,
+            songName: song.name,
+            page: thread.pageNo,
+            parentCommentId: root.commentId,
+            shardId: shard?.id,
+            startedAt: new Date(floorStartedAt).toISOString(),
+          };
+          publishRequestActivity(options, { ...floorActivity, phase: "start" });
+          let floorAttempts = 0;
+          let floorNetworkElapsedMs = 0;
+          try {
+            const floorResult = await executeProxyRequest(
+              lane,
+              `comment_floor:${song.id}:${root.commentId}`,
+              async () => {
+                floorAttempts += 1;
+                const networkStartedAt = Date.now();
+                try {
+                  return await lane.client.getCommentFloor!(song.id, root.commentId, COMMENT_FLOOR_PAGE_SIZE, thread.nextTime);
+                } finally {
+                  floorNetworkElapsedMs += Date.now() - networkStartedAt;
+                }
+              },
+            );
+            publishRequestActivity(options, {
+              ...floorActivity,
+              phase: "success",
+              elapsedMs: Date.now() - floorStartedAt,
+              networkElapsedMs: floorNetworkElapsedMs,
+              attempts: floorAttempts,
+              comments: floorResult.comments.length,
+              effectiveComments: floorResult.comments.length,
+              totalComments: floorResult.total,
+              hasMore: floorResult.hasMore,
+            });
+            return floorResult;
+          } catch (error) {
+            const status = remoteStatus(error);
+            publishRequestActivity(options, {
+              ...floorActivity,
+              phase: "failure",
+              elapsedMs: Date.now() - floorStartedAt,
+              networkElapsedMs: floorNetworkElapsedMs,
+              attempts: floorAttempts,
+              status,
+              rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
+              error: errorMessage(error),
+            });
+            if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) throw error;
+            throw new SourceLaneFailure(lane.name, error);
+          }
+          },
+          persistPage: async (_root, _thread, floorPage) => {
+            const floorMatches = floorPage.comments
+              .filter((comment) => comment.userId === options.uid)
+              .map<FoundComment>((comment) => ({
+                ...comment,
+                songId: song.id,
+                songName: song.name,
+                sources: song.sources,
+                sourceRank: song.sourceRank,
+                playCount: song.playCount,
+                route: "song-comment-floor",
+                capturedAt: new Date().toISOString(),
+              }));
+            const added = await appendMatches(results, floorMatches);
+            floorAdded += added;
+            floorMatched ||= added > 0;
+          },
+          checkpointPage: async (_root, _thread, floorPage) => {
+            progress.floorPagesProcessed = (progress.floorPagesProcessed ?? 0) + 1;
+            progress.replyCommentsProcessed = (progress.replyCommentsProcessed ?? 0) + floorPage.comments.length;
+            state.floorPagesProcessed = (state.floorPagesProcessed ?? 0) + 1;
+            state.replyCommentsInspected = (state.replyCommentsInspected ?? 0) + floorPage.comments.length;
+            publishSongProgress(
+              options,
+              song,
+              progress.pageInSong,
+              songCommentsProcessed(progress),
+              progress.totalComments,
+              workerId,
+              undefined,
+              progress.done,
+              sourceSongCoveragePercent(state, progress, song.id),
+              state.truncatedSongIds.includes(song.id),
+              progress.floorPagesProcessed,
+              progress.replyCommentsProcessed,
+            );
+            await checkpoint(true);
+            reservedFloorPages.delete(taskKey);
+            if (floorMatched && options.stopAfterFirst) {
+              matched = true;
+              stopScheduling();
+            }
+          },
+          shouldStopAfterPage: () => floorMatched && options.stopAfterFirst,
+        }).finally(() => floorThreadTasks.delete(taskKey));
+        floorThreadTasks.set(taskKey, task);
+        await task;
+      };
+      try {
+        for (const root of scannedComments) {
+          await processRootFloor(root);
+          if (floorMatched && options.stopAfterFirst) break;
+        }
+      } catch (error) {
+        throw error;
+      }
+      if (floorMatched && options.stopAfterFirst) return [];
+      progress.pageInSong += 1;
+      progress.commentOffset += scannedComments.length;
+      progress.totalComments = mergeCommentTotal(progress.totalComments, page.total, songCommentsProcessed(progress));
+      if (shard) {
+        shard.pagesProcessed += 1;
+        shard.pageNo = requestedPageNo + 1;
+      } else {
+        progress.commentPageNo = requestedPageNo + 1;
+      }
+      state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
       let nextWork: SourceScanWork[] = [];
       const pageCapReached = options.maxCommentPagesPerSong > 0 && progress.pageInSong >= options.maxCommentPagesPerSong;
       const wasDone = progress.done;
@@ -476,7 +954,8 @@ export async function runPooledCommentFinder(
         } else {
           shard.cursor = nextCursor;
         }
-        progress.done = progress.commentShards!.every((candidate) => candidate.done);
+        progress.rootDone = progress.commentShards!.every((candidate) => candidate.done);
+        progress.done = progress.rootDone && commentFloorsComplete(progress.floorThreads);
         if (!progress.done && pageCapReached) {
           markSongTruncated(state, songIndex);
         } else if (!shard.done) {
@@ -491,7 +970,8 @@ export async function runPooledCommentFinder(
           if (nextWork.length === 0) nextWork = [work];
         }
       } else if (nextCursor === undefined) {
-        progress.done = true;
+        progress.rootDone = true;
+        progress.done = commentFloorsComplete(progress.floorThreads);
       } else if (pageCapReached) {
         markSongTruncated(state, songIndex);
       } else {
@@ -515,16 +995,19 @@ export async function runPooledCommentFinder(
         options,
         song,
         progress.pageInSong,
-        progress.commentOffset,
+        songCommentsProcessed(progress),
         progress.totalComments,
         workerId,
         undefined,
         progress.done,
         sourceSongCoveragePercent(state, progress, song.id),
         state.truncatedSongIds.includes(song.id),
+        progress.floorPagesProcessed,
+        progress.replyCommentsProcessed,
       );
       await checkpoint();
-      if (added > 0 && options.stopAfterFirst) {
+      reservedRootPages.delete(rootTaskKey);
+      if ((floorAdded > 0 || rootAdded > 0) && options.stopAfterFirst) {
         matched = true;
         stopScheduling();
       }
@@ -665,6 +1148,7 @@ export async function runPooledCommentFinder(
     throw error;
   } finally {
     checkpointCoordinator.dispose();
+    await writer.close();
   }
 }
 
@@ -691,8 +1175,10 @@ async function runHistory(
   results: ResultAccumulator,
   checkpoint: () => Promise<void>,
   initialRequests: number,
+  reserveLogicalRequest: () => void,
 ): Promise<RunReport> {
   while (true) {
+    reserveLogicalRequest();
     const page = await governor.execute("user_comment_history", () =>
       client.getUserCommentHistory(
         options.uid,
@@ -742,7 +1228,109 @@ async function runSongScan(
   results: ResultAccumulator,
   checkpoint: () => Promise<void>,
   initialRequests: number,
+  reserveLogicalRequest: () => void,
 ): Promise<RunReport> {
+  if (options.stopAfterFirst && state.matchCount > 0) {
+    return report(state, governor, options, initialRequests, "paused", {
+      note: "A matching comment is already present in the checkpoint.",
+    });
+  }
+  ensureSongProgress(state);
+  syncSongCursor(state);
+
+  const processSerialFloors = async (
+    song: SongCandidate,
+    progress: NonNullable<ScanState["songProgress"]>[number],
+    roots: readonly CommentRecord[],
+    onePageOnly: boolean,
+  ): Promise<number> => {
+    let addedTotal = 0;
+    let pageMatched = false;
+    await processCommentFloors({
+      roots,
+      threads: progress.floorThreads!,
+      fetchPage: async (root, thread) => {
+        if (!client.getCommentFloor) throw new Error("Comment floor API is unavailable on this client.");
+        reserveLogicalRequest();
+        return governor.execute(`comment_floor:${song.id}:${root.commentId}:page-${thread.pageNo}`, () =>
+          client.getCommentFloor!(song.id, root.commentId, COMMENT_FLOOR_PAGE_SIZE, thread.nextTime)
+        );
+      },
+      persistPage: async (_root, _thread, floorPage) => {
+        const added = await appendMatches(results, floorPage.comments
+          .filter((comment) => comment.userId === options.uid)
+          .map<FoundComment>((comment) => ({
+            ...comment,
+            songId: song.id,
+            songName: song.name,
+            sources: song.sources,
+            sourceRank: song.sourceRank,
+            playCount: song.playCount,
+            route: "song-comment-floor",
+            capturedAt: new Date().toISOString(),
+          })));
+        addedTotal += added;
+        pageMatched ||= added > 0;
+      },
+      checkpointPage: async (_root, _thread, floorPage) => {
+        progress.floorPagesProcessed = (progress.floorPagesProcessed ?? 0) + 1;
+        progress.replyCommentsProcessed = (progress.replyCommentsProcessed ?? 0) + floorPage.comments.length;
+        state.floorPagesProcessed = (state.floorPagesProcessed ?? 0) + 1;
+        state.replyCommentsInspected = (state.replyCommentsInspected ?? 0) + floorPage.comments.length;
+        progress.done = Boolean(progress.rootDone) && commentFloorsComplete(progress.floorThreads);
+        state.commentOffset = songCommentsProcessed(progress);
+        syncSongCursor(state);
+        await checkpoint();
+      },
+      shouldStopAfterPage: () => onePageOnly || (pageMatched && options.stopAfterFirst),
+    });
+    return addedTotal;
+  };
+
+  if (options.dryRun) {
+    if (!hasPendingCommentFloors(state)) {
+      const sourcesChanged = await refreshSongCatalog(client, governor, options, state);
+      const hydratedSongs = await hydrateSongsFromClient(client, governor, state.songs);
+      publishSongCatalog(options, state.songs);
+      if (sourcesChanged || hydratedSongs > 0) await checkpoint();
+      ensureSongProgress(state);
+      syncSongCursor(state);
+    }
+    return report(state, governor, options, initialRequests, "dry-run", {
+      note: estimateNote(state, options),
+    });
+  }
+
+  // A persisted floor cursor is first-class work. Drain it before any new
+  // comment_new request, even when it belongs to a later song in the catalog.
+  // This guarantees progress with a one-request budget and prevents an old
+  // root page from being replayed merely to rediscover the parent comment.
+  while (true) {
+    const pendingSongIndex = state.songProgress!.findIndex((progress) =>
+      !commentFloorsComplete(progress.floorThreads)
+    );
+    if (pendingSongIndex < 0) break;
+    const song = state.songs[pendingSongIndex];
+    const progress = state.songProgress![pendingSongIndex];
+    progress.floorThreads ??= [];
+    const pendingFloor = pendingCommentFloorRoots(progress.floorThreads)[0];
+    if (!pendingFloor) break;
+    const added = await processSerialFloors(song, progress, [pendingFloor], true);
+    if (added > 0 && options.stopAfterFirst) {
+      return report(state, governor, options, initialRequests, "paused", {
+        note: "Stopped after the first match; rerun without --stop-after-first for full coverage.",
+      });
+    }
+    if (progress.rootDone && commentFloorsComplete(progress.floorThreads)) {
+      progress.done = true;
+      syncSongCursor(state);
+      await persistSongCoverageIfEligible(options, state, pendingSongIndex);
+    }
+  }
+
+  // Only after all durable floor work has settled do we refresh this run's
+  // source catalog. If the request budget was consumed by floor work, the
+  // governor pauses here instead of declaring the stale catalog complete.
   const sourcesChanged = await refreshSongCatalog(client, governor, options, state);
   const hydratedSongs = await hydrateSongsFromClient(client, governor, state.songs);
   publishSongCatalog(options, state.songs);
@@ -752,18 +1340,13 @@ async function runSongScan(
   await persistEligibleCompletedCoverage(options, state);
   syncSongCursor(state);
 
-  if (options.dryRun) {
-    return report(state, governor, options, initialRequests, "dry-run", {
-      note: estimateNote(state, options),
-    });
-  }
-
   while (state.songIndex < state.songs.length) {
     const currentSongIndex = state.songIndex;
     const song = state.songs[currentSongIndex];
     const songProgress = state.songProgress![currentSongIndex];
-    state.commentOffset = songProgress.commentOffset;
+    state.commentOffset = songCommentsProcessed(songProgress);
     state.pageInSong = songProgress.pageInSong;
+    songProgress.floorThreads ??= [];
 
     if (
       options.maxCommentPagesPerSong > 0 &&
@@ -774,7 +1357,7 @@ async function runSongScan(
         options,
         song,
         songProgress.pageInSong,
-        songProgress.commentOffset,
+        songCommentsProcessed(songProgress),
         songProgress.totalComments,
         undefined,
         undefined,
@@ -796,12 +1379,13 @@ async function runSongScan(
     }
     const requestedCursor = shard?.cursor ?? songProgress.commentCursor!;
     const requestedPageNo = shard?.pageNo ?? songProgress.commentPageNo!;
+    reserveLogicalRequest();
     const page = await governor.execute(`comment_new:${song.id}`, () => {
       publishSongProgress(
         options,
         song,
         songProgress.pageInSong,
-        songProgress.commentOffset,
+        songCommentsProcessed(songProgress),
         songProgress.totalComments,
         undefined,
         requestedPageNo,
@@ -827,7 +1411,7 @@ async function runSongScan(
       ? page.comments.filter((comment) => comment.time === undefined || (comment.time >= shard.startTime && comment.time < shard.endTime))
       : page.comments;
 
-    const matches = scannedComments
+    const rootMatches = scannedComments
       .filter((comment) => comment.userId === options.uid)
       .map<FoundComment>((comment) => ({
         ...comment,
@@ -839,11 +1423,18 @@ async function runSongScan(
         route: "song-comments",
         capturedAt: new Date().toISOString(),
       }));
-    const added = await appendMatches(results, matches);
+    const rootAdded = await appendMatches(results, rootMatches);
+    if (rootAdded > 0 && options.stopAfterFirst) {
+      await checkpoint();
+      return report(state, governor, options, initialRequests, "paused", {
+        note: "Stopped after the first match; rerun without --stop-after-first for full coverage.",
+      });
+    }
+    const floorAdded = await processSerialFloors(song, songProgress, scannedComments, false);
 
     songProgress.pageInSong += 1;
     songProgress.commentOffset += scannedComments.length;
-    songProgress.totalComments = mergeCommentTotal(songProgress.totalComments, page.total, songProgress.commentOffset);
+    songProgress.totalComments = mergeCommentTotal(songProgress.totalComments, page.total, songCommentsProcessed(songProgress));
     let naturallyCompleted = false;
     if (shard) {
       shard.pagesProcessed += 1;
@@ -852,7 +1443,7 @@ async function runSongScan(
       songProgress.commentPageNo = requestedPageNo + 1;
     }
     state.pageInSong = songProgress.pageInSong;
-    state.commentOffset = songProgress.commentOffset;
+    state.commentOffset = songCommentsProcessed(songProgress);
     state.pagesProcessed = (state.pagesProcessed ?? 0) + 1;
 
     if (shard) {
@@ -863,10 +1454,12 @@ async function runSongScan(
         shard.cursor = nextCursor;
       }
       if (songProgress.commentShards!.every((candidate) => candidate.done)) {
+        songProgress.rootDone = true;
         advanceSong(state);
         naturallyCompleted = true;
       }
     } else if (nextCursor === undefined) {
+      songProgress.rootDone = true;
       advanceSong(state);
       naturallyCompleted = true;
     } else {
@@ -876,25 +1469,29 @@ async function runSongScan(
       options,
       song,
       songProgress.pageInSong,
-      songProgress.commentOffset,
+      songCommentsProcessed(songProgress),
       songProgress.totalComments,
       undefined,
       undefined,
       songProgress.done,
       sourceSongCoveragePercent(state, songProgress, song.id),
       state.truncatedSongIds.includes(song.id),
+      songProgress.floorPagesProcessed,
+      songProgress.replyCommentsProcessed,
     );
     if (naturallyCompleted) await persistSongCoverageIfEligible(options, state, currentSongIndex);
     await checkpoint();
 
-    if (added > 0 && options.stopAfterFirst) {
+    if ((floorAdded > 0 || rootAdded > 0) && options.stopAfterFirst) {
       return report(state, governor, options, initialRequests, "paused", {
         note: "Stopped after the first match; rerun without --stop-after-first for full coverage.",
       });
     }
   }
 
-  state.finished = true;
+  state.finished = state.songProgress!.every((progress) =>
+    progress.done && commentFloorsComplete(progress.floorThreads)
+  );
   state.coverageComplete =
     !state.sourceTruncated &&
     state.truncatedSongIds.length === 0 &&
@@ -974,6 +1571,7 @@ async function reconcileSongCatalog(
     if (previous?.progress.done) historicalCompletedSongs += 1;
     if (!progress.done && coveredIds.has(currentSong.id)) {
       for (const shard of progress.commentShards ?? []) shard.done = true;
+      progress.rootDone = true;
       progress.done = true;
       reusedSongs += 1;
       reusedIds.add(currentSong.id);
@@ -1058,6 +1656,7 @@ function initialSongProgress(
     coverageStartTime: displayCoverageStartTime(publishTime, endTime),
     commentCursor: initialCursor,
     commentPageNo: 1,
+    rootDone: false,
     done: false,
   };
 }
@@ -1098,7 +1697,9 @@ async function persistEligibleCompletedCoverage(options: ScanOptions, state: Sca
   if (!options.coveragePath || state.sourceErrors.length > 0 || state.sourceTruncated) return;
   const truncated = new Set(state.truncatedSongIds);
   const songIds = state.songs.flatMap((song, index) =>
-    state.songProgress?.[index]?.done && !truncated.has(song.id) ? [song.id] : []
+    state.songProgress?.[index]?.done &&
+      commentFloorsComplete(state.songProgress[index]?.floorThreads) &&
+      !truncated.has(song.id) ? [song.id] : []
   );
   if (songIds.length > 0) await mergeSongCoverage(options.coveragePath, options.uid, songIds);
 }
@@ -1110,7 +1711,9 @@ async function persistSongCoverageIfEligible(
 ): Promise<void> {
   if (!options.coveragePath || state.sourceErrors.length > 0 || state.sourceTruncated) return;
   const song = state.songs[songIndex];
-  if (!song || state.truncatedSongIds.includes(song.id) || !state.songProgress?.[songIndex]?.done) return;
+  const progress = state.songProgress?.[songIndex];
+  if (!song || state.truncatedSongIds.includes(song.id) || !progress?.done ||
+    !commentFloorsComplete(progress.floorThreads)) return;
   await mergeSongCoverage(options.coveragePath, options.uid, [song.id]);
 }
 
@@ -1495,7 +2098,10 @@ async function appendMatches(
 function advanceSong(state: ScanState): void {
   ensureSongProgress(state);
   const current = state.songProgress![state.songIndex];
-  if (current) current.done = true;
+  if (current) {
+    current.rootDone = true;
+    current.done = commentFloorsComplete(current.floorThreads);
+  }
   syncSongCursor(state);
 }
 
@@ -1522,6 +2128,8 @@ function report(
     requestsThisRun: governor.requestsUsed,
     requestsTotal: initialRequests + governor.requestsUsed,
     pagesProcessed: state.pagesProcessed ?? 0,
+    floorPagesProcessed: state.floorPagesProcessed ?? 0,
+    replyCommentsInspected: state.replyCommentsInspected ?? 0,
     commentsInspected: inspectedComments(state),
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
@@ -1557,6 +2165,8 @@ function pooledReport(
     lanes: lanes.length,
     workers: workerCountForTopology(lanes.length, options.workersPerLane, options.maxWorkers),
     pagesProcessed: state.pagesProcessed ?? 0,
+    floorPagesProcessed: state.floorPagesProcessed ?? 0,
+    replyCommentsInspected: state.replyCommentsInspected ?? 0,
     commentsInspected: inspectedComments(state),
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
@@ -1573,6 +2183,8 @@ function ensureSongProgress(state: ScanState): void {
     state.songProgress = state.songs.map((_, index) => ({
       commentOffset: index === state.songIndex ? state.commentOffset : 0,
       pageInSong: index === state.songIndex ? state.pageInSong : 0,
+      floorPagesProcessed: 0,
+      replyCommentsProcessed: 0,
       commentEndTime: Number(initialCommentCursor),
       commentCursor: initialCommentCursor,
       commentPageNo: 1,
@@ -1583,6 +2195,11 @@ function ensureSongProgress(state: ScanState): void {
     const progress = state.songProgress[index];
     progress.commentCursor ??= initialCommentCursor;
     progress.commentPageNo ??= 1;
+    progress.floorThreads ??= [];
+    progress.rootDone ??= progress.done;
+    progress.done = Boolean(progress.rootDone) && commentFloorsComplete(progress.floorThreads);
+    progress.floorPagesProcessed ??= progress.floorThreads.reduce((total, thread) => total + thread.pagesProcessed, 0);
+    progress.replyCommentsProcessed ??= progress.floorThreads.reduce((total, thread) => total + thread.repliesProcessed, 0);
     for (const shard of progress.commentShards ?? []) {
       if (!Number.isInteger(shard.pageNo) || shard.pageNo < 2) shard.pageNo = 2;
     }
@@ -1608,12 +2225,24 @@ function ensureSongProgress(state: ScanState): void {
     }
   }
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
+  state.floorPagesProcessed ??= state.songProgress.reduce((total, progress) => total + (progress.floorPagesProcessed ?? 0), 0);
+  state.replyCommentsInspected ??= state.songProgress.reduce((total, progress) => total + (progress.replyCommentsProcessed ?? 0), 0);
 }
 
 function inspectedComments(state: ScanState): number {
   if (state.strategy === "history") return state.commentOffset;
-  return state.songProgress?.reduce((total, progress) => total + progress.commentOffset, 0)
+  return state.songProgress?.reduce((total, progress) => total + songCommentsProcessed(progress), 0)
     ?? state.commentOffset;
+}
+
+function hasPendingCommentFloors(state: ScanState): boolean {
+  return state.strategy === "scan" && Boolean(
+    state.songProgress?.some((progress) => !commentFloorsComplete(progress.floorThreads)),
+  );
+}
+
+function songCommentsProcessed(progress: NonNullable<ScanState["songProgress"]>[number]): number {
+  return progress.commentOffset + (progress.replyCommentsProcessed ?? 0);
 }
 
 function sourceSongCoveragePercent(
@@ -1653,9 +2282,11 @@ function prepareSourceWork(state: ScanState, desiredWorkItems: number, maxPages:
   let existingWorkItems = 0;
   state.songProgress!.forEach((progress, songIndex) => {
     if (progress.done) return;
-    const currentWorkItems = progress.commentShards?.length
+    const hasPendingFloor = !commentFloorsComplete(progress.floorThreads);
+    const rootWorkItems = progress.commentShards?.length
       ? progress.commentShards.filter((shard) => !shard.done).length
       : 1;
+    const currentWorkItems = rootWorkItems > 0 ? rootWorkItems : hasPendingFloor ? 1 : 0;
     existingWorkItems += currentWorkItems;
     shardTargets.set(songIndex, currentWorkItems);
     unfinishedSongIndexes.push(songIndex);
@@ -1677,6 +2308,9 @@ function prepareSourceWork(state: ScanState, desiredWorkItems: number, maxPages:
   }
   return state.songProgress!.flatMap((progress, songIndex) => {
     if (progress.done) return [];
+    if (progress.rootDone && !commentFloorsComplete(progress.floorThreads)) {
+      return [{ songIndex }];
+    }
     if (progress.commentShards?.length) {
       expandExistingSourceShards(progress, shardTargets.get(songIndex) ?? 1);
       return progress.commentShards
@@ -1774,7 +2408,8 @@ function markSongTruncated(state: ScanState, songIndex: number): void {
   const progress = state.songProgress![songIndex];
   if (!state.truncatedSongIds.includes(song.id)) state.truncatedSongIds.push(song.id);
   for (const shard of progress.commentShards ?? []) shard.done = true;
-  progress.done = true;
+  progress.rootDone = true;
+  progress.done = commentFloorsComplete(progress.floorThreads);
 }
 
 function syncSongCursor(state: ScanState): void {
@@ -1782,7 +2417,7 @@ function syncSongCursor(state: ScanState): void {
   const index = state.songProgress!.findIndex((progress) => !progress.done);
   state.songIndex = index < 0 ? state.songs.length : index;
   const current = index < 0 ? undefined : state.songProgress![index];
-  state.commentOffset = current?.commentOffset ?? 0;
+  state.commentOffset = current ? songCommentsProcessed(current) : 0;
   state.pageInSong = current?.pageInSong ?? 0;
 }
 
@@ -1792,6 +2427,28 @@ function completedSongs(state: ScanState): number {
 
 function pooledRequestsUsed(lanes: SourceScanLane[]): number {
   return lanes.reduce((total, lane) => total + lane.governor.requestsUsed, 0);
+}
+
+function waitForRunSignal<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(new RunCancelled());
+  return new Promise<T>((resolve, reject) => {
+    const abort = (): void => {
+      signal.removeEventListener("abort", abort);
+      reject(new RunCancelled());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", abort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function isPauseSignal(error: unknown): boolean {
@@ -1816,6 +2473,8 @@ function publishSongProgress(
   done?: boolean,
   coveragePercent?: number,
   truncated?: boolean,
+  floorPagesProcessed?: number,
+  replyCommentsProcessed?: number,
 ): void {
   try {
     options.onSongProgress?.({
@@ -1823,6 +2482,8 @@ function publishSongProgress(
       songName: song.name,
       workerId,
       pageInSong,
+      floorPagesProcessed,
+      replyCommentsProcessed,
       requestingPage,
       commentsProcessed,
       totalComments,
@@ -1849,6 +2510,8 @@ function publishCheckpointProgress(options: ScanOptions, state: ScanState): void
       matches: state.matchCount,
       requestsTotal: state.requestCount,
       pagesProcessed: state.pagesProcessed ?? 0,
+      floorPagesProcessed: state.floorPagesProcessed ?? 0,
+      replyCommentsInspected: state.replyCommentsInspected ?? 0,
       commentsInspected: inspectedComments(state),
       coverageComplete: state.coverageComplete,
       sourceErrors: [...state.sourceErrors],

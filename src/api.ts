@@ -2,6 +2,7 @@ import api = require("@neteasecloudmusicapienhanced/api");
 import { ApiResponseError, AuthenticationRequired, SourcePrivacyRestricted } from "./errors";
 import type {
   CommentPage,
+  CommentFloorPage,
   CommentRecord,
   CursorCommentPage,
   HistoryComment,
@@ -312,6 +313,7 @@ export class EnhancedNcmClient implements NcmClient {
     const rawComments = array(data.comments);
     const comments = rawComments.map(normalizeComment).filter(isDefined);
     if (comments.length !== rawComments.length) throw malformedResponse("comment_new");
+    if (new Set(comments.map((comment) => comment.commentId)).size !== comments.length) throw malformedResponse("comment_new");
     const nextCursor = stringId(data.cursor) ?? comments.at(-1)?.time?.toString();
     if (
       data.hasMore &&
@@ -322,6 +324,54 @@ export class EnhancedNcmClient implements NcmClient {
       hasMore: Boolean(data.hasMore),
       nextCursor,
       total: numberOrUndefined(data.totalCount ?? data.total),
+    };
+  }
+
+  async getCommentFloor(
+    songId: string,
+    parentCommentId: string,
+    limit: number,
+    time: number,
+  ): Promise<CommentFloorPage> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 40) {
+      throw new Error("comment floor limit must be between 1 and 40");
+    }
+    if (!Number.isInteger(time) || time < -1) throw new Error("comment floor time must be an integer");
+    const body = await invoke("comment_floor", () => api.comment_floor({
+      type: 0,
+      id: songId,
+      parentCommentId,
+      limit,
+      time,
+      ...this.requestConfig(),
+    }));
+    const data = object(body.data);
+    if (
+      Number(body.code) !== 200 ||
+      !isPlainJsonObject(body.data) ||
+      !Array.isArray(data.comments) ||
+      typeof data.hasMore !== "boolean"
+    ) throw malformedResponse("comment_floor");
+    const owner = object(data.ownerComment);
+    const ownerCommentId = stringId(owner.commentId ?? owner.id);
+    if (ownerCommentId && ownerCommentId !== parentCommentId) throw malformedResponse("comment_floor");
+    const rawComments = data.comments;
+    const comments = rawComments.map(normalizeComment).filter(isDefined).map((comment) => ({
+      ...comment,
+      parentCommentId,
+    }));
+    if (comments.length !== rawComments.length) throw malformedResponse("comment_floor");
+    if (new Set(comments.map((comment) => comment.commentId)).size !== comments.length) throw malformedResponse("comment_floor");
+    const nextTime = nonNegativeIntegerOrUndefined(data.time);
+    if (data.hasMore && (nextTime === undefined || nextTime <= time)) {
+      throw malformedResponse("comment_floor");
+    }
+    return {
+      parentCommentId,
+      comments,
+      hasMore: data.hasMore,
+      nextTime,
+      total: nonNegativeIntegerOrUndefined(data.totalCount),
     };
   }
 
@@ -467,6 +517,7 @@ function isPlainJsonObject(value: unknown): value is JsonObject {
 function normalizeComment(raw: unknown): CommentRecord | undefined {
   const comment = object(raw);
   const user = object(comment.user);
+  const floorSummary = object(comment.showFloorComment);
   const commentId = stringId(comment.commentId ?? comment.id);
   const userId = stringId(user.userId ?? comment.userId);
   if (!commentId || !userId) return undefined;
@@ -477,7 +528,17 @@ function normalizeComment(raw: unknown): CommentRecord | undefined {
     content: text(comment.content) ?? "",
     time: numberOrUndefined(comment.time),
     likedCount: numberOrUndefined(comment.likedCount),
+    replyCount: maximumDefinedInteger(
+      nonNegativeIntegerOrUndefined(comment.replyCount),
+      nonNegativeIntegerOrUndefined(floorSummary.replyCount),
+    ),
   };
+}
+
+function maximumDefinedInteger(left: number | undefined, right: number | undefined): number | undefined {
+  if (left === undefined) return right;
+  if (right === undefined) return left;
+  return Math.max(left, right);
 }
 
 function normalizeHistoryComment(raw: unknown): HistoryComment | undefined {

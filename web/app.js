@@ -1415,7 +1415,10 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
     name: String(song.name || ""),
     workers: Math.max(0, Number(song.workers || 0)),
     pagesProcessed: finiteNumber(song.pagesProcessed),
+    floorPagesProcessed: finiteNumber(song.floorPagesProcessed),
+    replyCommentsProcessed: finiteNumber(song.replyCommentsProcessed),
     requestingPage: finiteNumber(song.requestingPage),
+    requestingOperation: song.requestingOperation === "comment-floor" ? "comment-floor" : "comment-page",
     requestStartedAt: song.requestStartedAt == null ? undefined : finiteNumber(song.requestStartedAt),
     commentsProcessed: finiteNumber(song.commentsProcessed),
     totalComments: finiteNumber(song.totalComments),
@@ -1485,7 +1488,10 @@ function createActiveSongRow() {
 
 function updateActiveSongRow(entry, song) {
   entry.song = song;
-  entry.badge.textContent = song.truncated ? "达到页数上限" : song.done ? "已完成" : song.workers > 0 ? "扫描中" : "等待调度";
+  const hasUnreadDeclaredComments = song.done && song.totalComments !== undefined
+    && song.commentsProcessed !== undefined && song.commentsProcessed < song.totalComments;
+  entry.badge.textContent = song.truncated ? "达到页数上限" : hasUnreadDeclaredComments
+    ? "已完成可读范围" : song.done ? "已完成" : song.workers > 0 ? "扫描中" : "等待调度";
   entry.badge.classList.toggle("is-waiting", !song.done && song.workers === 0);
   entry.badge.classList.toggle("is-complete", song.done && !song.truncated);
   entry.badge.classList.toggle("is-truncated", song.truncated);
@@ -1501,15 +1507,15 @@ function renderSongReadProgress(song, entry) {
     ? Math.max(comments, song.totalComments)
     : undefined;
   const measuredPercent = total !== undefined && total > 0 ? comments / total * 100 : undefined;
-  const rawPercent = song.done && !song.truncated ? 100 : measuredPercent ?? song.progressPercent ?? 0;
-  const percent = Math.max(0, Math.min(song.truncated ? 99.99 : 100, rawPercent));
+  const rawPercent = measuredPercent ?? song.progressPercent ?? (song.done && !song.truncated ? 100 : 0);
+  const percent = Math.max(0, Math.min(song.truncated || !song.done ? 99.99 : 100, rawPercent));
   const activeRequest = song.workers > 0
     ? ` · ${fmt(song.workers)} 个分片请求中${song.requestStartedAt !== undefined
       ? ` · 最长 ${duration(Math.max(0, Math.floor((Date.now() - song.requestStartedAt) / 1_000)))}`
       : ""}`
     : "";
   const completedPages = song.pagesProcessed !== undefined && song.pagesProcessed > 0
-    ? ` · 已完成 ${fmt(song.pagesProcessed)} 页`
+    ? ` · 顶层 ${fmt(song.pagesProcessed)} 页${song.floorPagesProcessed ? ` · 楼中楼 ${fmt(song.floorPagesProcessed)} 页` : ""}`
     : "";
   const countText = total === undefined
     ? `${fmt(comments)} 条评论`
@@ -1517,11 +1523,11 @@ function renderSongReadProgress(song, entry) {
   const label = song.truncated
     ? `已搜索 ${countText}${completedPages} · 达到每首最大页数，未覆盖全部评论`
     : total !== undefined
-    ? `已搜索 ${countText}${song.done ? " · 已完成" : ""}${completedPages}${activeRequest}`
+    ? `已搜索 ${countText}${song.done ? (comments < total ? " · 已完成当前可读取范围" : " · 已完成") : ""}${completedPages}${activeRequest}`
     : song.pagesProcessed !== undefined && song.pagesProcessed > 0
     ? `已搜索 ${countText} · 总数读取中${completedPages}${activeRequest}`
     : song.requestingPage !== undefined
-    ? `正在请求第 ${fmt(song.requestingPage)} 页${activeRequest}`
+    ? `正在请求${song.requestingOperation === "comment-floor" ? "楼中楼" : "顶层评论"}第 ${fmt(song.requestingPage)} 页${activeRequest}`
     : song.workers > 0
     ? `正在请求首批评论分片${activeRequest}`
     : song.pagesProcessed !== undefined
@@ -1612,7 +1618,9 @@ function renderSettlement(job, viewKey) {
     : `${job.targetLabel || "QQ 目标"} · 公开喜欢歌曲`;
   el.settlementElapsed.textContent = duration(Math.round(Number(job.elapsedMs || 0) / 1000));
   el.settlementMatches.textContent = fmt(job.matches);
-  el.settlementPages.textContent = fmt(job.pagesProcessed);
+  el.settlementPages.textContent = job.floorPagesProcessed
+    ? `${fmt(job.pagesProcessed)} 顶层 / ${fmt(job.floorPagesProcessed)} 楼中楼`
+    : fmt(job.pagesProcessed);
   el.settlementRequests.textContent = fmt(job.requestsTotal);
   el.settlementCoverage.hidden = viewKey !== "netease:source" && job.coverageComplete !== false;
   el.settlementCoverage.textContent = viewKey === "netease:source"
@@ -2235,7 +2243,7 @@ function resultRow(item, live) {
   const songCell = document.createElement("td");
   const songName = document.createElement("span");
   songName.className = "result-song-name";
-  songName.textContent = item.songName || item.resourceName || item.songId || "-";
+  songName.textContent = `${item.songName || item.resourceName || item.songId || "-"}${item.parentCommentId ? " · 楼中楼回复" : ""}`;
   songCell.append(songName);
   const target = commentTarget(item);
   if (target) {

@@ -21,7 +21,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 网易云“歌曲来源”不直接跳变选中背景：`#sourceSelectionIndicator` 只在 change/resize 时读取当前选项几何，以 220 ms transform/size 过渡滑到目标。排行范围放在 `#recordScopeRegion` 中，选择喜欢歌曲或用户歌单时用可逆的 grid-row/opacity/translate 过渡收拢，恢复含排行的来源时可从当前帧直接反向展开。`aria-hidden` 与 `inert` 在选择当帧即时收敛；首次布局、ResizeObserver、BFCache 和 reduced-motion 静态对齐，不排队旧动画。
 
-桌面 PDF 从导出开始发出 `save-dialog` 进度，`elapsedMs` 是包含保存对话框等待的单调累计耗时，不是独立阶段耗时。结果区只生成一个语义表格，由 Chromium 按真实行高分页并在续页重复表头；长评论可拆成受保护的续行，但禁止以估算字符单位预分批并强制换页，否则会留下大块空白。正文末尾说明仅供屏幕报告查看，打印时隐藏，避免被单独推到一张空白尾页；页码页脚仍由 PDF 打印模板负责。默认文件名由 `resultReportFilename` 写入完整 canonical UID/EncryptUin，这是用户明确可见的导出信息；`sanitizeWindowsPdfFilename` 只负责把 Windows 禁止字符/控制字符替换为兼容字符、清理尾部点号/空格、避开设备保留名、将主文件名限制到 180 字符并固定 `.pdf`，不对目标做脱敏。日志、错误和诊断仍不得包含完整目标。选定路径后打开持久进度浮层，持续显示读取、字体、生成、写入阶段与累计耗时，并提供显式取消；`showModal()` 暂不可用时回退到 `show()`，展示接口都失败也不能中断实际导出。终态必须关闭隐藏报告窗口、移除进度监听并恢复导出按钮；选定路径后的阶段全部有界。打包冒烟必须从 renderer 的 `window.ncmDesktop` 穿过 preload/IPC，再完成隐藏 Chromium 加载、字体、打印与原子写入，并验证完整进度序列、目标路径和 `%PDF-` 文件头。
+桌面 PDF 从导出开始发出 `save-dialog` 进度，`elapsedMs` 是包含保存对话框等待的单调累计耗时，不是独立阶段耗时。结果区只生成一个语义表格，由 Chromium 按真实行高分页并在续页重复表头；长评论可拆成受保护的续行，但禁止以估算字符单位预分批并强制换页，否则会留下大块空白。网易云楼中楼命中在行内显示回复类型和父评论 ID，不与顶层评论混成无来源的扁平结果。单曲并行报告的 `coverageLabel` 将顶层时间覆盖和整体完成分开：顶层低于 100% 时只写“任务尚未完整完成”；顶层已到 100% 但整体未完成时才写“楼中楼尚未完成”；只有 root + floor 共同完成才写“顶层时间范围与楼中楼均已完成”。正文末尾说明仅供屏幕报告查看，打印时隐藏，避免被单独推到一张空白尾页；页码页脚仍由 PDF 打印模板负责。默认文件名由 `resultReportFilename` 写入完整 canonical UID/EncryptUin，这是用户明确可见的导出信息；`sanitizeWindowsPdfFilename` 只负责把 Windows 禁止字符/控制字符替换为兼容字符、清理尾部点号/空格、避开设备保留名、将主文件名限制到 180 字符并固定 `.pdf`，不对目标做脱敏。日志、错误和诊断仍不得包含完整目标。选定路径后打开持久进度浮层，持续显示读取、字体、生成、写入阶段与累计耗时，并提供显式取消；`showModal()` 暂不可用时回退到 `show()`，展示接口都失败也不能中断实际导出。终态必须关闭隐藏报告窗口、移除进度监听并恢复导出按钮；选定路径后的阶段全部有界。打包冒烟必须从 renderer 的 `window.ncmDesktop` 穿过 preload/IPC，再完成隐藏 Chromium 加载、字体、打印与原子写入，并验证完整进度序列、目标路径和 `%PDF-` 文件头。
 
 桌面主窗口的系统关闭事件和自绘 Windows 关闭按钮都进入同一关闭生命周期。`electron-main` 只向当前主窗口发送一次窄桥 `close-requested`；renderer 用客户端主题的 `closeAppDialog` 呈现取消、转入后台、安全退出和“记住选择”，再通过严格 DTO 回传决定。只有当前主窗口的在途请求可结算，重复或过时回复无效；renderer 关闭、崩溃或无响应时默认取消关闭。选择退出后弹窗保持可见、禁用重复操作并播报停止任务与保存检查点，随后复用既有最多 45 秒的 graceful-quit；选择后台或取消则立即收敛弹窗。展示层不得调用原生 `showMessageBox` 复制另一套关闭语义，记忆选择也只能 partial update `closeBehavior`，不能覆盖鼠标尾迹设置。
 
@@ -49,8 +49,10 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 ### 并行歌曲活动进度
 
-- 网易云用户来源的歌曲终态仍由 Scanner 的持久化时间覆盖判定，不使用会变化的上游 `totalComments` 作终态真源。每首歌持久保存不可变 `commentEndTime`，可信发行时间可设置底层 `coverageStartTime`，而时间分片和实际扫描下界仍固定到 2000 年。客户端不再把离散时间覆盖当作平滑进度：活动行和单曲并行主进度统一显示 `commentsProcessed / totalComments`；总数未返回时只显示已搜索数与已完成页数。新建、恢复扩容或自适应拆分的显式 cursor 链统一从 `pageNo=2` 开始；自然完成行保留 `已完成`状态，`maxCommentPagesPerSong` 达到上限且仍有未读范围时发出独立 `truncated` 终态，客户端显示已搜索/总数比例但最多 99.99%，不伪装成完整覆盖。
-- 活动表为“评论读取进度”保留 340 px 列宽和至少 300 px 内容宽度，详细的已搜索/总评论数、完成页数、在途分片与最长请求允许自然换行；窄视口使用表格横向滚动，不得用单行省略号隐藏进度语义。
+- 网易云的 `comment_new` 页只含顶层评论，其 `totalComments` 却是顶层 + 楼中楼的上游组合总数。活动行和单曲并行主进度因此显示 `(顶层已搜索 + 回复已搜索) / totalComments`，并将 `pagesProcessed` 标为顶层页、`floorPagesProcessed` 标为楼中楼页；总数未返回时只显示搜索数与两类页数。请求中还必须区分 `comment-page` 与 `comment-floor`，楼中楼显示自己的页码，不冒充顶层分片进度。
+- 调度与终态不由组合总数推断。每首歌的顶层要完成持久化半开时间覆盖，每个 `(songId,parentCommentId)` 楼中楼线程要以自身严格递增 time cursor 走到 `hasMore=false`，两者全部完成才能标记歌曲或 coverage 完成。恢复任务时全局优先排空持久化未完楼中楼，再继续顶层时间分片；用户界面不暴露调度用的时间覆盖伪百分比。若可读取范围已结束但已搜索仍低于上游总数，状态为 `已完成当前可读取范围`，不强制百分比到 100。
+- 新建、恢复扩容或自适应拆分的显式顶层 cursor 链统一从 `pageNo=2` 开始；每个新楼中楼从 `time=-1` 和第 1 页开始。`maxCommentPagesPerSong` 只限制顶层页，达到上限且仍有未读顶层范围时发出独立 `truncated` 终态，客户端比例最多 99.99%；楼中楼不占该上限，只受总逻辑请求上限与取消约束。
+- 活动表为“评论读取进度”保留 340 px 列宽和至少 300 px 内容宽度，详细的已搜索/上游总数、顶层/楼中楼页数、在途分片与最长请求允许自然换行；窄视口使用表格横向滚动，不得用单行省略号隐藏进度语义。
 - 全部时间排行成功而最近一周排行为空或未公开时，周榜只缺少补充标签，不影响完整歌曲目录，不显示任务错误。若整个目录刷新失败但检查点中仍有旧的完整目录，任务可继续，界面只显示“继续使用检查点目录”的中性提示；原始诊断仍保留在状态与日志链路。
 
 ## 歌曲搜索
@@ -70,8 +72,8 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 | 总工作线程上限 | `hostConcurrency` / `maxWorkers` | 整个任务在本机可同时调度的 Worker 硬上限；QQ likes 直接采用该总数并按 `ceil(上限 / 出口数)` 自动派生每出口许可，QQ song 因 SeqNo 依赖固定一条链 |
 | 任务出口上限 | `maxProxyLanes` | `0` 表示使用当前全部已验证独立出口 |
 | 每出口请求启动间隔 | `minDelayMs` | 同一出口相邻远端请求开始的真实最小间隔；两平台都不会因增加 Worker 而缩短它 |
-| 请求上限（0 不限） | `requestBudget` | 当次任务允许的逻辑评论页请求数 |
-| 已读评论 | `commentsInspected` | 实际解析过的评论数，两平台统一，不用页数代替 |
+| 请求上限（0 不限） | `requestBudget` | 网易云串行/并行都按逻辑历史、顶层或楼中楼页各计一次；同一 root 页跨 Lane failover 复用预算与顶层 cap 名额，物理重试、目录和水合不重复扣减 |
+| 已读评论 | `commentsInspected` | 网易云展示顶层 + `replyCommentsInspected`，QQ 保持自身评论数；不用页数代替 |
 
 易混淆的目标、歌曲、出口、Worker、间隔、请求上限和“新建状态”都要有可键盘聚焦的 `?` 说明；不依赖鼠标 hover 才能读取。
 
@@ -80,6 +82,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
 - 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 链按 point 19→1 倒序传播后才更新 head，递增 spring 与递减 friction 的确定性抗共振配对覆盖参考范围，并保留 32 px head-lag 软限幅。对 100 px 半径、持续 240 帧的圆周输入，必须分别扫描 0.18、0.20、0.215、0.265 rad/frame，并验证四条线的全部 20 个点始终处于 160 px 包络内。world-space 宽度/偏移投影后分别受 22 px/26 px 上限约束，峰值 opacity 为 0.76，每帧只有一次上传和 4 次 40 顶点 `TRIANGLE_STRIP` draw。实现不得引入纹理、FBO、随机数、粒子、模糊、后处理或业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，DPR/像素上限不可回归，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
 - 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；真实 CSS reload 后还要在桌面、`1280/821` 与 `820/390` 断点测得提示到右栏为正间距且不增加横向溢出。PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
+- 网易云 root-and-floor 测试必须覆盖：`comment_new` 组合总数但仅顶层行；楼中楼 40 条分页、`time=-1` 起点、严格递增与父评论校验；`replyCount/totalCount` 与 `hasMore` 冲突时只信 `hasMore=false`；按 `(song,parent)` 恢复且全局 floor-first；JSONL sync 完成后才发布命中或推进 cursor/计数/检查点；同一 root 页跨 Lane failover 复用逻辑请求预算和顶层 cap 名额；串行 history/root/floor 预算口径一致；root + 全部 floor 共同终态；顶层/楼中楼页数、当前请求类型、可读范围完成文案、parallel PDF floor-pending 与 PDF 父评论来源。
 - 来源选择测试必须覆盖滑动高亮的几何对齐、听歌排行↔喜欢歌曲快速反向、排行范围的 `aria-hidden`/`inert`、reduced-motion 静态收敛，以及 1280、900、390 px 下无横向溢出与控制台错误。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。

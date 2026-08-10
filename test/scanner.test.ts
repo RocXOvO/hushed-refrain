@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
-import { SourcePrivacyRestricted } from "../src/errors";
+import { CooldownRequired, SourcePrivacyRestricted } from "../src/errors";
 import { runCommentFinder, runPooledCommentFinder } from "../src/scanner";
 import type {
   CommentPage,
@@ -130,6 +130,553 @@ test("merges sources, scans in record order, and de-duplicates hot comments", as
   assert.equal(state.finished, true);
   assert.equal(state.songIndex, 3);
   assert.equal(state.songProgress[0].totalComments, 3);
+});
+
+test("atomically expands comment floors before advancing the root cursor", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-scan-"));
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", name: "nested-song", sources: ["record"] }];
+  client.getLikedSongs = async () => [];
+  client.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 3 }],
+    hasMore: false,
+    total: 4,
+  });
+  const floorTimes: number[] = [];
+  client.getCommentFloor = async (_songId, parentCommentId, _limit, time) => {
+    floorTimes.push(time);
+    return time === -1
+      ? {
+        parentCommentId,
+        comments: [
+          { commentId: "reply-1", parentCommentId, userId: "42", content: "first reply" },
+          { commentId: "reply-2", parentCommentId, userId: "8", content: "other reply" },
+        ],
+        hasMore: true,
+        nextTime: 10,
+        total: 3,
+      }
+      : {
+        parentCommentId,
+        comments: [{ commentId: "reply-3", parentCommentId, userId: "42", content: "last reply" }],
+        hasMore: false,
+        total: 0,
+      };
+  };
+  const config = await options(directory);
+  config.source = "record";
+  const report = await runCommentFinder(client, governor(20), config);
+  assert.equal(report.status, "complete");
+  assert.equal(report.commentsInspected, 4);
+  assert.equal(report.replyCommentsInspected, 3);
+  assert.equal(report.pagesProcessed, 1);
+  assert.equal(report.floorPagesProcessed, 2);
+  assert.deepEqual(floorTimes, [-1, 10]);
+  const records = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(records.map((record) => record.commentId), ["reply-1", "reply-3"]);
+  assert.ok(records.every((record) => record.route === "song-comment-floor" && record.parentCommentId === "root"));
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.version, 4);
+  assert.equal(state.commentScope, "root-and-floor-v1");
+  assert.equal(state.songProgress[0].commentOffset, 1);
+  assert.equal(state.songProgress[0].replyCommentsProcessed, 3);
+  assert.equal(state.songProgress[0].floorPagesProcessed, 2);
+});
+
+test("does not advance a root page when its comment floor is interrupted", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-replay-"));
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getLikedSongs = async () => [];
+  client.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 1 }],
+    hasMore: false,
+    total: 2,
+  });
+  client.getCommentFloor = async () => { throw new Error("floor interrupted"); };
+  const config = await options(directory);
+  config.source = "record";
+  await assert.rejects(runCommentFinder(client, governor(20), config), /floor interrupted/);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songProgress[0].pageInSong, 0);
+  assert.equal(state.songProgress[0].commentOffset, 0);
+  assert.equal(state.floorPagesProcessed, 0);
+});
+
+test("resumes a persisted floor cursor without replaying its first page or duplicating JSONL", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-resume-"));
+  const config = await options(directory);
+  config.source = "record";
+  const floorTimes: number[] = [];
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getLikedSongs = async () => [];
+  let rootStillVisible = true;
+  client.getSongCommentsByCursor = async () => ({
+    comments: rootStillVisible
+      ? [{ commentId: "root", userId: "9", content: "root", replyCount: 2 }]
+      : [{ commentId: "replacement-root", userId: "9", content: "replacement" }],
+    hasMore: false,
+    total: 3,
+  });
+  let interruptSecondPage = true;
+  client.getCommentFloor = async (_songId, parentCommentId, _limit, time) => {
+    floorTimes.push(time);
+    if (time === -1) {
+      return {
+        parentCommentId,
+        comments: [{ commentId: "nested-1", parentCommentId, userId: "42", content: "first" }],
+        hasMore: true,
+        nextTime: 10,
+        total: 2,
+      };
+    }
+    if (interruptSecondPage) {
+      interruptSecondPage = false;
+      throw new Error("second floor page interrupted");
+    }
+    return {
+      parentCommentId,
+      comments: [{ commentId: "nested-2", parentCommentId, userId: "42", content: "second" }],
+      hasMore: false,
+      total: 0,
+    };
+  };
+
+  await assert.rejects(runCommentFinder(client, governor(20), config), /second floor page interrupted/);
+  const paused = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(paused.songProgress[0].pageInSong, 0);
+  assert.equal(paused.songProgress[0].floorThreads[0].nextTime, 10);
+  assert.equal(paused.songProgress[0].floorThreads[0].pagesProcessed, 1);
+
+  rootStillVisible = false;
+  const report = await runCommentFinder(client, governor(20), config);
+  assert.equal(report.status, "complete");
+  assert.deepEqual(floorTimes, [-1, 10, 10]);
+  const records = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(records.map((record) => record.commentId), ["nested-1", "nested-2"]);
+  const completed = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(completed.songProgress[0].floorThreads[0].done, true);
+  assert.equal(completed.songProgress[0].commentOffset, 1);
+  assert.equal(completed.songProgress[0].replyCommentsProcessed, 2);
+});
+
+test("stops after the first matching floor page only after its cursor is durable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-first-match-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.stopAfterFirst = true;
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getLikedSongs = async () => [];
+  client.getSongCommentsByCursor = async () => ({
+    comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 80 }],
+    hasMore: false,
+    total: 81,
+  });
+  const floorTimes: number[] = [];
+  client.getCommentFloor = async (_songId, parentCommentId, _limit, time) => {
+    floorTimes.push(time);
+    return {
+      parentCommentId,
+      comments: [{ commentId: `nested-${time}`, parentCommentId, userId: "42", content: "match" }],
+      hasMore: true,
+      nextTime: time < 0 ? 10 : time + 10,
+      total: 80,
+    };
+  };
+
+  const report = await runCommentFinder(client, governor(20), config);
+  assert.equal(report.status, "paused");
+  assert.deepEqual(floorTimes, [-1]);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songProgress[0].floorThreads[0].nextTime, 10);
+  assert.equal(state.songProgress[0].floorThreads[0].pagesProcessed, 1);
+  assert.equal(state.songProgress[0].floorThreads[0].done, false);
+  assert.equal(state.finished, false);
+});
+
+test("a one-request serial resume advances a pending floor before refreshing or replaying roots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-budget-one-"));
+  const config = await options(directory);
+  config.source = "record";
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getLikedSongs = async () => [];
+  let rootCalls = 0;
+  client.getSongCommentsByCursor = async () => {
+    rootCalls += 1;
+    return {
+      comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 2 }],
+      hasMore: false,
+      total: 3,
+    };
+  };
+  const floorTimes: number[] = [];
+  client.getCommentFloor = async (_songId, parentCommentId, _limit, time) => {
+    floorTimes.push(time);
+    return time === -1
+      ? { parentCommentId, comments: [], hasMore: true, nextTime: 10, total: 2 }
+      : { parentCommentId, comments: [], hasMore: false, total: 0 };
+  };
+
+  assert.equal((await runCommentFinder(client, governor(2), config)).status, "paused");
+  assert.deepEqual(floorTimes, []);
+  assert.equal((await runCommentFinder(client, governor(1), config)).status, "paused");
+  assert.deepEqual(floorTimes, [-1]);
+  const afterFirstFloor = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(afterFirstFloor.songProgress[0].floorThreads[0].nextTime, 10);
+  assert.equal((await runCommentFinder(client, governor(1), config)).status, "paused");
+  assert.deepEqual(floorTimes, [-1, 10]);
+  assert.equal(rootCalls, 1);
+});
+
+test("a one-request pooled resume globally prioritizes a later song's floor before earlier roots", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pooled-floor-budget-one-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  let rootCalls = 0;
+  let catalogExpanded = false;
+  const floorTimes: number[] = [];
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => catalogExpanded
+      ? [{ id: "0", sources: ["record"] }, { id: "1", sources: ["record"] }]
+      : [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async (songId) => {
+      rootCalls += 1;
+      if (songId === "0") return { comments: [], hasMore: false, total: 0 };
+      return {
+        comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 2 }],
+        hasMore: false,
+        total: 3,
+      };
+    },
+    getCommentFloor: async (_songId, parentCommentId, _limit, time) => {
+      floorTimes.push(time);
+      return time === -1
+        ? { parentCommentId, comments: [], hasMore: true, nextTime: 10, total: 2 }
+        : { parentCommentId, comments: [], hasMore: false, total: 0 };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lane = () => ({ name: "lane", client, governor: governor(100) });
+
+  assert.equal((await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1 })).status, "paused");
+  const checkpoint = JSON.parse(await readFile(config.statePath, "utf8"));
+  checkpoint.songProgress[0].rootDone = true;
+  checkpoint.songProgress[0].done = false;
+  checkpoint.finished = false;
+  checkpoint.songs.unshift({ id: "0", sources: ["record"] });
+  checkpoint.songProgress.unshift({
+    commentOffset: 0,
+    pageInSong: 0,
+    commentCursor: String(Date.now()),
+    commentPageNo: 1,
+    commentEndTime: Date.now(),
+    rootDone: false,
+    done: false,
+    floorThreads: [],
+  });
+  catalogExpanded = true;
+  await writeFile(config.statePath, `${JSON.stringify(checkpoint)}\n`, "utf8");
+
+  config.requestBudget = 1;
+  assert.equal((await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1 })).status, "paused");
+  assert.deepEqual(floorTimes, [-1]);
+  assert.equal(rootCalls, 1);
+  assert.equal((await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1 })).status, "paused");
+  assert.deepEqual(floorTimes, [-1, 10]);
+  assert.equal(rootCalls, 1);
+
+  config.requestBudget = 100;
+  const report = await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1 });
+  assert.equal(report.status, "complete");
+  assert.equal(rootCalls, 2);
+});
+
+test("pooled floor-first recovery honors pre-abort and interrupts a pending floor wait", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pooled-floor-abort-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  const calls = { catalog: 0, root: 0, floor: 0 };
+  let floorStarted!: () => void;
+  const floorRequestStarted = new Promise<void>((resolve) => { floorStarted = resolve; });
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => {
+      calls.catalog += 1;
+      return [{ id: "1", sources: ["record"] }];
+    },
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      calls.root += 1;
+      return {
+        comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 1 }],
+        hasMore: false,
+        total: 2,
+      };
+    },
+    getCommentFloor: async () => {
+      calls.floor += 1;
+      floorStarted();
+      return new Promise<never>(() => {});
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lane = () => ({ name: "lane", client, governor: governor(100) });
+
+  assert.equal((await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1 })).status, "paused");
+  assert.deepEqual(calls, { catalog: 1, root: 1, floor: 0 });
+
+  const alreadyAborted = new AbortController();
+  alreadyAborted.abort();
+  assert.equal((await runPooledCommentFinder([lane()], {
+    ...config,
+    workersPerLane: 1,
+    signal: alreadyAborted.signal,
+  })).status, "stopped");
+  assert.deepEqual(calls, { catalog: 1, root: 1, floor: 0 });
+
+  const controller = new AbortController();
+  const running = runPooledCommentFinder([lane()], {
+    ...config,
+    workersPerLane: 1,
+    signal: controller.signal,
+  });
+  await floorRequestStarted;
+  controller.abort();
+  const stopped = await Promise.race([
+    running,
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("floor abort timed out")), 250)),
+  ]);
+  assert.equal(stopped.status, "stopped");
+  assert.deepEqual(calls, { catalog: 1, root: 1, floor: 1 });
+});
+
+test("pooled floor failover spends one logical budget slot and leaves the next slot usable", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pooled-floor-budget-failover-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  let rootCalls = 0;
+  const seedClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      rootCalls += 1;
+      return {
+        comments: [{ commentId: "root", userId: "9", content: "root", replyCount: 2 }],
+        hasMore: false,
+        total: 3,
+      };
+    },
+    getCommentFloor: async () => { throw new Error("seed floor must remain budget-blocked"); },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  assert.equal((await runPooledCommentFinder([{
+    name: "seed",
+    client: seedClient,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 1 })).status, "paused");
+
+  const healthyTimes: number[] = [];
+  const baseClient = (floor: NcmClient["getCommentFloor"]): NcmClient => ({
+    ...seedClient,
+    getCommentFloor: floor,
+  });
+  const cooldownClient = baseClient(async () => { throw new CooldownRequired(429, 60_000); });
+  const healthyClient = baseClient(async (_songId, parentCommentId, _limit, time) => {
+    healthyTimes.push(time);
+    return time === -1
+      ? { parentCommentId, comments: [], hasMore: true, nextTime: 10, total: 2 }
+      : { parentCommentId, comments: [], hasMore: false, total: 0 };
+  });
+  config.requestBudget = 2;
+  const report = await runPooledCommentFinder([
+    { name: "cooldown", client: cooldownClient, governor: governor(100) },
+    { name: "healthy", client: healthyClient, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, maxWorkers: 2 });
+
+  assert.equal(report.status, "paused");
+  assert.deepEqual(healthyTimes, [-1, 10]);
+  assert.equal(rootCalls, 1);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.songProgress[0].floorThreads[0].done, true);
+  assert.equal(state.songProgress[0].rootDone, false);
+});
+
+test("pooled root failover reuses one logical page reservation and page-cap slot", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pooled-root-budget-failover-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  config.maxCommentPagesPerSong = 1;
+  let failedCalls = 0;
+  let healthyCalls = 0;
+  const baseClient = (): NcmClient => ({
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  });
+  const failedClient: NcmClient = {
+    ...baseClient(),
+    getSongCommentsByCursor: async () => {
+      failedCalls += 1;
+      throw new Error("lane failed");
+    },
+  };
+  const healthyClient: NcmClient = {
+    ...baseClient(),
+    getSongCommentsByCursor: async () => {
+      healthyCalls += 1;
+      return { comments: [], hasMore: false, total: 0 };
+    },
+  };
+
+  const report = await runPooledCommentFinder([
+    { name: "failed", client: failedClient, governor: governor(100) },
+    { name: "healthy", client: healthyClient, governor: governor(100) },
+  ], { ...config, workersPerLane: 1, maxWorkers: 1 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(failedCalls, 1);
+  assert.equal(healthyCalls, 1);
+  assert.equal(report.pagesProcessed, 1);
+});
+
+test("serial request budget counts logical comment pages instead of catalog and retry attempts", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-serial-logical-budget-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  let rootAttempts = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      rootAttempts += 1;
+      if (rootAttempts === 1) throw new Error("retry me");
+      return { comments: [], hasMore: false, total: 0 };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const retryingGovernor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 1,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 0,
+  });
+
+  const report = await runCommentFinder(client, retryingGovernor, config);
+
+  assert.equal(report.status, "complete");
+  assert.equal(rootAttempts, 2);
+  assert.equal(report.pagesProcessed, 1);
+});
+
+test("pooled stop-after-first persists a root match before floors and restarts with zero network", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-pooled-root-first-match-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.stopAfterFirst = true;
+  const calls = { catalog: 0, root: 0, floor: 0 };
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => {
+      calls.catalog += 1;
+      return [{ id: "1", sources: ["record"] }];
+    },
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => {
+      calls.root += 1;
+      return {
+        comments: [{ commentId: "target-root", userId: "42", content: "match", replyCount: 9_999 }],
+        hasMore: false,
+        total: 10_000,
+      };
+    },
+    getCommentFloor: async (_songId, parentCommentId) => {
+      calls.floor += 1;
+      return { parentCommentId, comments: [], hasMore: false, total: 9_999 };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lane = () => ({ name: "lane", client, governor: governor(100) });
+
+  const first = await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1, requestBudget: 100 });
+  assert.equal(first.status, "paused");
+  assert.deepEqual(calls, { catalog: 1, root: 1, floor: 0 });
+  const second = await runPooledCommentFinder([lane()], { ...config, workersPerLane: 1, requestBudget: 100 });
+  assert.equal(second.status, "paused");
+  assert.deepEqual(calls, { catalog: 1, root: 1, floor: 0 });
+});
+
+test("upgrades a root-only v3 checkpoint by rescanning from the song's own end time", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-v3-upgrade-"));
+  const config = await options(directory);
+  config.source = "record";
+  const client = new FakeClient();
+  client.getUserRecord = async () => [{ id: "1", sources: ["record"] }];
+  client.getLikedSongs = async () => [];
+  let includeFloor = false;
+  const requestedCursors: string[] = [];
+  client.getSongCommentsByCursor = async (_songId, _pageSize, _pageNo, cursor) => {
+    requestedCursors.push(cursor);
+    return {
+      comments: [{
+        commentId: "root",
+        userId: "9",
+        content: "root",
+        replyCount: includeFloor ? 1 : 0,
+      }],
+      hasMore: false,
+      total: includeFloor ? 2 : 1,
+    };
+  };
+  client.getCommentFloor = async (_songId, parentCommentId) => ({
+    parentCommentId,
+    comments: [{ commentId: "legacy-nested", parentCommentId, userId: "42", content: "nested" }],
+    hasMore: false,
+    total: 1,
+  });
+
+  await runCommentFinder(client, governor(20), config);
+  const legacy = JSON.parse(await readFile(config.statePath, "utf8"));
+  const songEndTime = 1_900_000_000_000;
+  legacy.version = 3;
+  delete legacy.commentScope;
+  delete legacy.floorPagesProcessed;
+  delete legacy.replyCommentsInspected;
+  legacy.songProgress[0].commentEndTime = songEndTime;
+  delete legacy.songProgress[0].floorPagesProcessed;
+  delete legacy.songProgress[0].replyCommentsProcessed;
+  delete legacy.songProgress[0].floorThreads;
+  await writeFile(config.statePath, `${JSON.stringify(legacy)}\n`, "utf8");
+
+  includeFloor = true;
+  const report = await runCommentFinder(client, governor(20), config);
+  assert.equal(report.status, "complete");
+  assert.equal(requestedCursors.at(-1), String(songEndTime));
+  assert.equal(report.replyCommentsInspected, 1);
+  const records = (await readFile(config.outputPath, "utf8")).trim().split(/\r?\n/).map((line) => JSON.parse(line));
+  assert.deepEqual(records.map((record) => record.commentId), ["legacy-nested"]);
+  const upgraded = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(upgraded.version, 4);
+  assert.equal(upgraded.songProgress[0].floorThreads[0].done, true);
 });
 
 test("combines all-time and weekly ranks with likes and user playlists without rescanning duplicate songs", async () => {
@@ -1181,7 +1728,7 @@ test("a resumed source scan expands existing shards to the new transport capacit
     governor: governor(100),
   }));
 
-  const paused = await runPooledCommentFinder(lanes(3), { ...config, workersPerLane: 1, requestBudget: 2 });
+  const paused = await runPooledCommentFinder(lanes(3), { ...config, workersPerLane: 1, requestBudget: 1 });
   assert.equal(paused.status, "paused");
   const pausedState = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(pausedState.songProgress[0].commentShards.length, 3);
@@ -1230,7 +1777,7 @@ test("a legacy explicit-cursor shard resumes with non-first-page semantics witho
   assert.equal(paused.status, "paused");
   const legacy = JSON.parse(await readFile(config.statePath, "utf8"));
   const unfinished = legacy.songProgress[0].commentShards.filter((shard: { done: boolean }) => !shard.done);
-  assert.equal(unfinished.length, 2);
+  assert.equal(unfinished.length, 1);
   for (const shard of unfinished) shard.pageNo = 1;
   await writeFile(config.statePath, `${JSON.stringify(legacy)}\n`, "utf8");
 
@@ -1383,7 +1930,7 @@ test("a serial source scan resumes unfinished one-song shards without restarting
   };
   const lanes = () => ["a", "b", "c"].map((name) => ({ name, client, governor: governor(100) }));
 
-  const paused = await runPooledCommentFinder(lanes(), { ...config, workersPerLane: 1, requestBudget: 3 });
+  const paused = await runPooledCommentFinder(lanes(), { ...config, workersPerLane: 1, requestBudget: 2 });
   assert.equal(paused.status, "paused");
   const afterPause = JSON.parse(await readFile(config.statePath, "utf8"));
   const completedShards = afterPause.songProgress[0].commentShards.filter((shard: { done: boolean }) => shard.done);
@@ -1459,7 +2006,7 @@ test("pooled source scan checkpoints capped songs before pausing on budget", asy
   const report = await runPooledCommentFinder([
     { name: "lane-a", client: makeClient(), governor: governor(100) },
     { name: "lane-b", client: makeClient(), governor: governor(100) },
-  ], { ...config, workersPerLane: 1, requestBudget: 3 });
+  ], { ...config, workersPerLane: 1, requestBudget: 2 });
 
   assert.equal(report.status, "paused");
   assert.equal(report.pagesProcessed, 2);

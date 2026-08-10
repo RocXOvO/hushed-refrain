@@ -14,6 +14,7 @@ import {
   migrateLegacyWeekSourceState,
   NcmSongSearchRouter,
   normalizeResumeTaskForClient,
+  parallelCoverageLabel,
   probeNeteaseIdentityDirect,
   probeNeteaseIdentityThroughLanes,
   probeUser,
@@ -29,6 +30,12 @@ import type {
   QQMusicScanOptions,
   QQMusicScanReport,
 } from "../src/qq-music/types";
+
+test("parallel PDF coverage distinguishes finished root time from pending floors", () => {
+  assert.equal(parallelCoverageLabel(100, false), "顶层时间范围 100.0%，楼中楼尚未完成");
+  assert.equal(parallelCoverageLabel(42.345, false), "顶层时间范围 42.3%，任务尚未完整完成");
+  assert.equal(parallelCoverageLabel(100, true), "顶层时间范围与楼中楼均已完成");
+});
 
 test("NetEase song-search router rotates verified pool exits", async () => {
   const entries = ["lane-a", "lane-b"].map((name, index) => ({
@@ -638,19 +645,19 @@ test("aborting an HTTP QQ song search releases the lookup lease for the next que
   });
 });
 
-test("uses target-v3 per-source checkpoints with one canonical UID result and coverage ledger", () => {
+test("uses root-and-floor checkpoints with reusable target-v3 results and isolated v4 coverage", () => {
   const record = sourceTaskPaths("/data", "42", "record");
-  assert.match(record.statePath, /web-state-42-record-target-v3\.json$/);
+  assert.match(record.statePath, /web-state-42-record-target-v4\.json$/);
   assert.match(record.outputPath, /web-comments-42-target-v3\.jsonl$/);
-  assert.match(record.coveragePath, /web-song-coverage-42-target-v3\.json$/);
+  assert.match(record.coveragePath, /web-song-coverage-42-target-v4\.json$/);
   const likes = sourceTaskPaths("/data", "42", "likes");
   const both = sourceTaskPaths("/data", "42", "both");
   const playlists = sourceTaskPaths("/data", "42", "playlists");
   const allRanges = sourceTaskPaths("/data", "42", "record", "both");
-  assert.match(likes.statePath, /web-state-42-likes-target-v3\.json$/);
-  assert.match(both.statePath, /web-state-42-both-target-v3\.json$/);
-  assert.match(playlists.statePath, /web-state-42-playlists-target-v3\.json$/);
-  assert.match(allRanges.statePath, /web-state-42-record-record-both-target-v3\.json$/);
+  assert.match(likes.statePath, /web-state-42-likes-target-v4\.json$/);
+  assert.match(both.statePath, /web-state-42-both-target-v4\.json$/);
+  assert.match(playlists.statePath, /web-state-42-playlists-target-v4\.json$/);
+  assert.match(allRanges.statePath, /web-state-42-record-record-both-target-v4\.json$/);
   assert.equal(likes.outputPath, record.outputPath);
   assert.equal(both.outputPath, record.outputPath);
   assert.equal(likes.coveragePath, record.coveragePath);
@@ -798,7 +805,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /styles\.css\?v=65/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=77/);
+  assert.match(pageText, /app\.js\?v=78/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);
@@ -936,6 +943,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(serverSource, /commentProgressPercent\(\s*activity\.commentsProcessed,\s*activity\.totalComments/);
   assert.match(serverSource, /progressBasis: "comments"/);
   assert.match(appText, /song\.truncated \? "达到页数上限"/);
+  assert.match(appText, /已完成当前可读取范围/);
+  assert.match(appText, /楼中楼/);
   assert.match(appText, /classList\.toggle\("is-complete", song\.done && !song\.truncated\)/);
   assert.match(appText, /classList\.toggle\("is-truncated", song\.truncated\)/);
   assert.match(appText, /refreshActiveSongRequestAges/);
@@ -948,7 +957,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.doesNotMatch(appText, /`已读 \$\{fmt\(comments\)\} 条 · 时间覆盖/);
   assert.match(appText, /达到每首最大页数，未覆盖全部评论/);
   assert.match(appText, /measuredPercent = total !== undefined && total > 0 \? comments \/ total \* 100 : undefined/);
-  assert.match(appText, /Math\.min\(song\.truncated \? 99\.99 : 100, rawPercent\)/);
+  assert.match(appText, /Math\.min\(song\.truncated \|\| !song\.done \? 99\.99 : 100, rawPercent\)/);
   assert.match(appText, /topologyCapacityNote/);
   assert.match(appText, /工作线程活跃/);
   assert.match(appText, /formatRate\(job\.commentsPerSecond\)/);

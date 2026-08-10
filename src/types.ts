@@ -48,6 +48,10 @@ export interface CommentRecord {
   content: string;
   time?: number;
   likedCount?: number;
+  /** Declared replies for a top-level comment. */
+  replyCount?: number;
+  /** Root comment whose floor thread produced this reply. */
+  parentCommentId?: string;
 }
 
 export interface CommentPage {
@@ -61,6 +65,14 @@ export interface CursorCommentPage {
   comments: CommentRecord[];
   hasMore: boolean;
   nextCursor?: string;
+  total?: number;
+}
+
+export interface CommentFloorPage {
+  parentCommentId: string;
+  comments: CommentRecord[];
+  hasMore: boolean;
+  nextTime?: number;
   total?: number;
 }
 
@@ -144,6 +156,12 @@ export interface NcmClient {
     pageNo: number,
     cursor: string,
   ): Promise<CursorCommentPage>;
+  getCommentFloor?(
+    songId: string,
+    parentCommentId: string,
+    limit: number,
+    time: number,
+  ): Promise<CommentFloorPage>;
   getSongInfo(songId: string): Promise<SongInfo>;
   getUserCommentHistory(
     uid: string,
@@ -163,8 +181,18 @@ export interface CommentTimeShard {
   done: boolean;
 }
 
+export interface CommentFloorProgress {
+  parentCommentId: string;
+  nextTime: number;
+  pageNo: number;
+  pagesProcessed: number;
+  repliesProcessed: number;
+  declaredReplies?: number;
+  done: boolean;
+}
+
 export interface ParallelSongScanState {
-  version: 1;
+  version: 2;
   kind: "parallel-song";
   uid: string;
   songId: string;
@@ -175,7 +203,11 @@ export interface ParallelSongScanState {
   pageSize: number;
   shards: CommentTimeShard[];
   pagesProcessed: number;
+  floorPagesProcessed: number;
   commentsInspected: number;
+  replyCommentsInspected: number;
+  floorThreads: CommentFloorProgress[];
+  rootDone?: boolean;
   totalComments?: number;
   requestCount: number;
   matchCount: number;
@@ -213,8 +245,11 @@ export interface ParallelCheckpointActivity {
   shards: number;
   shardsComplete: number;
   coveragePercent: number;
+  coverageComplete: boolean;
   pagesProcessed: number;
+  floorPagesProcessed: number;
   commentsInspected: number;
+  replyCommentsInspected: number;
   totalComments?: number;
   matches: number;
   requestsTotal: number;
@@ -232,7 +267,9 @@ export interface ScanCheckpointActivity {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  floorPagesProcessed: number;
   commentsInspected: number;
+  replyCommentsInspected: number;
   coverageComplete: boolean;
   sourceErrors: string[];
   blockedUntil?: string;
@@ -247,8 +284,11 @@ export interface ParallelSongScanReport {
   workers: number;
   shards: number;
   shardsComplete: number;
+  coverageComplete: boolean;
   pagesProcessed: number;
+  floorPagesProcessed: number;
   commentsInspected: number;
+  replyCommentsInspected: number;
   totalComments?: number;
   matches: number;
   requestsThisRun: number;
@@ -266,7 +306,7 @@ export interface FoundComment extends CommentRecord {
   sources?: SongSource[];
   sourceRank?: number;
   playCount?: number;
-  route: "song-comments" | "user-history";
+  route: "song-comments" | "song-comment-floor" | "user-history";
   capturedAt: string;
   commentUrl?: string;
 }
@@ -275,6 +315,11 @@ export interface SongScanProgress {
   commentOffset: number;
   totalComments?: number;
   pageInSong: number;
+  floorPagesProcessed?: number;
+  replyCommentsProcessed?: number;
+  floorThreads?: CommentFloorProgress[];
+  /** Root cursor/ranges ended; the song is only done after every floor thread ends. */
+  rootDone?: boolean;
   /** Immutable upper time bound for this song's current scan generation. */
   commentEndTime?: number;
   /** Immutable lower bound for display coverage; scanning still reaches the global safety bound. */
@@ -286,8 +331,9 @@ export interface SongScanProgress {
 }
 
 export interface ScanState {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   commentPagination?: "cursor-v1";
+  commentScope?: "root-and-floor-v1";
   commentPageSize?: number;
   uid: string;
   strategy: "scan" | "history";
@@ -312,6 +358,8 @@ export interface ScanState {
   matchCount: number;
   requestCount: number;
   pagesProcessed?: number;
+  floorPagesProcessed?: number;
+  replyCommentsInspected?: number;
   truncatedSongIds: string[];
   blockedUntil?: string;
   finished: boolean;
@@ -331,6 +379,8 @@ export interface ScanOptions {
   coveragePath?: string;
   commentPageSize: number;
   historyPageSize: number;
+  /** Logical comment/history/floor pages allowed in this invocation; 0 is unlimited. */
+  requestBudget?: number;
   maxCommentPagesPerSong: number;
   maxSongs: number;
   stopAfterFirst: boolean;
@@ -350,6 +400,8 @@ export interface SongScanActivity {
   songName?: string;
   workerId?: string;
   pageInSong: number;
+  floorPagesProcessed?: number;
+  replyCommentsProcessed?: number;
   requestingPage?: number;
   commentsProcessed: number;
   totalComments?: number;
@@ -363,11 +415,12 @@ export interface ScanRequestActivity {
   startedAt?: string;
   lane: string;
   workerId?: string;
-  operation: "comment-page";
+  operation: "comment-page" | "comment-floor";
   songId: string;
   songName?: string;
   page: number;
   shardId?: number;
+  parentCommentId?: string;
   elapsedMs?: number;
   networkElapsedMs?: number;
   attempts?: number;
@@ -408,6 +461,8 @@ export interface RunReport {
   lanes?: number;
   workers?: number;
   pagesProcessed?: number;
+  floorPagesProcessed?: number;
+  replyCommentsInspected?: number;
   commentsInspected: number;
   coverageComplete: boolean;
   sourceErrors: string[];

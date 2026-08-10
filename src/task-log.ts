@@ -9,11 +9,12 @@ export interface PageRequestActivity {
   startedAt?: string;
   lane: string;
   workerId?: string;
-  operation: "comment-page";
+  operation: "comment-page" | "comment-floor";
   songId: string;
   songName?: string;
   page: number;
   shardId?: number;
+  parentCommentId?: string;
   elapsedMs?: number;
   networkElapsedMs?: number;
   attempts?: number;
@@ -76,7 +77,9 @@ export class TaskLogger {
   }
 
   request(activity: PageRequestActivity): void {
-    const suffix = activity.shardId === undefined
+    const suffix = activity.operation === "comment-floor"
+      ? `评论 ${activity.parentCommentId ?? "未知"} 的楼中楼第 ${activity.page} 页`
+      : activity.shardId === undefined
       ? `第 ${activity.page} 页`
       : `分片 ${activity.shardId} 第 ${activity.page} 页`;
     if (activity.phase === "start") {

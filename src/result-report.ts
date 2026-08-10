@@ -19,6 +19,7 @@ interface ResultReportBase<Comment> {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  floorPagesProcessed?: number;
   commentsInspected: number;
   coverageLabel: string;
   exportedAt: string;
@@ -97,7 +98,7 @@ export function renderResultReportHtml(report: ResultReport): string {
       <div><span>目标范围</span><strong>${escapeHtml(targetLabel)}</strong></div>
       <div><span>任务状态</span><strong>${escapeHtml(statusLabel(report.status))}</strong></div>
       <div><span>覆盖进度</span><strong>${escapeHtml(report.coverageLabel)}</strong></div>
-      <div><span>已读评论</span><strong>${formatNumber(report.commentsInspected)}</strong></div>
+      <div><span>已读评论 · 顶层/楼中楼页</span><strong>${formatNumber(report.commentsInspected)} · ${formatNumber(report.pagesProcessed)} / ${formatNumber(report.floorPagesProcessed ?? 0)} 页</strong></div>
       <div><span>累计请求</span><strong>${formatNumber(report.requestsTotal)}</strong></div>
       <div><span>任务耗时</span><strong>${formatDuration(report.elapsedMs)}</strong></div>
       <div class="accent"><span>文件累计结果</span><strong>${formatNumber(report.comments.length)} 条</strong></div>
@@ -124,7 +125,8 @@ export function renderResultReportHtml(report: ResultReport): string {
 function neteaseCommentRows(comment: FoundComment, index: number): PrintableRow[] {
   const song = comment.songName || comment.resourceName || (comment.songId ? `歌曲 ${comment.songId}` : "未知歌曲");
   const songId = comment.songId ? `<small>ID ${escapeHtml(comment.songId)}</small>` : "";
-  const user = comment.nickname ? `<small>${escapeHtml(comment.nickname)} · UID ${escapeHtml(comment.userId)}</small>` : `<small>UID ${escapeHtml(comment.userId)}</small>`;
+  const provenance = comment.parentCommentId ? ` · 楼中楼回复（父评论 ${escapeHtml(comment.parentCommentId)}）` : "";
+  const user = comment.nickname ? `<small>${escapeHtml(comment.nickname)} · UID ${escapeHtml(comment.userId)}${provenance}</small>` : `<small>UID ${escapeHtml(comment.userId)}${provenance}</small>`;
   const url = neteaseCommentUrl(comment.songId, comment.commentId);
   const link = url ? `<a href="${escapeHtml(url)}">查看</a>` : "-";
   const [commentDate, commentClock] = formatCommentTime(comment.time).split(" ");

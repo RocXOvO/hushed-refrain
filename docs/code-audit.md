@@ -1,20 +1,19 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.8`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（549/549）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实浏览器已验证评论数量进度、保留的歌曲终态行与宽屏/390×844 下的活动表格内部滚动，无新增文档横向溢出，console warning/error 为零；既有 Follow 尾迹、会话开关与快速 N→Q→N 边界保持不变。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前已发布线为 `v1.1.8`，其基线是 549/549 测试与全部交付门禁通过。package/lock 已进入未发布的 `v1.1.9` 候选，最终代码已复验 `npm run check`、`npm test`（576/576，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。较早的本地浏览器验收已覆盖默认尺寸、900×640 与 390×844 的用户来源顶层页上限/楼中楼文案，无横向溢出，console warning/error 为零。候选仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产；Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测。未发现新的 P0。
 
 ## 未修复的 P1
 
-1. **网易云结果与检查点的耐久提交顺序。** `src/results.ts` 仍以 `appendFile()` 逐条追加，不做 `fsync()`，也没有 QQ writer 的损坏尾行隔离与锁存持久化错误语义。source/parallel 可能在命中结果耐久落盘前推进统计、cursor 和强制 checkpoint；断电、写失败或无换行坏尾可能让状态领先结果。修复必须让 NetEase writer 具备完整 write loop + sync + 尾行修复，并让页面状态只在全部命中耐久写入后提交。
-2. **同一逻辑任务缺少跨进程生命周期 lease。** Electron 已使用 `app.requestSingleInstanceLock()`，第二次桌面启动会唤回现有窗口；这一部分已修复。但 `TaskCoordinator` 仍只在单进程内互斥，CLI、Web 与不同桌面进程仍可对同一 canonical state/output root 并发写入。修复应增加按逻辑目标、状态和结果所有权派生的跨进程任务 lease，并覆盖正常完成、取消、崩溃回收，以及 `record/likes/playlists/both/all` 共享 canonical 输出。
-3. **QQ 实时结果暴露完整 EncryptUin。** `web/app.js` 仍在实时结果行直接渲染 `authorEncryptUin`。这与解析实验、工具栏和 PDF 的安全展示边界不一致。REST 初始结果、SSE、新旧平台切换和结算恢复都应只向可见 DOM 提供安全标签或掩码；完整 token 不得进入截图或录屏。此项是隐私边界，不是当前速度诉求。
-4. **Web 控制台的可信本机边界没有被全局强制。** CLI 仍允许任意 `--host`；只有报告和少数 QQ 工具路由检查 loopback remote，HTTP 面没有统一校验 Host、Origin/Sec-Fetch、JSON Content-Type 或 CSRF。绑定局域网/公网后，任务、日志、登录和代理池能力可能被其他主机或跨站请求触发。修复应强制 loopback，或设计显式远程模式及完整认证/Host/Origin/CSRF 边界。
+1. **同一逻辑任务缺少跨进程生命周期 lease。** Electron 已使用 `app.requestSingleInstanceLock()`，第二次桌面启动会唤回现有窗口；这一部分已修复。但 `TaskCoordinator` 仍只在单进程内互斥，CLI、Web 与不同桌面进程仍可对同一 canonical state/output root 并发写入。修复应增加按逻辑目标、状态和结果所有权派生的跨进程任务 lease，并覆盖正常完成、取消、崩溃回收，以及 `record/likes/playlists/both/all` 共享 canonical 输出。
+2. **QQ 实时结果暴露完整 EncryptUin。** `web/app.js` 仍在实时结果行直接渲染 `authorEncryptUin`。这与解析实验、工具栏和 PDF 的安全展示边界不一致。REST 初始结果、SSE、新旧平台切换和结算恢复都应只向可见 DOM 提供安全标签或掩码；完整 token 不得进入截图或录屏。此项是隐私边界，不是当前速度诉求。
+3. **Web 控制台的可信本机边界没有被全局强制。** CLI 仍允许任意 `--host`；只有报告和少数 QQ 工具路由检查 loopback remote，HTTP 面没有统一校验 Host、Origin/Sec-Fetch、JSON Content-Type 或 CSRF。绑定局域网/公网后，任务、日志、登录和代理池能力可能被其他主机或跨站请求触发。修复应强制 loopback，或设计显式远程模式及完整认证/Host/Origin/CSRF 边界。
 
 ## 未修复的 P2 与门禁缺口
 
 - `body()` 只负责大小与 JSON 解析，部分对象型 POST 没有继续经过 `jsonObject()`；`null`、数组或字符串可能落入非预期 500。所有对象型路由应统一要求 plain object，并把错误稳定映射为 400。
 - Electron 主窗口仍把任意 popup/外部导航目标交给 `shell.openExternal()`。应通过纯策略函数只允许必要的 HTTPS 官方域名，拒绝 `file:`、自定义 scheme、userinfo、异常端口和非 allowlist host。
 - `src/qq-music/proxy-fetch.ts` 的 `collectResponse()` 在 schema 解析前无响应字节上限；超限时应停止聚合并销毁请求/流。
-- `desktop.log` 与任务 JSONL 日志无轮转或保留上限；长期运行可能无界占用磁盘。Unix CLI/共享目录下的 NetEase JSONL 和任务日志也缺少显式私有文件权限。
+- `desktop.log` 与任务 JSONL 日志无轮转或保留上限；长期运行可能无界占用磁盘。Unix CLI/共享目录下的任务日志仍缺少显式私有文件权限；NetEase 结果 JSONL 已单独使用 `0600`。
 - `tsconfig.json` 只检查 `src/**/*.ts`，测试由 `tsx` 转译执行但没有 strict test typecheck。应增加 `tsconfig.test.json` / `npm run check:test` 并纳入交付门禁。
 - Windows 包没有 Authenticode 配置，可能触发 SmartScreen。README 与发行说明必须如实描述；`latest.yml` 的 SHA-512 只用于更新完整性，不是代码签名。
 
@@ -33,14 +32,18 @@
 - 使用代理池或显式代理的正式扫描保持 fail-closed；普通用户/歌曲/身份辅助查询固定走有界本机直连。
 - 原子 JSON 使用唯一临时名、`fsync`、Windows rename 有界退避和完整临时文件恢复；coverage、resume、代理池和 PDF 目标各自已有跨进程锁。
 - NetEase 多来源会按 songId 合并并保留 `memberships`；普通歌单只接受显式匹配目标 UID 的创建者证据。旧 weekly 路径迁移在共享锁内建立并验证 scoped 状态后才删除冲突旧文件，身份冲突时不删除。
+- NetEase 正式评论范围是 `root-and-floor-v1`：`comment_new` 只交付顶层行但组合 total 包含回复；`comment_floor` 每页 40，从 `time=-1` 开始严格递增，只有 `hasMore=false` 完成。source state/coverage 为 v4，canonical result 保持 target-v3，parallel state 为 v2；恢复优先排空持久楼层，且顶层时间覆盖与全部楼层完成才能提交歌曲/coverage 完成。
+- NetEase 结果 writer 已使用长生命周期 `0600` append handle、完整 write loop 与每记录 `sync`；缺换行/损坏尾片段保留原文并先持久补换行，repair write/sync 失败立即关闭句柄，正常 write/sync 错误锁存。只有 sync 成功才取得去重所有权、调用 `onAppend` 并允许 cursor/计数/checkpoint 推进；`close()` 拒绝新 append，但先排空已接受 append，serial、pooled 与 parallel 所有退出都等待关闭。
+- NetEase 请求预算已统一为逻辑 history/root/floor 页。pooled source 与 parallel 的同一 root 页跨 Lane failover 复用预算与顶层 cap 保留；串行 Scanner 也按逻辑页扣减，目录、水合与物理 retry 不重复计数。
+- Parallel PDF 将顶层时间覆盖与整体完成分离：顶层低于 100% 时只写“任务尚未完整完成”，顶层 100% 但 floor pending 时才明示“楼中楼尚未完成”，只有 root + floor 共同完成才写完成。
 - QQ result writer 已按逻辑评论页执行单次 `appendBatch` write + sync，并具备坏尾隔离、持久化错误锁存和 JSONL 领先状态时的恢复对账；song 与 likes 都使用 400 ms/4 脏页有界 checkpoint，等待策略分别守住串行最多四页重放与 likes checkpoint 槽位。
 - QQ lookup/search 元数据只在精确匹配 requestedSongId 时由 Manager 缓存传入，Scanner 不再发可选元数据请求。HTTPS CONNECT 取消按逻辑 request token 隔离，不会销毁同 Lane 的其他健康隧道。
 - PDF packaged smoke 已覆盖 renderer → preload → IPC → 隐藏 Chromium → 原子写盘并校验完整阶段序列；进度 `elapsedMs` 是包含保存对话框的单调累计耗时，不是独立阶段耗时。
 - 四个 viewKey、generation-bound QQ results/SSE/log/report、活动行上限、更新前 acquisition barrier 和 WebGL 异常清理已有现有测试证据。
 
-## 修复后的最低回归矩阵
+## 当前最低回归矩阵
 
-- NetEase 耐久性：损坏尾行、write/sync 失败、慢写与 checkpoint timer 竞争、source/parallel 精确 cursor/shard 恢复。
+- NetEase 耐久性：损坏尾行、write/sync 失败、慢写与 checkpoint timer 竞争，source/parallel 顶层 cursor/shard 与 `(song,parent)` 楼层 cursor 精确恢复，以及 result-before-state 提交顺序。
 - 跨进程任务：同任务第二进程拒绝、不同任务允许、取消/崩溃释放、共享 output 所有权和全部用户来源组合协调。
 - QQ 隐私：使用合成 EncryptUin sentinel 覆盖 REST、SSE、平台切换、结算和报告，断言完整值不进入可见 DOM、日志或文件名。
 - HTTP/Electron：loopback、Host、Origin、Content-Type、CSRF 正反例；所有对象型 POST 的非对象 400；外链 scheme/host allowlist；QQ 大响应上限。

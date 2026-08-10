@@ -14,6 +14,7 @@ function report(): ResultReport {
     matches: 1,
     requestsTotal: 9,
     pagesProcessed: 3,
+    floorPagesProcessed: 2,
     commentsInspected: 2_345,
     coverageLabel: "2 / 100 首歌曲",
     exportedAt: "2026-08-07T12:01:02.000Z",
@@ -70,7 +71,7 @@ test("renders a printable Chinese report while escaping all scanned content", ()
   assert.match(html, /UID 9000000001 评论检索报告/);
   assert.match(html, /name="result-report-uid" content="9000000001"/);
   assert.match(html, /文件累计 1 · 检查点统计 1/);
-  assert.match(html, /已读评论<\/span><strong>2,345/);
+  assert.match(html, /已读评论 · 顶层\/楼中楼页<\/span><strong>2,345 · 3 \/ 2 页/);
   assert.match(html, /中文评论 &amp; 换行/);
   assert.match(html, /测试歌曲 &lt;危险&gt;/);
   assert.match(html, /&lt;script&gt;alert\(&quot;x&quot;\)&lt;\/script&gt;/);
@@ -90,6 +91,15 @@ test("splits an unusually long comment into printable continuation rows without 
     .map((match) => match[1])
     .join("");
   assert.equal(printableContent, "长".repeat(600));
+});
+
+test("labels a NetEase floor match with its parent comment provenance", () => {
+  const value = report();
+  value.comments[0].route = "song-comment-floor";
+  value.comments[0].parentCommentId = "root-123";
+  const html = renderResultReportHtml(value);
+  assert.match(html, /楼中楼回复（父评论 root-123）/);
+  assert.match(html, /music\.163\.com\/#\/song\?id=123456&amp;commentId=987654/);
 });
 
 test("lets Chromium paginate one continuous result table from measured row heights", () => {
@@ -117,7 +127,7 @@ test("renders QQ reports with generation metadata and rebuilds only trusted QQ M
   assert.match(html, /name="result-report-target-kind" content="encryptUin"/);
   assert.match(html, /name="result-report-target" content="opaque-user_1234"/);
   assert.match(html, /公开喜欢/);
-  assert.match(html, /已读评论<\/span><strong>75/);
+  assert.match(html, /已读评论 · 顶层\/楼中楼页<\/span><strong>75 · 3 \/ 0 页/);
   assert.match(html, /opaq\*\*\*\*1234/);
   assert.match(html, /测试 QQ 歌曲 &lt;危险&gt;/);
   assert.match(html, /https:\/\/y\.qq\.com\/n\/ryqq\/songDetail\/102065756/);

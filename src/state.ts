@@ -2,9 +2,13 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { readAtomicJson, removeAtomicFile, writeAtomicJson } from "./atomic-file";
+import { commentFloorsComplete, normalizeCommentFloorThreads } from "./comment-floor";
 import type { ScanOptions, ScanState } from "./types";
 
 export const SOURCE_CATALOG_VERSION = 3;
+export const SOURCE_STATE_VERSION = 4;
+export const SOURCE_RESULT_VERSION = 3;
+export const SOURCE_COVERAGE_VERSION = 4;
 
 export function createState(
   options: ScanOptions,
@@ -12,8 +16,9 @@ export function createState(
 ): ScanState {
   const now = new Date().toISOString();
   return {
-    version: 3,
+    version: 4,
     commentPagination: "cursor-v1",
+    commentScope: "root-and-floor-v1",
     commentPageSize: options.commentPageSize,
     uid: options.uid,
     strategy,
@@ -38,6 +43,8 @@ export function createState(
     matchCount: 0,
     requestCount: 0,
     pagesProcessed: 0,
+    floorPagesProcessed: 0,
+    replyCommentsInspected: 0,
     truncatedSongIds: [],
     finished: false,
     coverageComplete: false,
@@ -49,8 +56,10 @@ export function createState(
 export async function loadState(path: string): Promise<ScanState | undefined> {
   return readAtomicJson(path, (value) => {
     const parsed = value as ScanState;
-    if (parsed.version !== 1 && parsed.version !== 2 && parsed.version !== 3) throw new Error(`Unsupported state version: ${parsed.version}`);
-    parsed.version = 3;
+    if (![1, 2, 3, 4].includes(parsed.version)) throw new Error(`Unsupported state version: ${parsed.version}`);
+    const needsFloorRescan = parsed.version < 4 && parsed.strategy === "scan";
+    parsed.version = 4;
+    parsed.commentScope = "root-and-floor-v1";
     parsed.strategyResolved ??= true;
     parsed.sourcesLoaded ??= parsed.songs.length > 0 || parsed.sourceSongCount > 0 || parsed.finished;
     parsed.sourceErrors ??= [];
@@ -63,6 +72,11 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
       done: index < parsed.songIndex || parsed.finished,
     }));
     for (const progress of parsed.songProgress) {
+      progress.floorThreads = normalizeCommentFloorThreads(progress.floorThreads);
+      progress.rootDone ??= progress.done;
+      progress.done = Boolean(progress.rootDone) && commentFloorsComplete(progress.floorThreads);
+      progress.floorPagesProcessed ??= progress.floorThreads.reduce((total, thread) => total + thread.pagesProcessed, 0);
+      progress.replyCommentsProcessed ??= progress.floorThreads.reduce((total, thread) => total + thread.repliesProcessed, 0);
       for (const shard of progress.commentShards ?? []) {
         if (!Number.isInteger(shard.pageNo) || shard.pageNo < 2) shard.pageNo = 2;
       }
@@ -82,6 +96,41 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
       }
     }
     parsed.pagesProcessed ??= parsed.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
+    parsed.floorPagesProcessed ??= parsed.songProgress.reduce((total, progress) => total + (progress.floorPagesProcessed ?? 0), 0);
+    parsed.replyCommentsInspected ??= parsed.songProgress.reduce((total, progress) => total + (progress.replyCommentsProcessed ?? 0), 0);
+    if (parsed.strategy === "scan") {
+      parsed.finished = parsed.songProgress.every((progress) =>
+        progress.done && commentFloorsComplete(progress.floorThreads)
+      );
+      parsed.coverageComplete &&= parsed.finished;
+    }
+    if (needsFloorRescan) {
+      for (const progress of parsed.songProgress) {
+        const rescanEndTime = Number.isInteger(progress.commentEndTime)
+          ? progress.commentEndTime!
+          : Date.parse(parsed.createdAt);
+        progress.commentOffset = 0;
+        progress.totalComments = undefined;
+        progress.pageInSong = 0;
+        progress.floorPagesProcessed = 0;
+        progress.replyCommentsProcessed = 0;
+        progress.commentCursor = String(Number.isInteger(rescanEndTime) ? rescanEndTime : Date.now());
+        progress.commentPageNo = 1;
+        progress.commentShards = undefined;
+        progress.floorThreads = [];
+        progress.rootDone = false;
+        progress.done = false;
+      }
+      parsed.songIndex = 0;
+      parsed.commentOffset = 0;
+      parsed.pageInSong = 0;
+      parsed.pagesProcessed = 0;
+      parsed.floorPagesProcessed = 0;
+      parsed.replyCommentsInspected = 0;
+      parsed.truncatedSongIds = [];
+      parsed.finished = false;
+      parsed.coverageComplete = false;
+    }
     return parsed;
   });
 }

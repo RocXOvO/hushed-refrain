@@ -523,7 +523,7 @@ test("task startup capsule advances phases and settles without an elapsed-time s
   assert.equal(appSource.includes("taskStartupElapsed"), false);
 });
 
-test("completed time-sharded songs remain visibly complete while the client uses comment counts", () => {
+test("completed songs distinguish the accessible range when the upstream total remains larger", () => {
   const classes = new Set<string>();
   const entry = {
     badge: {
@@ -557,7 +557,7 @@ test("completed time-sharded songs remain visibly complete while the client uses
   };
 
   api.updateActiveSongRow(entry, song);
-  assert.equal(entry.badge.textContent, "已完成");
+  assert.equal(entry.badge.textContent, "已完成可读范围");
   assert.equal(classes.has("is-complete"), true);
   assert.equal(classes.has("is-waiting"), false);
   assert.equal(rendered, song);
@@ -667,6 +667,33 @@ test("client progress prefers searched comments over an internal time-coverage p
   assert.match(entry.progressLabel.textContent, /已搜索 1000 \/ 10000 条评论/);
   assert.doesNotMatch(entry.progressLabel.textContent, /时间覆盖/);
   assert.equal(entry.progressFill.style.width, "10%");
+});
+
+test("active progress identifies a comment-floor request separately from root pages", () => {
+  const entry = {
+    progressLabel: { textContent: "" },
+    progressTrack: { classList: { toggle() {} } },
+    progressFill: { style: { width: "" } },
+    progress: { setAttribute() {} },
+  };
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return String(value); },
+    duration(value: number) { return `${value}s`; },
+    Date,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("renderSongReadProgress")}
+    globalThis.api = { renderSongReadProgress };
+  `, context);
+
+  (context.api as { renderSongReadProgress(song: unknown, entry: unknown): void }).renderSongReadProgress({
+    workers: 1,
+    requestingPage: 7,
+    requestingOperation: "comment-floor",
+    commentsProcessed: 120,
+  }, entry);
+  assert.match(entry.progressLabel.textContent, /正在请求楼中楼第 7 页/);
 });
 
 test("retained catalog refresh failures render as a continuation notice instead of a raw task error", () => {

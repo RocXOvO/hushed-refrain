@@ -68,7 +68,14 @@ import {
 } from "./parallel-scanner";
 import { runPooledCommentFinder, type SourceScanLane } from "./scanner";
 import { renderResultReportHtml, type ResultReport } from "./result-report";
-import { loadState, migrateLegacyWeekState, SOURCE_CATALOG_VERSION } from "./state";
+import {
+  loadState,
+  migrateLegacyWeekState,
+  SOURCE_CATALOG_VERSION,
+  SOURCE_COVERAGE_VERSION,
+  SOURCE_RESULT_VERSION,
+  SOURCE_STATE_VERSION,
+} from "./state";
 import { taskElapsedMs, TaskCoordinator, type TaskAcquisitionBlock } from "./task-coordinator";
 import { readTaskLog, TaskLogger } from "./task-log";
 import type {
@@ -153,7 +160,10 @@ interface ActiveSongSnapshot {
   minDelayMs?: number;
   jitterMs?: number;
   pagesProcessed?: number;
+  floorPagesProcessed?: number;
+  replyCommentsProcessed?: number;
   requestingPage?: number;
+  requestingOperation?: ScanRequestActivity["operation"];
   requestStartedAt?: number;
   commentsProcessed?: number;
   totalComments?: number;
@@ -190,7 +200,9 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   matches: number;
   requestsTotal: number;
   pagesProcessed: number;
+  floorPagesProcessed: number;
   commentsInspected: number;
+  replyCommentsInspected: number;
   commentsPerSecond: number;
   elapsedMs: number;
   logPath?: string;
@@ -240,8 +252,11 @@ interface ParallelJobSnapshot extends PagePerformanceSnapshot {
   shards: number;
   shardsComplete: number;
   coveragePercent: number;
+  coverageComplete: boolean;
   pagesProcessed: number;
+  floorPagesProcessed: number;
   commentsInspected: number;
+  replyCommentsInspected: number;
   totalComments?: number;
   matches: number;
   requestsTotal: number;
@@ -606,7 +621,7 @@ class JobManager {
   private outputPath?: string;
   private terminalStateSyncedId?: string;
   private abortController?: AbortController;
-  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage?: number; requestStartedAt?: number; active: boolean }>();
+  private readonly activeSongByWorker = new Map<string, { id: string; name?: string; requestingPage?: number; requestingOperation?: ScanRequestActivity["operation"]; requestStartedAt?: number; active: boolean }>();
   private readonly activeSongProgress = new Map<string, Omit<ActiveSongSnapshot, "id" | "workers" | "requestingPage" | "requestStartedAt">>();
   private readonly songNameById = new Map<string, string>();
   private readonly matchSubscribers = new Set<MatchSubscriber>();
@@ -760,6 +775,8 @@ class JobManager {
         this.activeSongProgress.set(activity.songId, {
           name: activity.songName ?? this.songNameById.get(activity.songId),
           pagesProcessed: activity.pageInSong,
+          floorPagesProcessed: activity.floorPagesProcessed,
+          replyCommentsProcessed: activity.replyCommentsProcessed,
           commentsProcessed: activity.commentsProcessed,
           totalComments: activity.totalComments,
           progressPercent,
@@ -856,7 +873,9 @@ class JobManager {
           historicalCompletedSongs: report.historicalCompletedSongs, newPendingSongs: report.newPendingSongs,
           requestsTotal: report.requestsTotal, coverageComplete: report.coverageComplete,
           pagesProcessed: report.pagesProcessed ?? 0, lanes: report.lanes ?? this.snapshotValue.lanes,
+          floorPagesProcessed: report.floorPagesProcessed ?? 0,
           commentsInspected: report.commentsInspected,
+          replyCommentsInspected: report.replyCommentsInspected ?? 0,
           workers: report.workers ?? this.snapshotValue.workers,
           commentsPerSecond: 0,
           proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
@@ -871,6 +890,7 @@ class JobManager {
           matches: report.matches,
           requestsTotal: report.requestsTotal,
           pagesProcessed: report.pagesProcessed ?? 0,
+          floorPagesProcessed: report.floorPagesProcessed ?? 0,
           catalogSongs: report.catalogSongs,
           historicalCompletedSongs: report.historicalCompletedSongs,
           reusedSongs: report.reusedSongs,
@@ -928,12 +948,14 @@ class JobManager {
         const progress = state.songProgress ?? [];
         const currentIndex = progress.length > 0 ? progress.findIndex((item) => !item.done) : state.songIndex;
         const current = currentIndex < 0 ? undefined : state.songs[currentIndex];
+        const currentProgress = currentIndex < 0 ? undefined : progress[currentIndex];
         const inferredCurrent = current ? {
           id: current.id,
           name: current.name,
-          pageInSong: (progress[currentIndex]?.pageInSong ?? state.pageInSong) + 1,
-          commentsProcessed: progress[currentIndex]?.commentOffset ?? state.commentOffset,
-          totalComments: progress[currentIndex]?.totalComments,
+          pageInSong: (currentProgress?.pageInSong ?? state.pageInSong) + 1,
+          commentsProcessed: (currentProgress?.commentOffset ?? state.commentOffset)
+            + (currentProgress?.replyCommentsProcessed ?? 0),
+          totalComments: currentProgress?.totalComments,
         } : undefined;
         const activeCurrent = ["running", "stopping"].includes(this.snapshotValue.status)
           ? this.snapshotValue.currentSong
@@ -946,13 +968,17 @@ class JobManager {
           reusedSongs: state.reusedSongs ?? 0,
           historicalCompletedSongs: state.historicalCompletedSongs ?? 0,
           newPendingSongs: state.newPendingSongs ?? 0,
-          commentOffset: currentIndex < 0 ? 0 : progress[currentIndex]?.commentOffset ?? state.commentOffset,
+          commentOffset: currentIndex < 0 ? 0 : (currentProgress?.commentOffset ?? state.commentOffset)
+            + (currentProgress?.replyCommentsProcessed ?? 0),
           currentSong: activeCurrent ?? inferredCurrent,
           matches: state.matchCount, requestsTotal: state.requestCount,
           pagesProcessed: state.pagesProcessed ?? 0,
+          floorPagesProcessed: state.floorPagesProcessed ?? 0,
           commentsInspected: state.strategy === "history"
             ? state.commentOffset
-            : state.songProgress?.reduce((total, progress) => total + progress.commentOffset, 0) ?? state.commentOffset,
+            : state.songProgress?.reduce((total, item) =>
+              total + item.commentOffset + (item.replyCommentsProcessed ?? 0), 0) ?? state.commentOffset,
+          replyCommentsInspected: state.replyCommentsInspected ?? 0,
           coverageComplete: state.coverageComplete, sourceErrors: state.sourceErrors,
           blockedUntil: state.blockedUntil,
         };
@@ -1025,6 +1051,7 @@ class JobManager {
       matches: snapshot.matches,
       requestsTotal: snapshot.requestsTotal,
       pagesProcessed: snapshot.pagesProcessed,
+      floorPagesProcessed: snapshot.floorPagesProcessed,
       commentsInspected: snapshot.commentsInspected,
       coverageLabel: snapshot.catalogLoaded
         ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲；`
@@ -1060,6 +1087,7 @@ class JobManager {
         id: activity.songId,
         name: activity.songName,
         requestingPage: activity.page,
+        requestingOperation: activity.operation,
         requestStartedAt: requestStartedAt(activity.startedAt),
         active: true,
       });
@@ -1068,6 +1096,7 @@ class JobManager {
       if (scheduled?.id === activity.songId) {
         scheduled.active = false;
         scheduled.requestingPage = undefined;
+        scheduled.requestingOperation = undefined;
         scheduled.requestStartedAt = undefined;
       }
     }
@@ -1083,7 +1112,10 @@ class JobManager {
         existing.workers += active.active ? 1 : 0;
         existing.name ??= active.name;
         if (active.requestingPage !== undefined) {
-          existing.requestingPage = Math.min(existing.requestingPage ?? active.requestingPage, active.requestingPage);
+          if (existing.requestingPage === undefined || active.requestingPage < existing.requestingPage) {
+            existing.requestingPage = active.requestingPage;
+            existing.requestingOperation = active.requestingOperation;
+          }
         }
         if (active.requestStartedAt !== undefined) {
           existing.requestStartedAt = Math.min(existing.requestStartedAt ?? active.requestStartedAt, active.requestStartedAt);
@@ -1095,6 +1127,7 @@ class JobManager {
           workers: active.active ? 1 : 0,
           ...this.activeSongProgress.get(active.id),
           requestingPage: active.requestingPage,
+          requestingOperation: active.requestingOperation,
           requestStartedAt: active.requestStartedAt,
         });
       }
@@ -1196,7 +1229,7 @@ class ParallelJobManager {
       }),
     }));
     const song = await executeProxyRequest(this.lanes[0], `song_detail:${songId}`, () => this.lanes[0].client.getSongInfo(songId));
-    const previousPath = join(this.paths.data, `parallel-state-${uid}-${songId}.json`);
+    const previousPath = join(this.paths.data, `parallel-state-${uid}-${songId}-v2.json`);
     const previous = bool(input.fresh) ? undefined : await loadParallelState(previousPath);
     this.statePath = previousPath;
     this.outputPath = join(this.paths.data, `parallel-comments-${uid}-${songId}.jsonl`);
@@ -1301,7 +1334,9 @@ class ParallelJobManager {
         matches: report.matches,
         requestsTotal: report.requestsTotal,
         pagesProcessed: report.pagesProcessed,
+        floorPagesProcessed: report.floorPagesProcessed,
         commentsInspected: report.commentsInspected,
+        replyCommentsInspected: report.replyCommentsInspected,
         shardsComplete: report.shardsComplete,
         note: report.note,
       });
@@ -1354,7 +1389,10 @@ class ParallelJobManager {
           ...this.snapshotValue, shards: state.shards.length,
           shardsComplete: state.shards.filter((item) => item.done).length,
           coveragePercent: timeCoveragePercent(state.startTime, state.endTime, state.shards),
-          pagesProcessed: state.pagesProcessed, commentsInspected: state.commentsInspected,
+          coverageComplete: state.finished,
+          pagesProcessed: state.pagesProcessed, commentsInspected: state.commentsInspected + state.replyCommentsInspected,
+          floorPagesProcessed: state.floorPagesProcessed,
+          replyCommentsInspected: state.replyCommentsInspected,
           totalComments: state.totalComments,
           matches: state.matchCount, requestsTotal: state.requestCount,
         };
@@ -1429,8 +1467,9 @@ class ParallelJobManager {
       matches: snapshot.matches,
       requestsTotal: snapshot.requestsTotal,
       pagesProcessed: snapshot.pagesProcessed,
+      floorPagesProcessed: snapshot.floorPagesProcessed,
       commentsInspected: snapshot.commentsInspected,
-      coverageLabel: `${Math.max(0, Math.min(100, snapshot.coveragePercent)).toFixed(1)}% 时间范围`,
+      coverageLabel: parallelCoverageLabel(snapshot.coveragePercent, snapshot.coverageComplete),
       exportedAt: new Date().toISOString(),
       comments: comments.reverse(),
     };
@@ -2537,13 +2576,19 @@ function commentProgressPercent(
   done = false,
   truncated = false,
 ): number | undefined {
-  if (done && !truncated) return 100;
   if (!Number.isFinite(totalComments) || totalComments! <= 0) return undefined;
   const ratio = Math.max(0, commentsProcessed) / Math.max(commentsProcessed, totalComments!) * 100;
-  return Math.min(truncated ? 99.99 : 100, ratio);
+  return Math.min(truncated || !done ? 99.99 : 100, ratio);
 }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
-function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, coverageComplete: false, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+
+export function parallelCoverageLabel(coveragePercent: number, coverageComplete: boolean): string {
+  const percent = Math.max(0, Math.min(100, coveragePercent)).toFixed(1);
+  if (coverageComplete) return "顶层时间范围与楼中楼均已完成";
+  if (Number(percent) >= 100) return "顶层时间范围 100.0%，楼中楼尚未完成";
+  return `顶层时间范围 ${percent}%，任务尚未完整完成`;
+}
 function busyTaskMessage(coordinator: TaskCoordinator): string {
   if (coordinator.activeMode() === "pool") return "代理池正在构建或验证，请稍后再启动检索。";
   return coordinator.activeMode() === "parallel"
@@ -2619,13 +2664,12 @@ export function sourceTaskPaths(
   source: SourceSelection,
   recordScope: RecordScope = "all",
 ): { statePath: string; outputPath: string; coveragePath: string } {
-  const suffix = `target-v${SOURCE_CATALOG_VERSION}`;
   const includesRecord = source === "record" || source === "both" || source === "all";
   const stateSource = includesRecord && recordScope !== "all" ? `${source}-record-${recordScope}` : source;
   return {
-    statePath: join(dataRoot, `web-state-${uid}-${stateSource}-${suffix}.json`),
-    outputPath: join(dataRoot, `web-comments-${uid}-${suffix}.jsonl`),
-    coveragePath: join(dataRoot, `web-song-coverage-${uid}-${suffix}.json`),
+    statePath: join(dataRoot, `web-state-${uid}-${stateSource}-target-v${SOURCE_STATE_VERSION}.json`),
+    outputPath: join(dataRoot, `web-comments-${uid}-target-v${SOURCE_RESULT_VERSION}.jsonl`),
+    coveragePath: join(dataRoot, `web-song-coverage-${uid}-target-v${SOURCE_COVERAGE_VERSION}.json`),
   };
 }
 

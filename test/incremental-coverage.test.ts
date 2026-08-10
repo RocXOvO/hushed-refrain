@@ -284,7 +284,7 @@ test("a pooled song with unfinished shards is not entered into cross-source cove
     ...options,
     workersPerLane: 2,
     maxWorkers: 2,
-    requestBudget: 2,
+    requestBudget: 1,
   });
 
   assert.equal(report.status, "paused");

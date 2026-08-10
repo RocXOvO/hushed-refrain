@@ -683,6 +683,8 @@ test("uses comment_new time cursors without a login cookie", async () => {
             user: { userId: 42, nickname: "target" },
             content: "live comment",
             time: 1_700_000_000_000,
+            replyCount: 0,
+            showFloorComment: { replyCount: 3 },
           }],
           cursor: "1699999999999",
           hasMore: true,
@@ -702,10 +704,102 @@ test("uses comment_new time cursors without a login cookie", async () => {
     assert.equal(captured?.cookie, undefined);
     assert.equal(captured?.proxy, "http://127.0.0.1:7897/");
     assert.equal(page.comments[0].userId, "42");
+    assert.equal(page.comments[0].replyCount, 3);
     assert.equal(page.nextCursor, "1699999999999");
     assert.equal(page.total, 123);
   } finally {
     mutable.comment_new = original;
+  }
+});
+
+test("reads a complete comment floor with an ascending time cursor and parent provenance", async () => {
+  const mutable = upstream as unknown as {
+    comment_floor: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_floor;
+  const calls: Record<string, unknown>[] = [];
+  mutable.comment_floor = async (params) => {
+    calls.push(params);
+    return {
+      status: 200,
+      body: {
+        code: 200,
+        data: {
+          ownerComment: { commentId: "root-1" },
+          comments: [{ commentId: "reply-1", user: { userId: 42 }, content: "nested", time: 11 }],
+          hasMore: true,
+          time: 11,
+          totalCount: 3,
+        },
+      },
+    };
+  };
+  try {
+    const page = await new EnhancedNcmClient().getCommentFloor("186016", "root-1", 40, -1);
+    assert.equal(calls[0].type, 0);
+    assert.equal(calls[0].parentCommentId, "root-1");
+    assert.equal(calls[0].time, -1);
+    assert.equal(page.comments[0].parentCommentId, "root-1");
+    assert.equal(page.nextTime, 11);
+    assert.equal(page.total, 3);
+  } finally {
+    mutable.comment_floor = original;
+  }
+});
+
+test("rejects a malformed or non-advancing comment floor", async () => {
+  const mutable = upstream as unknown as {
+    comment_floor: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_floor;
+  try {
+    mutable.comment_floor = async () => ({
+      status: 200,
+      body: { code: 200, data: { ownerComment: { commentId: "other" }, comments: [], hasMore: false } },
+    });
+    await assert.rejects(
+      new EnhancedNcmClient().getCommentFloor("186016", "root-1", 40, -1),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+    );
+    mutable.comment_floor = async () => ({
+      status: 200,
+      body: {
+        code: 200,
+        data: {
+          comments: [{ commentId: "reply", user: { userId: 42 }, content: "x" }],
+          hasMore: true,
+          time: 10,
+        },
+      },
+    });
+    await assert.rejects(
+      new EnhancedNcmClient().getCommentFloor("186016", "root-1", 40, 10),
+      (error: unknown) => error instanceof ApiResponseError && error.status === 502,
+    );
+  } finally {
+    mutable.comment_floor = original;
+  }
+});
+
+test("accepts an empty floor page when its continuation cursor still advances", async () => {
+  const mutable = upstream as unknown as {
+    comment_floor: (params: Record<string, unknown>) => Promise<unknown>;
+  };
+  const original = mutable.comment_floor;
+  mutable.comment_floor = async () => ({
+    status: 200,
+    body: {
+      code: 200,
+      data: { comments: [], hasMore: true, time: 11, totalCount: 2 },
+    },
+  });
+  try {
+    const page = await new EnhancedNcmClient().getCommentFloor("186016", "root-1", 40, -1);
+    assert.equal(page.comments.length, 0);
+    assert.equal(page.hasMore, true);
+    assert.equal(page.nextTime, 11);
+  } finally {
+    mutable.comment_floor = original;
   }
 });
 
