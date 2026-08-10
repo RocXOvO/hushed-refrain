@@ -112,17 +112,29 @@ export class EnhancedNcmClient implements NcmClient {
     scope: "all" | "week",
     cookie?: string,
   ): Promise<SongCandidate[]> {
-    const body = await invoke("user_record", () =>
-      api.user_record({
-        uid,
-        type: scope === "week" ? 1 : 0,
-        ...this.requestConfig(cookie),
-      }),
-    );
+    let body: JsonObject;
+    try {
+      body = await invoke("user_record", () =>
+        api.user_record({
+          uid,
+          type: scope === "week" ? 1 : 0,
+          ...this.requestConfig(cookie),
+        }),
+      );
+    } catch (error) {
+      const response = error instanceof ApiResponseError ? object(error.body) : {};
+      if (error instanceof ApiResponseError && error.status === -2 && text(response.msg) === "无权限访问") {
+        throw new SourcePrivacyRestricted(
+          `目标用户未公开${scope === "week" ? "最近一周" : "全部时间"}听歌排行`,
+        );
+      }
+      throw error;
+    }
     const entries = array(body[scope === "week" ? "weekData" : "allData"]);
     return entries.flatMap((raw, index) => {
       const entry = object(raw);
       const song = object(entry.song);
+      const album = object(song.al ?? song.album);
       const id = stringId(song.id);
       if (!id) return [];
       const artists = array(song.ar ?? song.artists)
@@ -132,6 +144,7 @@ export class EnhancedNcmClient implements NcmClient {
         id,
         name: text(song.name),
         artists,
+        publishTime: numberOrUndefined(album.publishTime ?? song.publishTime),
         sources: [scope === "week" ? "record-week" as const : "record" as const],
         sourceRank: index + 1,
         playCount: numberOrUndefined(entry.playCount),

@@ -750,10 +750,11 @@ class JobManager {
       onSchedulerActivity: (activity) => logger.scheduler(activity),
       onSongProgress: (activity) => {
         if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
-        const progressPercent = activity.truncated ? undefined : activity.coveragePercent ?? (
-          activity.totalComments && activity.totalComments > 0
-            ? Math.min(100, activity.commentsProcessed / activity.totalComments * 100)
-            : undefined
+        const progressPercent = commentProgressPercent(
+          activity.commentsProcessed,
+          activity.totalComments,
+          activity.done,
+          activity.truncated,
         );
         this.activeSongProgress.delete(activity.songId);
         this.activeSongProgress.set(activity.songId, {
@@ -762,7 +763,7 @@ class JobManager {
           commentsProcessed: activity.commentsProcessed,
           totalComments: activity.totalComments,
           progressPercent,
-          progressBasis: activity.coveragePercent === undefined && !activity.truncated ? "comments" : "time",
+          progressBasis: "comments",
           done: activity.done,
           truncated: activity.truncated,
         });
@@ -1374,8 +1375,13 @@ class ParallelJobManager {
         pagesProcessed: this.snapshotValue.pagesProcessed,
         commentsProcessed: this.snapshotValue.commentsInspected,
         totalComments: this.snapshotValue.totalComments,
-        progressPercent: this.snapshotValue.coveragePercent,
-        progressBasis: "time",
+        progressPercent: commentProgressPercent(
+          this.snapshotValue.commentsInspected,
+          this.snapshotValue.totalComments,
+          this.snapshotValue.status === "complete",
+          false,
+        ),
+        progressBasis: "comments",
       })),
     };
   }
@@ -2524,6 +2530,17 @@ function message(error: unknown): string { return error instanceof Error ? error
 function requestStartedAt(value: string | undefined): number {
   const parsed = typeof value === "string" ? Date.parse(value) : Number.NaN;
   return Number.isFinite(parsed) ? parsed : Date.now();
+}
+function commentProgressPercent(
+  commentsProcessed: number,
+  totalComments: number | undefined,
+  done = false,
+  truncated = false,
+): number | undefined {
+  if (done && !truncated) return 100;
+  if (!Number.isFinite(totalComments) || totalComments! <= 0) return undefined;
+  const ratio = Math.max(0, commentsProcessed) / Math.max(commentsProcessed, totalComments!) * 100;
+  return Math.min(truncated ? 99.99 : 100, ratio);
 }
 function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, commentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, pagesProcessed: 0, commentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }

@@ -14,6 +14,8 @@ export interface SongCandidate {
   id: string;
   name?: string;
   artists?: string[];
+  /** Trusted release timestamp used only to make displayed time coverage proportional. */
+  publishTime?: number;
   sources: SongSource[];
   sourceRank?: number;
   playCount?: number;
@@ -275,6 +277,8 @@ export interface SongScanProgress {
   pageInSong: number;
   /** Immutable upper time bound for this song's current scan generation. */
   commentEndTime?: number;
+  /** Immutable lower bound for display coverage; scanning still reaches the global safety bound. */
+  coverageStartTime?: number;
   commentCursor?: string;
   commentPageNo?: number;
   commentShards?: CommentTimeShard[];

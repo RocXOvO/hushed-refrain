@@ -523,7 +523,7 @@ test("task startup capsule advances phases and settles without an elapsed-time s
   assert.equal(appSource.includes("taskStartupElapsed"), false);
 });
 
-test("completed time-sharded songs remain visibly complete instead of disappearing at a live total ratio", () => {
+test("completed time-sharded songs remain visibly complete while the client uses comment counts", () => {
   const classes = new Set<string>();
   const entry = {
     badge: {
@@ -553,7 +553,7 @@ test("completed time-sharded songs remain visibly complete instead of disappeari
     commentsProcessed: 9_000,
     totalComments: 10_000,
     progressPercent: 100,
-    progressBasis: "time",
+    progressBasis: "comments",
   };
 
   api.updateActiveSongRow(entry, song);
@@ -592,7 +592,7 @@ test("page-capped songs are labelled truncated instead of falsely complete", () 
     truncated: true,
     commentsProcessed: 5_000,
     totalComments: 10_000,
-    progressBasis: "time",
+    progressBasis: "comments",
   };
 
   (context.api as { updateActiveSongRow(entry: unknown, song: unknown): void }).updateActiveSongRow(entry, song);
@@ -603,7 +603,7 @@ test("page-capped songs are labelled truncated instead of falsely complete", () 
   assert.equal(rendered, song);
 });
 
-test("a truncated song never paints a full progress bar from a stale comment total", () => {
+test("a truncated song shows the searched-total ratio without claiming full coverage", () => {
   let unknown = false;
   let ariaLabel = "";
   const entry = {
@@ -628,14 +628,62 @@ test("a truncated song never paints a full progress bar from a stale comment tot
     commentsProcessed: 5_000,
     totalComments: 5_000,
     pagesProcessed: 5,
-    progressBasis: "time",
+    progressBasis: "comments",
   };
 
   (context.api as { renderSongReadProgress(song: unknown, entry: unknown): void }).renderSongReadProgress(song, entry);
+  assert.match(entry.progressLabel.textContent, /已搜索 5000 \/ 5000 条评论/);
   assert.match(entry.progressLabel.textContent, /达到每首最大页数，未覆盖全部评论/);
   assert.equal(ariaLabel, entry.progressLabel.textContent);
-  assert.equal(entry.progressFill.style.width, "0%");
-  assert.equal(unknown, true);
+  assert.equal(entry.progressFill.style.width, "99.99%");
+  assert.equal(unknown, false);
+});
+
+test("client progress prefers searched comments over an internal time-coverage percentage", () => {
+  const entry = {
+    progressLabel: { textContent: "" },
+    progressTrack: { classList: { toggle() {} } },
+    progressFill: { style: { width: "" } },
+    progress: { setAttribute() {} },
+  };
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return String(value); },
+    duration(value: number) { return `${value}s`; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("renderSongReadProgress")}
+    globalThis.api = { renderSongReadProgress };
+  `, context);
+
+  (context.api as { renderSongReadProgress(song: unknown, entry: unknown): void }).renderSongReadProgress({
+    workers: 0,
+    commentsProcessed: 1_000,
+    totalComments: 10_000,
+    pagesProcessed: 1,
+    progressPercent: 0.15,
+    progressBasis: "time",
+  }, entry);
+  assert.match(entry.progressLabel.textContent, /已搜索 1000 \/ 10000 条评论/);
+  assert.doesNotMatch(entry.progressLabel.textContent, /时间覆盖/);
+  assert.equal(entry.progressFill.style.width, "10%");
+});
+
+test("retained catalog refresh failures render as a continuation notice instead of a raw task error", () => {
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return Number(value).toLocaleString("zh-CN"); },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("sourceErrorNotices")}
+    globalThis.api = { sourceErrorNotices };
+  `, context);
+  const notices = (context.api as { sourceErrorNotices(job: unknown): string[] }).sourceErrorNotices({
+    songs: 489,
+    catalogSongs: 489,
+    sourceErrors: ["record: 目录刷新失败，已保留上次完整目录（All selected listening-rank ranges failed）"],
+  });
+  assert.deepEqual(Array.from(notices), ["听歌目录本轮暂时无法刷新，已继续使用检查点中的 489 首歌曲"]);
 });
 
 test("task completion waits for the startup capsule to leave before opening settlement", () => {

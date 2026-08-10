@@ -30,6 +30,7 @@ export async function hydrateMissingSongMetadata(
       for (const song of candidates) {
         song.name = detail.name;
         if (detail.artists?.length) song.artists = [...detail.artists];
+        if (Number.isFinite(detail.publishTime)) song.publishTime = detail.publishTime;
         hydrated += 1;
       }
       missingSongsById.delete(detail.id);

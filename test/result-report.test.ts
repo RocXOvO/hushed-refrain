@@ -92,6 +92,23 @@ test("splits an unusually long comment into printable continuation rows without 
   assert.equal(printableContent, "长".repeat(600));
 });
 
+test("lets Chromium paginate one continuous result table from measured row heights", () => {
+  const value = report();
+  value.comments = Array.from({ length: 20 }, (_, index) => ({
+    ...value.comments[0],
+    commentId: String(10_000 + index),
+    content: index % 4 === 0 ? `第 ${index + 1} 条较长评论 `.repeat(8) : `第 ${index + 1} 条评论`,
+  }));
+  const html = renderResultReportHtml(value);
+  assert.equal((html.match(/<table>/g) ?? []).length, 1);
+  assert.equal((html.match(/<thead>/g) ?? []).length, 1);
+  assert.doesNotMatch(html, /continued-table/);
+  assert.doesNotMatch(html, /break-before:\s*page|page-break-before:\s*always/);
+  assert.match(html, /thead \{ display: table-header-group; \}/);
+  assert.match(html, /tr \{ break-inside: avoid; page-break-inside: avoid; \}/);
+  assert.match(html, /footer \{ display: none; \}/);
+});
+
 test("renders QQ reports with generation metadata and rebuilds only trusted QQ Music links", () => {
   const html = renderResultReportHtml(qqReport());
   assert.match(html, /QQ 音乐评论检索报告/);

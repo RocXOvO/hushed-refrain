@@ -1019,12 +1019,12 @@ th:nth-child(5) { width: 58px; }
 .activity-counters strong { color: var(--accent); font-size: 1.12rem; font-variant-numeric: tabular-nums; }
 .activity-counters small { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .activity-table-wrap { min-height: 300px; max-height: min(58vh, 680px); margin-top: 9px; }
-.activity-table { min-width: 760px; }
-.activity-table th:nth-child(1) { width: 92px; }
+.activity-table { min-width: 960px; }
+.activity-table th:nth-child(1) { width: 96px; }
 .activity-table th:nth-child(2) { width: auto; }
-.activity-table th:nth-child(3) { width: 150px; }
-.activity-table th:nth-child(4) { width: 230px; }
-.activity-table th:nth-child(5) { width: 116px; }
+.activity-table th:nth-child(3) { width: 142px; }
+.activity-table th:nth-child(4) { width: 340px; }
+.activity-table th:nth-child(5) { width: 120px; }
 .activity-status { width: fit-content; padding: 2px 6px; display: inline-flex; align-items: center; gap: 5px; color: #096746; background: var(--success-soft); border-radius: 4px; font-size: .61rem; font-weight: 750; }
 .activity-status::before { content: ""; width: 6px; height: 6px; background: var(--success); border-radius: 50%; }
 .activity-status.is-waiting { color: var(--muted); background: var(--surface-raised); }
@@ -1034,8 +1034,8 @@ th:nth-child(5) { width: 58px; }
 .activity-status.is-truncated { color: #8a4b08; background: #fff4df; }
 .activity-status.is-truncated::before { background: #c77713; }
 .activity-worker-count { color: var(--ink); font-weight: 750; font-variant-numeric: tabular-nums; }
-.song-read-progress { min-width: 190px; }
-.song-read-progress > span:first-child { display: block; overflow: hidden; color: var(--muted); font-size: .67rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.song-read-progress { min-width: 300px; }
+.song-read-progress > span:first-child { display: block; color: var(--muted); font-size: .67rem; font-variant-numeric: tabular-nums; line-height: 1.45; overflow-wrap: anywhere; white-space: normal; }
 .song-read-track { height: 5px; margin-top: 7px; display: block; overflow: hidden; background: var(--surface-raised); border: 1px solid var(--line); border-radius: var(--radius-pill); }
 .song-read-track i { height: 100%; display: block; background: var(--success); border-radius: inherit; transition: width 180ms ease-out; }
 .song-read-track.is-unknown i { width: 18% !important; opacity: .35; }

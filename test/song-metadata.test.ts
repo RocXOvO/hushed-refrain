@@ -12,12 +12,13 @@ test("hydrates only unnamed songs in bounded batches", async () => {
 
   const hydrated = await hydrateMissingSongMetadata(songs, async (ids) => {
     batches.push([...ids]);
-    return ids.map((id) => ({ id, name: `song-${id}`, artists: [`artist-${id}`] }));
+    return ids.map((id) => ({ id, name: `song-${id}`, artists: [`artist-${id}`], publishTime: Number(id) * 100 }));
   }, 1);
 
   assert.equal(hydrated, 2);
   assert.deepEqual(batches, [["1"], ["3"]]);
   assert.deepEqual(songs.map((song) => song.name), ["song-1", "already known", "song-3"]);
+  assert.deepEqual(songs.map((song) => song.publishTime), [100, undefined, 300]);
 });
 
 test("skips the metadata API when every song already has a name", async () => {

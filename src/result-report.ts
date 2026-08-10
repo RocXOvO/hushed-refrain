@@ -5,12 +5,9 @@ import type { QQMusicFoundComment } from "./qq-music/types";
 
 export type ResultReportMode = "source" | "parallel" | "song" | "likes";
 const MAX_PRINTABLE_COMMENT_CHARS = 320;
-const FIRST_PRINT_PAGE_UNITS = 6;
-const CONTINUED_PRINT_PAGE_UNITS = 10;
 
 interface PrintableRow {
   html: string;
-  units: number;
 }
 
 interface ResultReportBase<Comment> {
@@ -62,12 +59,12 @@ export function renderResultReportHtml(report: ResultReport): string {
       : sourceLabel(report.source);
   const target = qq ? report.target : report.target ?? { kind: "uid" as const, value: report.uid };
   const resultTables = report.comments.length > 0
-    ? printablePages(qq
+    ? resultTable((qq
       ? report.comments.flatMap((comment, index) => qqCommentRows(comment, index + 1))
       : report.comments.flatMap((comment, index) => neteaseCommentRows(comment, index + 1)))
-      .map((page, index) => resultTable(page.map((row) => row.html).join(""), index > 0))
-      .join("")
-    : resultTable('<tr class="empty"><td colspan="6">当前任务尚未命中该用户的评论</td></tr>', false);
+      .map((row) => row.html)
+      .join(""))
+    : resultTable('<tr class="empty"><td colspan="6">当前任务尚未命中该用户的评论</td></tr>');
   return `<!doctype html>
 <html lang="zh-CN" data-result-report="ready">
 <head>
@@ -132,7 +129,6 @@ function neteaseCommentRows(comment: FoundComment, index: number): PrintableRow[
   const link = url ? `<a href="${escapeHtml(url)}">查看</a>` : "-";
   const [commentDate, commentClock] = formatCommentTime(comment.time).split(" ");
   return splitPrintableComment(comment.content).map((content, part) => ({
-    units: Math.max(1, Math.ceil(content.replace(/\s/g, "").length / 120)),
     html: part === 0
     ? `<tr>
       <td class="number">${formatNumber(index)}</td>
@@ -164,7 +160,6 @@ function qqCommentRows(comment: QQMusicFoundComment, index: number): PrintableRo
   const link = url ? `<a href="${escapeHtml(url)}">查看</a>` : "-";
   const [commentDate, commentClock] = formatCommentTime(comment.time).split(" ");
   return splitPrintableComment(comment.content).map((content, part) => ({
-    units: Math.max(1, Math.ceil(content.replace(/\s/g, "").length / 120)),
     html: part === 0
     ? `<tr>
       <td class="number">${formatNumber(index)}</td>
@@ -211,27 +206,8 @@ function splitPrintableComment(content: string): string[] {
   return chunks;
 }
 
-function printablePages(rows: PrintableRow[]): PrintableRow[][] {
-  const pages: PrintableRow[][] = [];
-  let page: PrintableRow[] = [];
-  let used = 0;
-  let capacity = FIRST_PRINT_PAGE_UNITS;
-  for (const row of rows) {
-    if (page.length > 0 && used + row.units > capacity) {
-      pages.push(page);
-      page = [];
-      used = 0;
-      capacity = CONTINUED_PRINT_PAGE_UNITS;
-    }
-    page.push(row);
-    used += row.units;
-  }
-  if (page.length > 0) pages.push(page);
-  return pages;
-}
-
-function resultTable(rows: string, continued: boolean): string {
-  return `<table${continued ? ' class="continued-table"' : ""}>
+function resultTable(rows: string): string {
+  return `<table>
     <thead><tr><th class="number">#</th><th class="time">时间</th><th class="song">歌曲</th><th>评论内容</th><th class="likes">点赞</th><th class="link">来源</th></tr></thead>
     <tbody>${rows}</tbody>
   </table>`;
@@ -322,8 +298,6 @@ td { padding: 9px 7px; vertical-align: top; border-bottom: 1px solid #e2e8e9; ov
 tr { break-inside: avoid; page-break-inside: avoid; }
 .continued { background: #fafcfc; }
 .continued .number, .continued .song small { color: #078999; }
-.continued-table { margin-top: 0; }
-.continued-table thead { display: none; }
 .number { width: 4%; color: #7a878b; text-align: center; }
 .time { width: 16%; white-space: nowrap; }
 .song { width: 17%; }
@@ -344,7 +318,6 @@ footer { margin-top: 18px; padding-top: 10px; color: #829095; border-top: 1px so
   main { width: auto; margin: 0; padding: 0; box-shadow: none; }
   .report-header { break-after: avoid; }
   .summary, .metadata, .section-title { break-inside: avoid; }
-  .continued-table { break-before: page; page-break-before: always; }
-  .continued-table thead { display: table-header-group; }
+  footer { display: none; }
 }
 `;

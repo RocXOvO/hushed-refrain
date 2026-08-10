@@ -1,6 +1,7 @@
 import {
   AuthenticationRequired,
   CooldownRequired,
+  isSourcePrivacyRestricted,
   RequestBudgetExhausted,
   RunCancelled,
 } from "./errors";
@@ -969,7 +970,7 @@ async function reconcileSongCatalog(
   for (const currentSong of currentSongs) {
     currentIds.add(currentSong.id);
     const previous = previousById.get(currentSong.id);
-    const progress = previous?.progress ?? initialSongProgress(initialCursor);
+    const progress = previous?.progress ?? initialSongProgress(initialCursor, currentSong.publishTime);
     if (previous?.progress.done) historicalCompletedSongs += 1;
     if (!progress.done && coveredIds.has(currentSong.id)) {
       for (const shard of progress.commentShards ?? []) shard.done = true;
@@ -1045,11 +1046,16 @@ function retainCatalogAfterRefreshFailure(
   syncSongCursor(state);
 }
 
-function initialSongProgress(initialCursor: string): NonNullable<ScanState["songProgress"]>[number] {
+function initialSongProgress(
+  initialCursor: string,
+  publishTime?: number,
+): NonNullable<ScanState["songProgress"]>[number] {
+  const endTime = Number(initialCursor);
   return {
     commentOffset: 0,
     pageInSong: 0,
-    commentEndTime: Number(initialCursor),
+    commentEndTime: endTime,
+    coverageStartTime: displayCoverageStartTime(publishTime, endTime),
     commentCursor: initialCursor,
     commentPageNo: 1,
     done: false,
@@ -1207,6 +1213,9 @@ async function collectRecordSongs(
       batches.push(await execute(`user_record_${scope}`, scope));
     } catch (error) {
       if (isPauseSignal(error)) throw error;
+      if (scope === "week" && options.recordScope === "both" && batches.length > 0 && isSourcePrivacyRestricted(error)) {
+        continue;
+      }
       failures.push(`record-${scope}: ${errorMessage(error)}`);
     }
   }
@@ -1443,6 +1452,7 @@ export function mergeSongs(songs: SongCandidate[]): SongCandidate[] {
     }
     existing.name ??= song.name;
     existing.artists ??= song.artists;
+    existing.publishTime ??= song.publishTime;
     existing.playCount ??= song.playCount;
     existing.score ??= song.score;
     existing.memberships = mergeMemberships(existing.memberships ?? [], song);
@@ -1569,7 +1579,8 @@ function ensureSongProgress(state: ScanState): void {
       done: index < state.songIndex || state.finished,
     }));
   }
-  for (const progress of state.songProgress) {
+  for (let index = 0; index < state.songProgress.length; index += 1) {
+    const progress = state.songProgress[index];
     progress.commentCursor ??= initialCommentCursor;
     progress.commentPageNo ??= 1;
     for (const shard of progress.commentShards ?? []) {
@@ -1588,6 +1599,12 @@ function ensureSongProgress(state: ScanState): void {
         : Number.isInteger(initialCursor)
         ? initialCursor
         : undefined;
+    }
+    if (!Number.isInteger(progress.coverageStartTime)) {
+      progress.coverageStartTime = displayCoverageStartTime(
+        state.songs[index]?.publishTime,
+        progress.commentEndTime,
+      );
     }
   }
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
@@ -1608,15 +1625,25 @@ function sourceSongCoveragePercent(
   if (progress.done) return 100;
   const endTime = progress.commentEndTime;
   if (typeof endTime !== "number" || !Number.isFinite(endTime) || endTime <= SOURCE_SCAN_START_TIME) return undefined;
+  const startTime = displayCoverageStartTime(progress.coverageStartTime, endTime);
   if (progress.commentShards?.length) {
-    return timeCoveragePercent(SOURCE_SCAN_START_TIME, endTime, progress.commentShards);
+    return timeCoveragePercent(startTime, endTime, progress.commentShards);
   }
   const cursor = Number(progress.commentCursor);
   if (!Number.isFinite(cursor)) return undefined;
-  const remainingEnd = Math.max(SOURCE_SCAN_START_TIME, Math.min(endTime, cursor));
-  return Math.max(0, Math.min(100, Math.round(
-    (1 - (remainingEnd - SOURCE_SCAN_START_TIME) / (endTime - SOURCE_SCAN_START_TIME)) * 100,
-  )));
+  const remainingEnd = Math.max(startTime, Math.min(endTime, cursor));
+  const percent = Math.max(0, Math.min(100,
+    (1 - (remainingEnd - startTime) / (endTime - startTime)) * 100,
+  ));
+  return Math.min(99.99, Math.round(percent * 100) / 100);
+}
+
+function displayCoverageStartTime(candidate: number | undefined, endTime: number | undefined): number {
+  return typeof candidate === "number" && Number.isFinite(candidate)
+      && typeof endTime === "number" && Number.isFinite(endTime)
+      && candidate >= SOURCE_SCAN_START_TIME && candidate < endTime
+    ? Math.floor(candidate)
+    : SOURCE_SCAN_START_TIME;
 }
 
 function prepareSourceWork(state: ScanState, desiredWorkItems: number, maxPages: number): SourceScanWork[] {

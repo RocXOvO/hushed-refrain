@@ -129,13 +129,31 @@ test("labels weekly listening records independently from all-time records", asyn
   mutable.user_record = async (params) => ({
     status: 200,
     body: params.type === 1
-      ? { weekData: [{ song: { id: 7, name: "week" } }] }
-      : { allData: [{ song: { id: 7, name: "all" } }] },
+      ? { weekData: [{ song: { id: 7, name: "week", al: { publishTime: 456 } } }] }
+      : { allData: [{ song: { id: 7, name: "all", al: { publishTime: 123 } } }] },
   });
   try {
     const client = new EnhancedNcmClient();
     assert.deepEqual((await client.getUserRecord("42", "all"))[0].sources, ["record"]);
     assert.deepEqual((await client.getUserRecord("42", "week"))[0].sources, ["record-week"]);
+    assert.equal((await client.getUserRecord("42", "all"))[0].publishTime, 123);
+  } finally {
+    mutable.user_record = original;
+  }
+});
+
+test("accepts an explicitly empty weekly listening record and classifies upstream privacy", async () => {
+  const mutable = upstream as unknown as { user_record: (params: Record<string, unknown>) => Promise<unknown> };
+  const original = mutable.user_record;
+  try {
+    mutable.user_record = async () => ({ status: 200, body: { code: 200, weekData: [] } });
+    assert.deepEqual(await new EnhancedNcmClient().getUserRecord("42", "week"), []);
+
+    mutable.user_record = async () => Promise.reject({ status: 400, body: { code: -2, msg: "无权限访问" } });
+    await assert.rejects(
+      () => new EnhancedNcmClient().getUserRecord("42", "week"),
+      (error: unknown) => error instanceof SourcePrivacyRestricted && /最近一周听歌排行/.test(error.message),
+    );
   } finally {
     mutable.user_record = original;
   }

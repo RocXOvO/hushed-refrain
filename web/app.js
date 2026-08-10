@@ -1152,15 +1152,21 @@ function renderParallel(job) {
   renderNeteaseLiveIdentity(job, "parallel");
   const active = ["running", "stopping"].includes(job.status);
   el.taskTitle.textContent = job.songId ? `${job.songName || "歌曲"} · UID ${job.uid}` : "等待单曲任务";
-  el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "分片进度"; el.progress.textContent = `${fmt(job.shardsComplete)} / ${fmt(job.shards)}`;
+  const comments = Math.max(0, Number(job.commentsInspected || 0));
+  const totalComments = Number.isFinite(Number(job.totalComments)) && Number(job.totalComments) >= 0
+    ? Math.max(comments, Number(job.totalComments))
+    : undefined;
+  el.status.textContent = statusLabels[job.status] || job.status; el.progressLabel.textContent = "评论进度"; el.progress.textContent = totalComments === undefined
+    ? `${fmt(comments)} / 总数读取中`
+    : `${fmt(comments)} / ${fmt(totalComments)}`;
   el.workLabel.textContent = "已读评论"; el.work.textContent = fmt(job.commentsInspected); el.speed.textContent = formatRate(job.commentsPerSecond); el.matches.textContent = fmt(job.matches); el.requests.textContent = fmt(job.requestsTotal);
-  const globalPercent = Number.isFinite(job.coveragePercent)
-    ? Math.max(0, Math.min(100, job.coveragePercent))
-    : job.shards ? Math.min(100, Math.round(job.shardsComplete / job.shards * 100)) : 0;
+  const globalPercent = totalComments && totalComments > 0
+    ? Math.max(0, Math.min(100, comments / totalComments * 100))
+    : job.status === "complete" ? 100 : 0;
   renderProgress({
     globalPercent,
     globalContext: job.songId
-      ? `${fmt(job.shardsComplete)} / ${fmt(job.shards)} 个分片 · ${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个线程${transportConcurrencyText(job)}`
+      ? `已搜索 ${totalComments === undefined ? fmt(comments) : `${fmt(comments)} / ${fmt(totalComments)}`} 条评论 · ${fmt(job.shardsComplete)} / ${fmt(job.shards)} 个分片 · ${fmt(job.lanes)} 个出口 · ${fmt(job.workers)} 个线程${transportConcurrencyText(job)}`
       : "尚未开始",
     note: [job.note || job.error, topologyCapacityNote(job)].filter(Boolean).join(" · "),
   });
@@ -1190,7 +1196,7 @@ function renderSource(job) {
     globalContext: job.uid
       ? `${fmt(job.songsProcessed)} / ${fmt(job.songs)} 首歌曲 · ${topology}`
       : "尚未开始",
-    note: [sourceCoverageSummary(job), job.note, job.error, ...(job.sourceErrors || []), topologyCapacityNote(job)].filter(Boolean).join(" · "),
+    note: [sourceCoverageSummary(job), job.note, job.error, ...sourceErrorNotices(job), topologyCapacityNote(job)].filter(Boolean).join(" · "),
   });
   renderActiveSongs(
     active ? job.activeSongs || [] : [],
@@ -1395,6 +1401,14 @@ function sourceCoverageSummary(job) {
   return `目录总数 ${fmt(job.catalogSongs ?? job.songs)} · 历史已完成 ${fmt(job.historicalCompletedSongs)} · 已复用/跳过 ${fmt(job.reusedSongs)} · 新增待扫 ${fmt(job.newPendingSongs)}`;
 }
 
+function sourceErrorNotices(job) {
+  return (job?.sourceErrors || []).map((error) =>
+    String(error).includes("目录刷新失败，已保留上次完整目录")
+      ? `听歌目录本轮暂时无法刷新，已继续使用检查点中的 ${fmt(job.catalogSongs ?? job.songs)} 首歌曲`
+      : String(error)
+  );
+}
+
 function renderActiveSongs(songs, summary, configuredWorkers = 0) {
   const normalized = songs.map((song) => ({
     id: String(song.id || ""),
@@ -1406,7 +1420,7 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
     commentsProcessed: finiteNumber(song.commentsProcessed),
     totalComments: finiteNumber(song.totalComments),
     progressPercent: finiteNumber(song.progressPercent),
-    progressBasis: song.progressBasis === "time" ? "time" : "comments",
+    progressBasis: "comments",
     done: Boolean(song.done),
     truncated: Boolean(song.truncated),
   }));
@@ -1483,11 +1497,12 @@ function updateActiveSongRow(entry, song) {
 
 function renderSongReadProgress(song, entry) {
   const comments = Math.max(0, song.commentsProcessed ?? 0);
-  const total = song.totalComments !== undefined && song.totalComments > 0
+  const total = song.totalComments !== undefined && song.totalComments >= 0
     ? Math.max(comments, song.totalComments)
     : undefined;
-  const measuredPercent = !song.truncated && total ? comments / total * 100 : undefined;
-  const percent = Math.max(0, Math.min(100, song.progressPercent ?? measuredPercent ?? 0));
+  const measuredPercent = total !== undefined && total > 0 ? comments / total * 100 : undefined;
+  const rawPercent = song.done && !song.truncated ? 100 : measuredPercent ?? song.progressPercent ?? 0;
+  const percent = Math.max(0, Math.min(song.truncated ? 99.99 : 100, rawPercent));
   const activeRequest = song.workers > 0
     ? ` · ${fmt(song.workers)} 个分片请求中${song.requestStartedAt !== undefined
       ? ` · 最长 ${duration(Math.max(0, Math.floor((Date.now() - song.requestStartedAt) / 1_000)))}`
@@ -1496,24 +1511,24 @@ function renderSongReadProgress(song, entry) {
   const completedPages = song.pagesProcessed !== undefined && song.pagesProcessed > 0
     ? ` · 已完成 ${fmt(song.pagesProcessed)} 页`
     : "";
-  const coverage = percent > 0 && percent < 1 ? "<1" : String(Math.round(percent));
+  const countText = total === undefined
+    ? `${fmt(comments)} 条评论`
+    : `${fmt(comments)} / ${fmt(total)} 条评论`;
   const label = song.truncated
-    ? `已读 ${fmt(comments)} 条${completedPages} · 达到每首最大页数，未覆盖全部评论`
-    : song.progressBasis === "time" && song.progressPercent !== undefined
-    ? `已读 ${fmt(comments)} 条 · 时间覆盖 ${coverage}%${completedPages}${activeRequest}`
-    : total
-    ? `已读 ${fmt(comments)} / ${fmt(total)} 条 · ${coverage}%${completedPages}${activeRequest}`
+    ? `已搜索 ${countText}${completedPages} · 达到每首最大页数，未覆盖全部评论`
+    : total !== undefined
+    ? `已搜索 ${countText}${song.done ? " · 已完成" : ""}${completedPages}${activeRequest}`
     : song.pagesProcessed !== undefined && song.pagesProcessed > 0
-    ? `已读 ${fmt(comments)} 条${completedPages}${activeRequest}`
+    ? `已搜索 ${countText} · 总数读取中${completedPages}${activeRequest}`
     : song.requestingPage !== undefined
     ? `正在请求第 ${fmt(song.requestingPage)} 页${activeRequest}`
     : song.workers > 0
     ? `正在请求首批评论分片${activeRequest}`
     : song.pagesProcessed !== undefined
-    ? `已读 ${fmt(comments)} 条 · 已完成 ${fmt(song.pagesProcessed)} 页`
+    ? `已搜索 ${countText} · 已完成 ${fmt(song.pagesProcessed)} 页`
     : "等待首个评论页";
   entry.progressLabel.textContent = label;
-  entry.progressTrack.classList.toggle("is-unknown", song.progressPercent === undefined && measuredPercent === undefined);
+  entry.progressTrack.classList.toggle("is-unknown", total === undefined && !song.done);
   entry.progressFill.style.width = `${percent}%`;
   entry.progress.setAttribute("aria-label", label);
 }
@@ -1603,7 +1618,7 @@ function renderSettlement(job, viewKey) {
   el.settlementCoverage.textContent = viewKey === "netease:source"
     ? sourceCoverageSummary(job)
     : job.coverageComplete === false ? "任务未达到完整覆盖，已保留检查点与已保存结果。" : "";
-  el.settlementNote.textContent = [job.note, job.error, ...(job.sourceErrors || []), defaults[job.status]].filter(Boolean).join(" · ");
+  el.settlementNote.textContent = [job.note, job.error, ...sourceErrorNotices(job), defaults[job.status]].filter(Boolean).join(" · ");
   el.settlementLogPath.textContent = job.logPath || "未生成日志文件";
   el.settlementFootnote.textContent = viewKey.startsWith("qq:")
     ? "命中指标按当前 QQ 检查点累计；结果页按歌曲 ID + 评论 ID 展示已经持久化的累计去重结果；耗时只统计本次任务。"

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
+import { SourcePrivacyRestricted } from "../src/errors";
 import { runCommentFinder, runPooledCommentFinder } from "../src/scanner";
 import type {
   CommentPage,
@@ -171,6 +172,27 @@ test("combines all-time and weekly ranks with likes and user playlists without r
     state.songs.find((song: SongCandidate) => song.id === "4").memberships.map((item: { source: string }) => item.source),
     ["likes", "playlists"],
   );
+});
+
+test("treats a private or absent weekly ranking as optional when all-time ranking succeeded", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-empty-week-"));
+  const client = new FakeClient();
+  client.getUserRecord = async (_uid, scope) => {
+    if (scope === "week") throw new SourcePrivacyRestricted("目标用户未公开最近一周听歌排行");
+    return [{ id: "1", name: "one", sources: ["record"] }];
+  };
+  const config = await options(directory);
+  config.source = "record";
+  config.recordScope = "both";
+  config.dryRun = true;
+
+  const report = await runCommentFinder(client, governor(20), config);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(report.songs, 1);
+  assert.deepEqual(report.sourceErrors, []);
+  assert.deepEqual(state.songs[0].sources, ["record"]);
 });
 
 test("a fresh source checkpoint counts a rediscovered JSONL match without appending it again", async () => {
@@ -1244,7 +1266,7 @@ test("a song added to an old checkpoint keeps its own immutable time-coverage up
     getLoginProfile: async () => undefined,
     getUserRecord: async () => [
       { id: "old-song", sources: ["record"] },
-      { id: "new-song", sources: ["record"] },
+      { id: "new-song", sources: ["record"], publishTime: Date.UTC(2022, 0, 1) },
     ],
     getLikedSongs: async () => [],
     getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
@@ -1267,6 +1289,7 @@ test("a song added to an old checkpoint keeps its own immutable time-coverage up
   const pausedState = JSON.parse(await readFile(config.statePath, "utf8"));
   const newSongIndex = pausedState.songs.findIndex((song: { id: string }) => song.id === "new-song");
   assert.equal(pausedState.songProgress[newSongIndex].commentEndTime, Number(requestedCursor));
+  assert.equal(pausedState.songProgress[newSongIndex].coverageStartTime, Date.UTC(2022, 0, 1));
   assert.ok(pausedState.songProgress[newSongIndex].commentEndTime > Date.parse(pausedState.createdAt));
 });
 
