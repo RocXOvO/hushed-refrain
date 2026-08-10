@@ -23,3 +23,17 @@ test("desktop shell keeps the window visible when tray setup cannot complete", a
   assert.match(source, /catch \(error\) \{[\s\S]*nextTray\.destroy\(\)[\s\S]*throw error/);
   assert.match(source, /requestWindowClose\(window\)\.catch/);
 });
+
+test("desktop close confirmation is rendered inside the client instead of a native Windows prompt", async () => {
+  const source = await readFile("src/electron-main.ts", "utf8");
+  const requestWindowClose = source.slice(
+    source.indexOf("async function requestWindowClose"),
+    source.indexOf("async function prepareDashboardForQuit"),
+  );
+  assert.match(source, /ipcMain\.handle\(DESKTOP_WINDOW_CHANNELS\.closeDecision/);
+  assert.match(source, /window\.webContents\.send\(DESKTOP_WINDOW_CHANNELS\.closeRequested\)/);
+  assert.match(requestWindowClose, /await requestRendererCloseDecision\(window\)/);
+  assert.doesNotMatch(requestWindowClose, /dialog\.showMessageBox/);
+  assert.match(requestWindowClose, /decision\.action === "cancel"/);
+  assert.match(requestWindowClose, /decision\.remember/);
+});

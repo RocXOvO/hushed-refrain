@@ -4,10 +4,10 @@ This is the compact, durable map for `ncm-comment-finder`. It records current co
 
 ## Current baseline and authorities
 
-- Current release line: `v1.1.3`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
+- Current release line: `v1.1.4`. `package.json` and root `package-lock.json` are the version authorities; GitHub Release/tag/assets must still be checked separately when publication state matters.
 - Display brand: `乐评寻踪 / MUSIC COMMENT TRACE`; `productName=乐评寻踪`.
 - Stable technical identity: package `ncm-comment-finder`, appId `cn.local.ncm.commentfinder`, repository `RocXOvO/ncm-comment-finder`, artifact stem `NCM-Comment-Finder`, Electron data directory `appData/ncm-comment-finder`. Do not change these as part of a visual rename.
-- Current web cache-busters are `styles.css?v=60`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=5`, and `app.js?v=71`; keep them synchronized with `web/index.html`.
+- Current web cache-busters are `styles.css?v=61`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=5`, and `app.js?v=72`; keep them synchronized with `web/index.html`.
 - Current unresolved findings and acceptance boundaries live in `docs/code-audit.md`. Detailed QQ truth lives in `docs/qq-music-architecture.md`; QQ performance in `docs/qq-music-performance-review.md`; GUI/search/transition truth in `docs/platform-gui-architecture.md`. `docs/qq-music-integration-design.md` is historical only.
 
 ## Product and runtime shapes
@@ -104,6 +104,7 @@ Entry points: `/api/qq/job`, `runQQMusicScan`; modes are `song` and `likes`.
 - Default pool sizing is 8 selected exits from 48 candidates. `maxProxyLanes=0` selects all verified exits for one task; a positive value caps only that task and never shrinks the shared pool.
 - When Inspector is collapsed, pool `starting` or background `refreshing` has one explicit global notice that opens the pool view. A stable building/refreshing/hidden signature prevents repeated live-region writes or replayed arrival animation during polling; expanded Inspector keeps the notice hidden.
 - Electron keeps `contextIsolation:true`, `nodeIntegration:false`, `sandbox:true`, a narrow preload bridge, and a single-instance lock. Single-instance UX does not protect CLI/Web processes from sharing a logical scan root; that cross-process lease remains open audit work.
+- Main-window close requests use the renderer-owned `closeAppDialog`, not a native OS message box. A validated main-window-only IPC decision returns `cancel`, `background`, or `exit`; stale/duplicate decisions are ignored. Remembering a choice updates only `closeBehavior`. Exit keeps the dialog visible with checkpoint-safe progress while the existing bounded graceful-quit path stops the active task and waits for the final checkpoint; an unavailable renderer cancels the close instead of guessing.
 - Windows update installation first blocks new work, stops the real globally active task, waits up to 45 seconds for terminal status/final checkpoint, and installs only after QQ lookup/pool barriers settle. Timeout or stop/status failure cancels installation.
 - Native Windows auto-update needs one matching `.exe`, `.exe.blockmap`, and `latest.yml`. Generic GitHub update checking and `electron-updater` are separate paths.
 - Desktop PDF export reports a monotonic cumulative `elapsedMs` from the start of export, including save-dialog time; stage-to-stage deltas may be derived but are not stored as independent durations. `resultReportFilename` uses the complete canonical target as intentional user-visible output, then `sanitizeWindowsPdfFilename` replaces Windows-forbidden/control characters, removes trailing dots/spaces, avoids reserved device stems, caps the stem at 180 characters, and fixes the extension to `.pdf`. Filename regressions must cover both platforms, exact target visibility, forbidden/control characters, trailing dots/spaces, reserved device names, length, and extension. Packaged smoke must traverse renderer `window.ncmDesktop` → preload → IPC → hidden Chromium load/fonts/print → atomic write and observe `save-dialog, load-report, fonts, print, write, saved`, then verify the selected path and `%PDF-` header.
@@ -137,7 +138,7 @@ git diff --check
 
 - Before handoff, run at least check, test, build, and diff-check; add the focused tests for changed behavior. Desktop/preload/updater/build changes also require the relevant desktop smoke/package path. Tests currently lack a strict `check:test` TypeScript gate; do not treat transpile-only execution as type coverage.
 - Routine tests use stubs and loopback services. Real NetEase/QQ/proxy traffic must be explicit, bounded, and never a default gate.
-- The `v1.1.3` release baseline is 529/529 tests with check, build, benchmark, the three renderer syntax checks, macOS desktop smoke, and diff-check passing; a later code change invalidates that count until the full gate is rerun.
+- The `v1.1.4` release baseline is 532/532 tests with check, build, benchmark, all three renderer syntax checks, macOS desktop smoke, and diff-check passing; real Electron QA confirmed the client-styled close dialog, cancel, and graceful exit. GitHub publication still requires the exact commit/tag/assets checks below.
 - Windows packaging is a manual `workflow_dispatch`: it checks/tests, builds unpacked and NSIS forms, runs packaged startup/PDF smoke, and uploads a seven-day Actions artifact. It does not publish a GitHub Release.
 - Release from one exact final commit/version. Verify tag, `origin/main`, workflow `headSha`, manifests, and assets all agree. Validate `latest.yml` version/path/size/SHA-512 against the installer; build both macOS architectures from the same commit.
 - Publish only exact current-version files from a clean staging set. Local `release/` is non-authoritative and may contain historical files.

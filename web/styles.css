@@ -396,6 +396,39 @@ body[data-platform="qq"] .navigation-item.active::before { background: #31c27c; 
 .settings-status { min-height: 1.5em; margin: 14px 0 0; color: var(--muted); font-size: .72rem; }
 .settings-dialog-actions { display: grid; grid-template-columns: auto 1fr auto auto; }
 
+.close-app-dialog { width: min(570px, calc(100vw - 28px)); max-height: min(680px, calc(100dvh - 28px)); padding: 0; overflow: hidden; }
+.close-app-dialog[open] { display: grid; grid-template-rows: auto minmax(0, 1fr); }
+.close-app-heading { padding: 17px 19px; background: var(--surface-subtle); border-bottom: 1px solid var(--line); }
+.close-app-content { min-height: 0; padding: 21px; overflow: auto; overscroll-behavior: contain; }
+.close-app-intro { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px; }
+.close-app-mark { width: 46px; height: 46px; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-border); border-radius: var(--radius-surface); }
+.close-app-mark img { width: 21px; filter: var(--icon-accent-filter, none); }
+.close-app-intro > div { min-width: 0; }
+.close-app-intro strong { font-size: .94rem; }
+.close-app-intro p { margin: 6px 0 0; color: var(--muted-strong); font-size: .74rem; line-height: 1.58; }
+.close-app-routes { margin-top: 17px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.close-app-routes > div { min-height: 86px; padding: 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 10px; background: var(--surface-subtle); border: 1px solid var(--line); border-radius: var(--radius-control); }
+.close-app-routes > div > span { width: 30px; height: 30px; display: grid; place-items: center; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); }
+.close-app-routes img { width: 15px; opacity: .72; }
+.close-app-routes p { min-width: 0; margin: 0; display: grid; gap: 5px; }
+.close-app-routes strong { font-size: .76rem; }
+.close-app-routes small { color: var(--muted); font-size: .67rem; line-height: 1.45; }
+.close-app-remember { min-height: 58px; margin-top: 10px; padding: 10px 12px; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 11px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-control); cursor: pointer; }
+.close-app-remember > input { position: absolute; opacity: 0; pointer-events: none; }
+.close-app-remember > span { width: 20px; height: 20px; padding: 3px; display: block; background: var(--surface-raised); border: 1px solid var(--line-strong); border-radius: 6px; transition: background-color var(--motion-control), border-color var(--motion-control), box-shadow var(--motion-control); }
+.close-app-remember > span i { width: 100%; height: 100%; display: block; border-radius: 3px; transform: scale(0); transition: transform var(--motion-control); }
+.close-app-remember > input:checked + span { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
+.close-app-remember > input:checked + span i { background: #fff; transform: scale(.55); }
+.close-app-remember > input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 2px; }
+.close-app-remember > input:disabled ~ * { opacity: .55; }
+.close-app-remember p { margin: 0; display: grid; gap: 3px; }
+.close-app-remember strong { font-size: .74rem; }
+.close-app-remember small { color: var(--muted); font-size: .66rem; }
+.close-app-status { min-height: 1.4em; margin: 12px 2px 0; color: var(--muted); font-size: .69rem; line-height: 1.45; }
+.close-app-dialog.is-exiting .close-app-mark img { animation: spin 1.2s linear infinite; }
+.close-app-dialog.is-exiting .close-app-status { color: var(--accent); }
+.close-app-actions { margin-top: 4px; }
+
 .task-startup-progress {
   width: min(292px, calc(100vw - 28px));
   min-width: 0;
@@ -1318,6 +1351,10 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
   .form-actions { flex-direction: column; }
   .preset-group { width: 100%; }
   .preset-group button { flex: 1; padding-inline: 4px; }
+  .close-app-routes { grid-template-columns: 1fr; }
+  .close-app-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .close-app-actions .button { justify-content: center; }
+  .close-app-actions .button:first-child { grid-column: 1 / -1; grid-row: 2; }
 }
 
 @media (prefers-reduced-motion: reduce) {

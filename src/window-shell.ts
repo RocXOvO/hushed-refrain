@@ -2,11 +2,33 @@ import type { BrowserWindowConstructorOptions } from "electron";
 
 export const DESKTOP_WINDOW_CHANNELS = {
   close: "desktop-window:close",
+  closeDecision: "desktop-window:close-decision",
+  closeRequested: "desktop-window:close-requested",
   getMaximized: "desktop-window:get-maximized",
   maximizedChanged: "desktop-window:maximized-changed",
   minimize: "desktop-window:minimize",
   toggleMaximize: "desktop-window:toggle-maximize",
 } as const;
+
+export type DesktopCloseDecision = {
+  action: "exit" | "background" | "cancel";
+  remember: boolean;
+};
+
+export function parseDesktopCloseDecision(value: unknown): DesktopCloseDecision {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("关闭选择格式错误。");
+  }
+  const input = value as Record<string, unknown>;
+  if (input.action !== "exit" && input.action !== "background" && input.action !== "cancel") {
+    throw new Error("关闭选择无效。");
+  }
+  if (typeof input.remember !== "boolean") throw new Error("记住选择状态无效。");
+  return {
+    action: input.action,
+    remember: input.action === "cancel" ? false : input.remember,
+  };
+}
 
 export const DESKTOP_UPDATE_CHANNELS = {
   check: "desktop-update:check",

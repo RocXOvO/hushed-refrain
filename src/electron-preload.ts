@@ -4,11 +4,20 @@ import { contextBridge, ipcRenderer } from "electron";
 // channel names intentionally stay self-contained here.
 const DESKTOP_WINDOW_CHANNELS = {
   close: "desktop-window:close",
+  closeDecision: "desktop-window:close-decision",
+  closeRequested: "desktop-window:close-requested",
   getMaximized: "desktop-window:get-maximized",
   maximizedChanged: "desktop-window:maximized-changed",
   minimize: "desktop-window:minimize",
   toggleMaximize: "desktop-window:toggle-maximize",
 } as const;
+
+let closeRequestQueued = false;
+let closeRequestedListener: (() => void) | undefined;
+ipcRenderer.on(DESKTOP_WINDOW_CHANNELS.closeRequested, () => {
+  if (closeRequestedListener) closeRequestedListener();
+  else closeRequestQueued = true;
+});
 
 const DESKTOP_UPDATE_CHANNELS = {
   check: "desktop-update:check",
@@ -35,6 +44,19 @@ contextBridge.exposeInMainWorld("ncmDesktop", Object.freeze({
   minimize: (): void => ipcRenderer.send(DESKTOP_WINDOW_CHANNELS.minimize),
   toggleMaximize: (): Promise<boolean> => ipcRenderer.invoke(DESKTOP_WINDOW_CHANNELS.toggleMaximize),
   close: (): void => ipcRenderer.send(DESKTOP_WINDOW_CHANNELS.close),
+  submitCloseDecision: (decision: unknown): Promise<boolean> => ipcRenderer.invoke(DESKTOP_WINDOW_CHANNELS.closeDecision, decision),
+  onCloseRequested: (listener: () => void): (() => void) => {
+    closeRequestedListener = listener;
+    if (closeRequestQueued) {
+      closeRequestQueued = false;
+      queueMicrotask(() => {
+        if (closeRequestedListener === listener) listener();
+      });
+    }
+    return () => {
+      if (closeRequestedListener === listener) closeRequestedListener = undefined;
+    };
+  },
   isMaximized: (): Promise<boolean> => ipcRenderer.invoke(DESKTOP_WINDOW_CHANNELS.getMaximized),
   onMaximizedChange: (listener: (maximized: boolean) => void): (() => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, maximized: boolean): void => listener(maximized);

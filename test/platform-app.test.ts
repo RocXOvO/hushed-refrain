@@ -237,6 +237,73 @@ test("global settings keep the browser trail session-only while desktop close co
   assert.match(el.globalSettingsSupport.textContent ?? "", /仅在桌面客户端/);
 });
 
+test("desktop close prompt uses the client dialog and preserves safe exit feedback", async () => {
+  const classes = new Set<string>();
+  const submitted: Array<{ action: string; remember: boolean }> = [];
+  let focused = 0;
+  const controls = Array.from({ length: 5 }, () => ({ disabled: false }));
+  const dialog = {
+    open: false,
+    classList: {
+      add(value: string) { classes.add(value); },
+      remove(value: string) { classes.delete(value); },
+    },
+    showModal() { this.open = true; },
+    close() { this.open = false; },
+  };
+  const context: Record<string, unknown> = {
+    window: {
+      ncmDesktop: {
+        async submitCloseDecision(decision: { action: string; remember: boolean }) {
+          submitted.push(decision);
+          return true;
+        },
+      },
+    },
+    el: {
+      closeAppDialog: dialog,
+      closeAppStatus: { textContent: "" },
+      rememberCloseAppDecision: Object.assign(controls[0], { checked: false }),
+      cancelCloseApp: controls[1],
+      cancelCloseAppIcon: controls[2],
+      exitCloseApp: controls[3],
+      backgroundCloseApp: Object.assign(controls[4], { focus() { focused += 1; } }),
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    var closePromptSubmitting = false;
+    ${extractFunction("setClosePromptControlsDisabled")}
+    ${extractFunction("showDesktopClosePrompt")}
+    ${extractFunction("submitDesktopCloseDecision")}
+    globalThis.api = { showDesktopClosePrompt, submitDesktopCloseDecision };
+  `, context);
+  const api = context.api as {
+    showDesktopClosePrompt(): void;
+    submitDesktopCloseDecision(action: string): Promise<void>;
+  };
+  const el = context.el as Record<string, { checked?: boolean; textContent?: string }>;
+
+  api.showDesktopClosePrompt();
+  assert.equal(dialog.open, true);
+  assert.equal(focused, 1);
+  el.rememberCloseAppDecision.checked = true;
+  await api.submitDesktopCloseDecision("background");
+  assert.equal(submitted[0]?.action, "background");
+  assert.equal(submitted[0]?.remember, true);
+  assert.equal(dialog.open, false);
+
+  api.showDesktopClosePrompt();
+  el.rememberCloseAppDecision.checked = true;
+  await api.submitDesktopCloseDecision("exit");
+  assert.equal(submitted[1]?.action, "exit");
+  assert.equal(submitted[1]?.remember, true);
+  assert.equal(dialog.open, true, "safe-exit progress remains visible until Electron actually quits");
+  assert.equal(classes.has("is-exiting"), true);
+  assert.match(el.closeAppStatus.textContent ?? "", /保存最新检查点/);
+  assert.ok(controls.every((control) => control.disabled));
+});
+
 test("QQ Live Task suppresses profile details for a WeChat identity", () => {
   let rendered: unknown;
   let hidden = 0;

@@ -795,10 +795,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=60/);
+  assert.match(pageText, /styles\.css\?v=61/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=5/);
-  assert.match(pageText, /app\.js\?v=71/);
+  assert.match(pageText, /app\.js\?v=72/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
@@ -826,6 +826,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="logPath"[^>]*class="log-path is-placeholder"/);
   assert.match(pageText, /class="navigation-footer"[^>]*>[\s\S]*id="globalSettingsButton"/);
   assert.match(pageText, /id="globalSettingsDialog"/);
+  assert.match(pageText, /id="closeAppDialog"[^>]*aria-labelledby="closeAppTitle"/);
+  assert.match(pageText, /id="rememberCloseAppDecision"[^>]*type="checkbox"/);
+  assert.match(pageText, /id="exitCloseAppButton"/);
+  assert.match(pageText, /id="backgroundCloseAppButton"/);
+  assert.match(pageText, /安全停止任务、保存最新检查点后退出/);
   assert.match(pageText, /id="mainWorkspace"[^>]*class="main-pane/);
   assert.match(pageText, /id="cursorTrailEnabled"[^>]*type="checkbox"[^>]*checked/);
   assert.match(pageText, /id="cursorTrailSupport"/);
@@ -962,6 +967,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /function beginTaskStartup/);
   assert.match(appText, /function finishTaskStartup/);
   assert.match(appText, /setupDesktopSettings/);
+  assert.match(appText, /desktop\.onCloseRequested\?\.\(showDesktopClosePrompt\)/);
+  assert.match(appText, /submitCloseDecision\(\{[\s\S]*action,[\s\S]*remember:/);
+  assert.match(appText, /正在停止活动任务并保存最新检查点/);
   assert.match(appText, /updateSettings\(\{ closeBehavior: selected, cursorTrailEnabled \}\)/);
   assert.match(appText, /resetSettings\(\)/);
   assert.match(appText, /function setupPointerSilkTrail/);

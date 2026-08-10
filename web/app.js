@@ -26,6 +26,7 @@ const el = {
   updateProgress: $("#updateProgress"), updateProgressLabel: $("#updateProgressLabel"), updateProgressPercent: $("#updateProgressPercent"), updateProgressBar: $("#updateProgressBar"),
   estimateComments: $("#estimateComments"), estimateButton: $("#estimateButton"), estimatePages: $("#estimatePages"), estimateOptimistic: $("#estimateOptimistic"), estimateExpected: $("#estimateExpected"), estimateConservative: $("#estimateConservative"), estimateContext: $("#estimateContext"),
   windowMinimize: $("#windowMinimizeButton"), windowMaximize: $("#windowMaximizeButton"), windowClose: $("#windowCloseButton"),
+  closeAppDialog: $("#closeAppDialog"), closeAppStatus: $("#closeAppStatus"), rememberCloseAppDecision: $("#rememberCloseAppDecision"), cancelCloseApp: $("#cancelCloseAppButton"), cancelCloseAppIcon: $("#cancelCloseAppIconButton"), exitCloseApp: $("#exitCloseAppButton"), backgroundCloseApp: $("#backgroundCloseAppButton"),
   runtimeTimer: $("#runtimeTimer"), runtimeTimerLabel: $("#runtimeTimerLabel"), runtimeTimerValue: $("#runtimeTimerValue"),
   toolbarUid: $("#toolbarUidLabel"), toolbarMode: $("#toolbarModeLabel"), toolbarTopology: $("#toolbarTopologyLabel"), toolbarStart: $("#toolbarStartButton"), hostConcurrency: $("#taskHostConcurrency"), exitLimit: $("#taskExitLimit"),
   primaryNavigation: $("#primaryNavigation"), taskSidebar: $("#taskSidebar"), taskPanelOpen: $("#taskPanelOpenButton"), taskPanelToggle: $("#taskPanelToggleButton"), inspectorToggle: $("#inspectorToggleButton"), inspectorBody: $("#runtimeInspectorBody"),
@@ -123,6 +124,7 @@ const interfaceAnimations = new Set();
 const fallbackMotionElements = new Set();
 let activeSongsSignature = "";
 let desktopSettings = { version: 2, closeBehavior: "ask", cursorTrailEnabled: true };
+let closePromptSubmitting = false;
 let pointerSilkTrail;
 let pointerTrailDialogObserver;
 let taskStartupProgressVersion = 0;
@@ -3231,9 +3233,60 @@ function renderMaximized(maximized) {
   el.windowMaximize.setAttribute("aria-label", maximized ? "还原" : "最大化");
 }
 
+function setClosePromptControlsDisabled(disabled) {
+  el.cancelCloseApp.disabled = disabled;
+  el.cancelCloseAppIcon.disabled = disabled;
+  el.exitCloseApp.disabled = disabled;
+  el.backgroundCloseApp.disabled = disabled;
+  el.rememberCloseAppDecision.disabled = disabled;
+}
+
+function showDesktopClosePrompt() {
+  if (!el.closeAppDialog || el.closeAppDialog.open) return;
+  closePromptSubmitting = false;
+  el.closeAppDialog.classList.remove("is-exiting");
+  el.rememberCloseAppDecision.checked = false;
+  el.closeAppStatus.textContent = "";
+  setClosePromptControlsDisabled(false);
+  el.closeAppDialog.showModal();
+  el.backgroundCloseApp.focus({ preventScroll: true });
+}
+
+async function submitDesktopCloseDecision(action) {
+  const desktop = window.ncmDesktop;
+  if (closePromptSubmitting || typeof desktop?.submitCloseDecision !== "function") return;
+  closePromptSubmitting = true;
+  setClosePromptControlsDisabled(true);
+  el.closeAppStatus.textContent = action === "exit" ? "正在准备安全退出…" : "";
+  try {
+    const accepted = await desktop.submitCloseDecision({
+      action,
+      remember: action !== "cancel" && el.rememberCloseAppDecision.checked,
+    });
+    if (!accepted) {
+      el.closeAppStatus.textContent = "本次关闭请求已经失效，请重新点击窗口关闭按钮。";
+      closePromptSubmitting = false;
+      setClosePromptControlsDisabled(false);
+      return;
+    }
+    if (action === "exit") {
+      el.closeAppDialog.classList.add("is-exiting");
+      el.closeAppStatus.textContent = "正在停止活动任务并保存最新检查点，完成后会自动退出。";
+      return;
+    }
+    el.closeAppDialog.close();
+  } catch (error) {
+    el.closeAppStatus.textContent = `关闭操作未完成：${error.message}`;
+    closePromptSubmitting = false;
+    setClosePromptControlsDisabled(false);
+  }
+}
+
 async function setupDesktopWindowControls() {
   const desktop = window.ncmDesktop;
-  if (!desktop || desktop.platform !== "win32") return;
+  if (!desktop) return;
+  desktop.onCloseRequested?.(showDesktopClosePrompt);
+  if (desktop.platform !== "win32") return;
   el.windowMinimize.addEventListener("click", () => desktop.minimize());
   el.windowClose.addEventListener("click", () => desktop.close());
   el.windowMaximize.addEventListener("click", async () => renderMaximized(await desktop.toggleMaximize()));
@@ -3605,6 +3658,14 @@ el.poolBuildNotice.addEventListener("click", () => {
   setInspectorCollapsed(false);
 });
 el.globalSettingsButton.addEventListener("click", () => void openGlobalSettings());
+el.cancelCloseApp.addEventListener("click", () => void submitDesktopCloseDecision("cancel"));
+el.cancelCloseAppIcon.addEventListener("click", () => void submitDesktopCloseDecision("cancel"));
+el.exitCloseApp.addEventListener("click", () => void submitDesktopCloseDecision("exit"));
+el.backgroundCloseApp.addEventListener("click", () => void submitDesktopCloseDecision("background"));
+el.closeAppDialog.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  void submitDesktopCloseDecision("cancel");
+});
 $("#closeGlobalSettingsButton").addEventListener("click", () => el.globalSettingsDialog.close());
 $("#cancelGlobalSettingsButton").addEventListener("click", () => el.globalSettingsDialog.close());
 el.saveGlobalSettings.addEventListener("click", () => void saveGlobalSettings());

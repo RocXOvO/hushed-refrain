@@ -5,16 +5,44 @@ import test from "node:test";
 import {
   DESKTOP_EXPORT_CHANNELS,
   DESKTOP_SETTINGS_CHANNELS,
+  DESKTOP_WINDOW_CHANNELS,
   desktopDashboardUrl,
   desktopResultReportIdentityMatches,
   desktopResultReportLoadError,
   desktopResultReportUrl,
   desktopWindowChrome,
+  parseDesktopCloseDecision,
   parseDesktopResultExportRequest,
   redactDesktopResultExportText,
   resultReportFilename,
   sanitizeWindowsPdfFilename,
 } from "../src/window-shell";
+
+test("keeps the client-styled close prompt on explicit desktop bridge channels", () => {
+  assert.deepEqual(DESKTOP_WINDOW_CHANNELS, {
+    close: "desktop-window:close",
+    closeDecision: "desktop-window:close-decision",
+    closeRequested: "desktop-window:close-requested",
+    getMaximized: "desktop-window:get-maximized",
+    maximizedChanged: "desktop-window:maximized-changed",
+    minimize: "desktop-window:minimize",
+    toggleMaximize: "desktop-window:toggle-maximize",
+  });
+  assert.deepEqual(parseDesktopCloseDecision({ action: "background", remember: true }), {
+    action: "background",
+    remember: true,
+  });
+  assert.deepEqual(parseDesktopCloseDecision({ action: "cancel", remember: true }), {
+    action: "cancel",
+    remember: false,
+  });
+  assert.throws(() => parseDesktopCloseDecision({ action: "minimize", remember: false }), /关闭选择无效/);
+  assert.throws(() => parseDesktopCloseDecision({ action: "exit", remember: "yes" }), /记住选择状态无效/);
+  const preload = readFileSync(join(process.cwd(), "src", "electron-preload.ts"), "utf8");
+  assert.match(preload, /onCloseRequested: \(listener/);
+  assert.match(preload, /submitCloseDecision: \(decision/);
+  assert.match(preload, /closeRequestQueued/);
+});
 
 test("keeps PDF export and cancellation on explicit desktop bridge channels", () => {
   assert.deepEqual(DESKTOP_EXPORT_CHANNELS, {

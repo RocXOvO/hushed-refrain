@@ -19,8 +19,10 @@ import {
   desktopResultReportIdentityMatches,
   desktopResultReportUrl,
   desktopWindowChrome,
+  parseDesktopCloseDecision,
   parseDesktopResultExportRequest,
   resultReportFilename,
+  type DesktopCloseDecision,
 } from "./window-shell";
 import {
   DEFAULT_DESKTOP_SETTINGS,
@@ -59,6 +61,11 @@ let isQuitting = false;
 let quitApproved = false;
 let gracefulQuitPromise: Promise<void> | undefined;
 let closeDecisionPending = false;
+let pendingCloseDecision: {
+  window: BrowserWindow;
+  resolve: (decision: DesktopCloseDecision) => void;
+  cleanup: () => void;
+} | undefined;
 
 function currentUpdateState() {
   return windowsUpdater?.getState() ?? windowsUpdateFallbackState ?? unsupportedWindowsUpdateState(app.getVersion());
@@ -122,6 +129,17 @@ ipcMain.handle(DESKTOP_WINDOW_CHANNELS.toggleMaximize, (event) => {
   if (window.isMaximized()) window.unmaximize();
   else window.maximize();
   return window.isMaximized();
+});
+ipcMain.handle(DESKTOP_WINDOW_CHANNELS.closeDecision, (event, value: unknown) => {
+  const window = senderWindow(event);
+  if (!window || window !== mainWindow) throw new Error("当前窗口不能提交关闭选择。");
+  const decision = parseDesktopCloseDecision(value);
+  const pending = pendingCloseDecision;
+  if (!pending || pending.window !== window) return false;
+  pendingCloseDecision = undefined;
+  pending.cleanup();
+  pending.resolve(decision);
+  return true;
 });
 ipcMain.handle(DESKTOP_UPDATE_CHANNELS.getState, () => currentUpdateState());
 ipcMain.handle(DESKTOP_UPDATE_CHANNELS.check, async () => windowsUpdater?.check() ?? currentUpdateState());
@@ -478,27 +496,43 @@ async function rememberCloseBehavior(behavior: DesktopCloseBehavior): Promise<vo
   }
 }
 
+function requestRendererCloseDecision(window: BrowserWindow): Promise<DesktopCloseDecision> {
+  if (window.isDestroyed()) return Promise.resolve({ action: "cancel", remember: false });
+  return new Promise((resolve) => {
+    const onUnavailable = (): void => {
+      const pending = pendingCloseDecision;
+      if (!pending || pending.window !== window) return;
+      pendingCloseDecision = undefined;
+      pending.cleanup();
+      pending.resolve({ action: "cancel", remember: false });
+    };
+    const cleanup = (): void => {
+      window.removeListener("closed", onUnavailable);
+      window.removeListener("unresponsive", onUnavailable);
+      window.webContents.removeListener("render-process-gone", onUnavailable);
+    };
+    pendingCloseDecision = { window, resolve, cleanup };
+    window.once("closed", onUnavailable);
+    window.once("unresponsive", onUnavailable);
+    window.webContents.once("render-process-gone", onUnavailable);
+    try {
+      window.webContents.send(DESKTOP_WINDOW_CHANNELS.closeRequested);
+    } catch {
+      onUnavailable();
+    }
+  });
+}
+
 async function requestWindowClose(window: BrowserWindow): Promise<void> {
   if (closeDecisionPending || window.isDestroyed()) return;
   closeDecisionPending = true;
   try {
     let behavior = desktopSettings.closeBehavior;
     if (behavior === "ask") {
-      const decision = await dialog.showMessageBox(window, {
-        type: "question",
-        title: "关闭乐评寻踪",
-        message: "要退出应用，还是转入后台继续运行？",
-        detail: "转入后台会保留本地服务和正在进行的任务；退出应用会结束当前进程。",
-        buttons: ["退出应用", "转入后台", "取消"],
-        defaultId: 1,
-        cancelId: 2,
-        noLink: true,
-        checkboxLabel: "记住我的选择",
-        checkboxChecked: false,
-      });
-      if (decision.response === 2) return;
-      behavior = decision.response === 0 ? "exit" : "background";
-      if (decision.checkboxChecked) await rememberCloseBehavior(behavior);
+      const decision = await requestRendererCloseDecision(window);
+      if (decision.action === "cancel") return;
+      behavior = decision.action;
+      if (decision.remember) await rememberCloseBehavior(behavior);
     }
     if (behavior === "background") {
       moveWindowToBackground(window);

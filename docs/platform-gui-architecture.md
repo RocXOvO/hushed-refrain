@@ -21,6 +21,8 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 桌面 PDF 从导出开始发出 `save-dialog` 进度，`elapsedMs` 是包含保存对话框等待的单调累计耗时，不是独立阶段耗时。默认文件名由 `resultReportFilename` 写入完整 canonical UID/EncryptUin，这是用户明确可见的导出信息；`sanitizeWindowsPdfFilename` 只负责把 Windows 禁止字符/控制字符替换为兼容字符、清理尾部点号/空格、避开设备保留名、将主文件名限制到 180 字符并固定 `.pdf`，不对目标做脱敏。日志、错误和诊断仍不得包含完整目标。选定路径后打开持久进度浮层，持续显示读取、字体、生成、写入阶段与累计耗时，并提供显式取消；`showModal()` 暂不可用时回退到 `show()`，展示接口都失败也不能中断实际导出。终态必须关闭隐藏报告窗口、移除进度监听并恢复导出按钮；选定路径后的阶段全部有界。打包冒烟必须从 renderer 的 `window.ncmDesktop` 穿过 preload/IPC，再完成隐藏 Chromium 加载、字体、打印与原子写入，并验证完整进度序列、目标路径和 `%PDF-` 文件头。
 
+桌面主窗口的系统关闭事件和自绘 Windows 关闭按钮都进入同一关闭生命周期。`electron-main` 只向当前主窗口发送一次窄桥 `close-requested`；renderer 用客户端主题的 `closeAppDialog` 呈现取消、转入后台、安全退出和“记住选择”，再通过严格 DTO 回传决定。只有当前主窗口的在途请求可结算，重复或过时回复无效；renderer 关闭、崩溃或无响应时默认取消关闭。选择退出后弹窗保持可见、禁用重复操作并播报停止任务与保存检查点，随后复用既有最多 45 秒的 graceful-quit；选择后台或取消则立即收敛弹窗。展示层不得调用原生 `showMessageBox` 复制另一套关闭语义，记忆选择也只能 partial update `closeBehavior`，不能覆盖鼠标尾迹设置。
+
 ### Obsidian Silk Aperture 交接
 
 - `PlatformWaveTransition.create({ sourcePlatform, targetPlatform, direction, commit })` 返回 `{ finished, cancel }`。内部状态固定为 `idle → preparing → covering → covered/commit → revealing → settled`；`commit()` 是唯一允许修改 platform/mode、`hidden`/`inert`、结果/SSE 和 ARIA 的入口，只调用一次并显式返回布尔值。
@@ -68,7 +70,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
 - 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 弹簧链、速度线宽、端点 taper、4 条 40 顶点 triangle strip、420 ms 与 DPR/像素上限不可回归，并明确排除随机数、粒子、模糊和业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
-- 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。
+- 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。
 - 搜索的旧响应不能覆盖新查询；平台、查询和选中 ID 必须同代。
