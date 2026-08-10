@@ -10,6 +10,7 @@ const el = {
   qqSongId: $("#qqSongId"), qqSongQuery: $("#qqSongQuery"), qqSongResults: $("#qqSongResults"), qqSongPreview: $("#qqSongPreview"), qqSongLookup: $("#qqSongLookupButton"),
   songId: $("#songId"), songQuery: $("#neteaseSongQuery"), songResults: $("#neteaseSongResults"), songPreview: $("#songPreview"), songLookup: $("#songLookupButton"), lookup: $("#lookupButton"),
   userPreview: $("#userPreview"), userNickname: $("#userNickname"), userMeta: $("#userMeta"), recordProbe: $("#recordProbe"), likesProbe: $("#likesProbe"), playlistsProbe: $("#playlistsProbe"),
+  sourceSegmented: $("#sourceSegmented"), sourceSelectionIndicator: $("#sourceSelectionIndicator"), recordScopeRegion: $("#recordScopeRegion"),
   poolStatus: $("#poolStatus"), poolState: $("#poolStateIndicator"), poolEntries: $("#poolEntries"), poolTable: $("#poolTableBody"), poolToggle: $("#poolToggleButton"), poolBuildNotice: $("#poolBuildNotice"), poolBuildNoticeTitle: $("#poolBuildNoticeTitle"), poolBuildNoticeDetail: $("#poolBuildNoticeDetail"),
   poolDiscovery: $("#poolDiscovery"), clashPoolPane: $("#clashPoolPane"), clashConfigField: $("#clashConfigField"), clashConfig: $("#clashConfigSelect"), clashConfigSelectAll: $("#clashConfigSelectAllButton"), poolSize: $("#poolSize"), poolCandidates: $("#poolCandidates"), externalPoolPane: $("#externalPoolPane"), externalProxies: $("#externalProxies"),
   parallelStart: $("#parallelStartButton"), sourceStart: $("#sourceStartButton"), qqSongStart: $("#qqSongStartButton"), qqLikesStart: $("#qqLikesStartButton"), dryRun: $("#dryRunButton"), stop: $("#stopButton"), refresh: $("#refreshButton"),
@@ -49,6 +50,7 @@ let poolBuildError = "";
 let poolChangeInFlight = false;
 let poolMutationVersion = 0;
 let poolSourceSwitchVersion = 0;
+let sourceIndicatorResizeObserver;
 let poolLaneCount = 1;
 let poolNetworkMs = 400;
 let knownMatches = -1;
@@ -2725,8 +2727,7 @@ async function restoreResumeTask() {
     $("#fresh").checked = false;
     $("#qqSongFresh").checked = false;
     $("#qqLikesFresh").checked = false;
-    const source = el.sourceForm.elements.namedItem("source")?.value;
-    $("#recordScopeField").hidden = source === "likes" || source === "playlists";
+    syncSourceSelection({ animate: false });
     const adjustments = Array.isArray(restored.adjustments) ? restored.adjustments : [];
     const messages = [];
     if (adjustments.includes("netease-request-spacing-per-start-v1")) {
@@ -2739,6 +2740,58 @@ async function restoreResumeTask() {
   } catch {
     return false;
   }
+}
+
+function sourceShowsRecordScope(value) {
+  return !["likes", "playlists"].includes(value);
+}
+
+function selectedSourceValue() {
+  return el.sourceForm.elements.namedItem("source")?.value || "record";
+}
+
+function syncSourceIndicator(options) {
+  const animate = options?.animate !== false;
+  const selectedInput = el.sourceSegmented.querySelector('input[name="source"]:checked');
+  const selectedControl = selectedInput?.nextElementSibling;
+  if (!selectedControl) return;
+  const groupRect = el.sourceSegmented.getBoundingClientRect();
+  const controlRect = selectedControl.getBoundingClientRect();
+  const canAnimate = animate
+    && el.sourceSegmented.classList.contains("is-ready")
+    && !document.body.classList.contains("platform-switching")
+    && !matchMedia("(prefers-reduced-motion: reduce)").matches;
+  el.sourceSegmented.classList.toggle("is-static", !canAnimate);
+  el.sourceSegmented.style.setProperty("--source-active-x", `${controlRect.left - groupRect.left - el.sourceSegmented.clientLeft}px`);
+  el.sourceSegmented.style.setProperty("--source-active-y", `${controlRect.top - groupRect.top - el.sourceSegmented.clientTop}px`);
+  el.sourceSegmented.style.setProperty("--source-active-width", `${controlRect.width}px`);
+  el.sourceSegmented.style.setProperty("--source-active-height", `${controlRect.height}px`);
+  el.sourceSegmented.classList.add("is-ready");
+  if (!canAnimate) {
+    void el.sourceSelectionIndicator.offsetWidth;
+    el.sourceSegmented.classList.remove("is-static");
+  }
+}
+
+function syncSourceSelection(options) {
+  const animate = options?.animate !== false;
+  const collapsed = !sourceShowsRecordScope(selectedSourceValue());
+  el.recordScopeRegion.classList.toggle("is-collapsed", collapsed);
+  el.recordScopeRegion.inert = collapsed;
+  el.recordScopeRegion.setAttribute("aria-hidden", String(collapsed));
+  syncSourceIndicator({ animate });
+}
+
+function setupSourceSelectionMotion() {
+  syncSourceSelection({ animate: false });
+  if (sourceIndicatorResizeObserver || typeof ResizeObserver !== "function") return;
+  sourceIndicatorResizeObserver = new ResizeObserver(() => syncSourceIndicator({ animate: false }));
+  sourceIndicatorResizeObserver.observe(el.sourceSegmented);
+}
+
+function destroySourceSelectionMotion() {
+  sourceIndicatorResizeObserver?.disconnect();
+  sourceIndicatorResizeObserver = undefined;
 }
 
 async function switchMode(value) {
@@ -3745,7 +3798,7 @@ $$('[data-platform-target]').forEach((item) => {
   });
 });
 $$('input[name="poolSource"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) void switchPoolSource(input.value); }));
-$$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { $("#recordScopeField").hidden = input.checked && ["likes", "playlists"].includes(input.value); }));
+$$('input[name="source"]').forEach((input) => input.addEventListener("change", () => { if (input.checked) syncSourceSelection(); }));
 $$('.tab').forEach((tab) => {
   tab.addEventListener("click", () => void activateTaskTab(tab));
   tab.addEventListener("keydown", (event) => {
@@ -3765,6 +3818,7 @@ $$('.tab').forEach((tab) => {
 setupAnimatedDisclosures(); void setupDesktopWindowControls();
 configureModeSwitch();
 syncModeVisibility();
+setupSourceSelectionMotion();
 setTaskPanelCollapsed(document.body.classList.contains("task-panel-collapsed"));
 setInspectorCollapsed(document.body.classList.contains("inspector-collapsed"));
 syncInspectorForViewport();
@@ -3835,12 +3889,14 @@ addEventListener("pagehide", () => {
   pendingStartupSettlement = undefined;
   el.taskStartupProgress.hidden = true;
   inspectorOverlayQuery.removeEventListener("change", syncInspectorForViewport);
+  destroySourceSelectionMotion();
   destroyPointerSilkTrail();
 });
 addEventListener("pageshow", (event) => {
   if (!event.persisted || !pageLifecycleSuspended) return;
   pageLifecycleSuspended = false;
   setupPointerSilkTrail();
+  setupSourceSelectionMotion();
   let streamConnected = false;
   if (desiredPlatform !== platform) {
     try {

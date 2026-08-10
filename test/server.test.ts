@@ -795,10 +795,13 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=61/);
+  assert.match(pageText, /styles\.css\?v=62/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=72/);
+  assert.match(pageText, /app\.js\?v=74/);
+  assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
+  assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
+  assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);
   assert.match(pageText, /id="liveTaskAvatar"/);
@@ -1159,6 +1162,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.main-pane\s*\{[^}]*position:\s*relative[^}]*isolation:\s*isolate/s);
   assert.match(styleText, /\.pointer-silk-trail-canvas\s*\{[^}]*position:\s*absolute[^}]*pointer-events:\s*none/s);
   assert.match(styleText, /body\.platform-switching \.pointer-silk-trail-canvas\s*\{[^}]*visibility:\s*hidden/s);
+  assert.match(styleText, /\.source-selection-indicator\s*\{[^}]*transform:\s*translate3d\(var\(--source-active-x\), var\(--source-active-y\), 0\)[^}]*transition:/s);
+  assert.match(styleText, /\.source-scope-region\.is-collapsed\s*\{[^}]*grid-template-rows:\s*minmax\(0, 0fr\)[^}]*visibility:\s*hidden/s);
+  assert.match(appText, /function syncSourceSelection[\s\S]{0,360}recordScopeRegion\.classList\.toggle\("is-collapsed", collapsed\)/);
+  assert.match(appText, /new ResizeObserver\(\(\) => syncSourceIndicator\(\{ animate: false \}\)\)/);
   assert.match(styleText, /\.settings-toggle-track/);
   assert.doesNotMatch(styleText, /body\[data-platform="qq"\] \.app-shell\s*\{/s);
   assert.doesNotMatch(styleText, /body\[data-platform="qq"\] \.navigation-label\s*\{/s);

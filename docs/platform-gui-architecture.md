@@ -19,6 +19,8 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 交互几何使用角色 token：微小 6 px、控件 10 px、表面 14 px、浮层 18 px，标签/状态使用 pill。所有普通 `button`/`.button` 用 `--motion-control` 约 150 ms 统一颜色、背景、边框和阴影反馈，按下的 `scale(.987)` 由实际使用的 `--motion-press` 约 80 ms 控制；disabled/`aria-disabled` 降低对比并禁止 hover、位移和阴影，reduced-motion 关闭过渡和缩放。Windows 原生窗口控制按钮保留系统手感，按下不缩放。
 
+网易云“歌曲来源”不直接跳变选中背景：`#sourceSelectionIndicator` 只在 change/resize 时读取当前选项几何，以 220 ms transform/size 过渡滑到目标。排行范围放在 `#recordScopeRegion` 中，选择喜欢歌曲或用户歌单时用可逆的 grid-row/opacity/translate 过渡收拢，恢复含排行的来源时可从当前帧直接反向展开。`aria-hidden` 与 `inert` 在选择当帧即时收敛；首次布局、ResizeObserver、BFCache 和 reduced-motion 静态对齐，不排队旧动画。
+
 桌面 PDF 从导出开始发出 `save-dialog` 进度，`elapsedMs` 是包含保存对话框等待的单调累计耗时，不是独立阶段耗时。默认文件名由 `resultReportFilename` 写入完整 canonical UID/EncryptUin，这是用户明确可见的导出信息；`sanitizeWindowsPdfFilename` 只负责把 Windows 禁止字符/控制字符替换为兼容字符、清理尾部点号/空格、避开设备保留名、将主文件名限制到 180 字符并固定 `.pdf`，不对目标做脱敏。日志、错误和诊断仍不得包含完整目标。选定路径后打开持久进度浮层，持续显示读取、字体、生成、写入阶段与累计耗时，并提供显式取消；`showModal()` 暂不可用时回退到 `show()`，展示接口都失败也不能中断实际导出。终态必须关闭隐藏报告窗口、移除进度监听并恢复导出按钮；选定路径后的阶段全部有界。打包冒烟必须从 renderer 的 `window.ncmDesktop` 穿过 preload/IPC，再完成隐藏 Chromium 加载、字体、打印与原子写入，并验证完整进度序列、目标路径和 `%PDF-` 文件头。
 
 桌面主窗口的系统关闭事件和自绘 Windows 关闭按钮都进入同一关闭生命周期。`electron-main` 只向当前主窗口发送一次窄桥 `close-requested`；renderer 用客户端主题的 `closeAppDialog` 呈现取消、转入后台、安全退出和“记住选择”，再通过严格 DTO 回传决定。只有当前主窗口的在途请求可结算，重复或过时回复无效；renderer 关闭、崩溃或无响应时默认取消关闭。选择退出后弹窗保持可见、禁用重复操作并播报停止任务与保存检查点，随后复用既有最多 45 秒的 graceful-quit；选择后台或取消则立即收敛弹窗。展示层不得调用原生 `showMessageBox` 复制另一套关闭语义，记忆选择也只能 partial update `closeBehavior`，不能覆盖鼠标尾迹设置。
@@ -71,6 +73,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
 - 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 链按 point 19→1 倒序传播后才更新 head，递增 spring 与递减 friction 的确定性抗共振配对覆盖参考范围，并保留 32 px head-lag 软限幅。对 100 px 半径、持续 240 帧的圆周输入，必须分别扫描 0.18、0.20、0.215、0.265 rad/frame，并验证四条线的全部 20 个点始终处于 160 px 包络内。world-space 宽度/偏移投影后分别受 22 px/26 px 上限约束，峰值 opacity 为 0.76，每帧只有一次上传和 4 次 40 顶点 `TRIANGLE_STRIP` draw。实现不得引入纹理、FBO、随机数、粒子、模糊、后处理或业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，DPR/像素上限不可回归，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
 - 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
+- 来源选择测试必须覆盖滑动高亮的几何对齐、听歌排行↔喜欢歌曲快速反向、排行范围的 `aria-hidden`/`inert`、reduced-motion 静态收敛，以及 1280、900、390 px 下无横向溢出与控制台错误。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。
 - 搜索的旧响应不能覆盖新查询；平台、查询和选中 ID 必须同代。

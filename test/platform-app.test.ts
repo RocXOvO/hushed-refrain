@@ -190,6 +190,90 @@ test("platform switching makes new WAAPI and disclosure motion settle immediatel
   assert.equal(animationCalls, 0);
 });
 
+test("source selection glides between choices and reverses the scope collapse without stale state", () => {
+  const sourceControl = { value: "record" };
+  const groupClasses = new Set<string>();
+  const regionClasses = new Set<string>();
+  const properties = new Map<string, string>();
+  const regionAttributes = new Map<string, string>();
+  let reducedMotion = false;
+  let layoutFlushes = 0;
+  const controlRects = {
+    record: { left: 14, top: 24, width: 102, height: 34 },
+    likes: { left: 120, top: 24, width: 102, height: 34 },
+  };
+  const context: Record<string, unknown> = {
+    document: { body: { classList: { contains: () => false } } },
+    matchMedia: () => ({ matches: reducedMotion }),
+    el: {
+      sourceForm: { elements: { namedItem: () => sourceControl } },
+      sourceSegmented: {
+        clientLeft: 1,
+        clientTop: 1,
+        classList: {
+          add(name: string) { groupClasses.add(name); },
+          remove(name: string) { groupClasses.delete(name); },
+          contains(name: string) { return groupClasses.has(name); },
+          toggle(name: string, enabled: boolean) { enabled ? groupClasses.add(name) : groupClasses.delete(name); },
+        },
+        style: { setProperty(name: string, value: string) { properties.set(name, value); } },
+        querySelector() {
+          const rect = controlRects[sourceControl.value as keyof typeof controlRects];
+          return { nextElementSibling: { getBoundingClientRect: () => rect } };
+        },
+        getBoundingClientRect: () => ({ left: 10, top: 20, width: 216, height: 76 }),
+      },
+      sourceSelectionIndicator: { get offsetWidth() { layoutFlushes += 1; return 102; } },
+      recordScopeRegion: {
+        inert: false,
+        classList: { toggle(name: string, enabled: boolean) { enabled ? regionClasses.add(name) : regionClasses.delete(name); } },
+        setAttribute(name: string, value: string) { regionAttributes.set(name, value); },
+      },
+    },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("sourceShowsRecordScope")}
+    ${extractFunction("selectedSourceValue")}
+    ${extractFunction("syncSourceIndicator")}
+    ${extractFunction("syncSourceSelection")}
+    globalThis.syncSourceSelection = syncSourceSelection;
+  `, context);
+  const sync = context.syncSourceSelection as (options?: { animate?: boolean }) => void;
+
+  sync({ animate: false });
+  assert.equal(regionClasses.has("is-collapsed"), false);
+  assert.equal(regionAttributes.get("aria-hidden"), "false");
+  assert.equal((context.el as any).recordScopeRegion.inert, false);
+  assert.equal(properties.get("--source-active-x"), "3px");
+  assert.equal(properties.get("--source-active-y"), "3px");
+  assert.equal(groupClasses.has("is-ready"), true);
+  assert.equal(groupClasses.has("is-static"), false);
+  assert.equal(layoutFlushes, 1, "initial geometry is committed without an arrival animation");
+
+  sourceControl.value = "likes";
+  sync();
+  assert.equal(regionClasses.has("is-collapsed"), true);
+  assert.equal(regionAttributes.get("aria-hidden"), "true");
+  assert.equal((context.el as any).recordScopeRegion.inert, true);
+  assert.equal(properties.get("--source-active-x"), "109px");
+  assert.equal(layoutFlushes, 1, "an ordinary selection keeps the CSS glide enabled");
+
+  sourceControl.value = "record";
+  sync();
+  assert.equal(regionClasses.has("is-collapsed"), false, "rapid reversal immediately restores the semantic state");
+  assert.equal(regionAttributes.get("aria-hidden"), "false");
+  assert.equal((context.el as any).recordScopeRegion.inert, false);
+  assert.equal(properties.get("--source-active-x"), "3px");
+
+  reducedMotion = true;
+  sourceControl.value = "likes";
+  sync();
+  assert.equal(regionClasses.has("is-collapsed"), true);
+  assert.equal(groupClasses.has("is-static"), false);
+  assert.equal(layoutFlushes, 2, "reduced motion commits the new geometry synchronously");
+});
+
 test("global settings keep the browser trail session-only while desktop close controls stay disabled", () => {
   const closeInputs = [
     { value: "ask", checked: false, disabled: false },
