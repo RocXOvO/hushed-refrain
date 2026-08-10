@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.4`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（532/532）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实 Electron QA 已验证应用内关闭弹窗、取消与 graceful exit，窗口关闭不再使用原生系统询问框。真实浏览器此前已在 1440×900、900×640 与 390×844 验收两平台尾迹、会话开关、快速 N→Q→N 和零 console 错误。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。当前发布线为 `v1.1.5`；发布时仍须独立核对 `main`、`origin/main`、tag、GitHub Release target 与资产。该发布线复验 `npm run check`、`npm test`（535/535）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实浏览器已对照上游 Follow 验证两平台长拖尾与持续高速圆周包络；既有 1440×900、900×640 与 390×844 布局、会话开关、快速 N→Q→N 和零 console 错误边界保持不变。Windows 包仍须由同一提交的 GitHub workflow 完成打包与烟测；未发现新的 P0。
 
 ## 未修复的 P1
 

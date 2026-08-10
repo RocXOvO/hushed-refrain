@@ -23,6 +23,7 @@ function fakeGl(failure?: Failure) {
   const deletedPrograms: object[] = [];
   const deletedVertexArrays: object[] = [];
   const deletedBuffers: object[] = [];
+  const uploadSnapshots: number[][] = [];
   let uploads = 0;
   const gl = {
     VERTEX_SHADER: 1,
@@ -46,6 +47,7 @@ function fakeGl(failure?: Failure) {
     deletedPrograms,
     deletedVertexArrays,
     deletedBuffers,
+    uploadSnapshots,
     get createdPrograms() { return createdPrograms; },
     get createdVertexArrays() { return createdVertexArrays; },
     get createdBuffers() { return createdBuffers; },
@@ -84,9 +86,10 @@ function fakeGl(failure?: Failure) {
     },
     bindBuffer() {},
     bufferData() {},
-    bufferSubData() {
+    bufferSubData(_target: number, _offset: number, data: Float32Array) {
       if (failure === "upload") throw new Error("synthetic upload failure");
       uploads += 1;
+      uploadSnapshots.push(Array.from(data));
     },
     deleteBuffer(value: object) { deletedBuffers.push(value); },
     enableVertexAttribArray() {},
@@ -341,6 +344,91 @@ test("pointer MeshLine trail uses the low-power bounded WebGL2 pipeline", () => 
   assert.match(app.gl.shaderSources.join("\n"), /miter = clamp/);
 });
 
+test("pointer MeshLine trail projects reference world width and offsets into a bounded CSS footprint", () => {
+  const app = runtime({ width: 1_280, height: 720, dpr: 2 });
+  app.context.PointerSilkTrail.create({ host: app.host, enabled: true });
+  app.host.dispatch("pointermove", { pointerType: "mouse", clientX: 180, clientY: 210 });
+  app.runFrame(16);
+  for (let step = 1; step <= 10; step += 1) {
+    const now = 16 + step * 16;
+    app.setNow(now);
+    app.host.dispatch("pointermove", {
+      pointerType: "mouse",
+      clientX: 180 + step * 48,
+      clientY: 210 + (step % 2 === 0 ? 28 : -28),
+    });
+    app.runFrame(now);
+  }
+  const widths = app.gl.scalarUniforms
+    .filter((entry) => entry.name === "u_lineWidth")
+    .map((entry) => entry.value);
+  const opacities = app.gl.scalarUniforms
+    .filter((entry) => entry.name === "u_opacity")
+    .map((entry) => entry.value);
+  assert.ok(Math.max(...widths) >= 16, "sustained movement should no longer stay near the old 11px cap");
+  assert.ok(Math.max(...widths) <= 22);
+  assert.ok(Math.abs(Math.max(...opacities) - 0.76) < 0.0001);
+});
+
+test("pointer MeshLine trail propagates motion from tail to head across previous frames", () => {
+  const app = runtime({ width: 1_280, height: 720 });
+  app.context.PointerSilkTrail.create({ host: app.host, enabled: true });
+  app.host.dispatch("pointermove", { pointerType: "mouse", clientX: 180, clientY: 300 });
+  app.runFrame(16);
+  for (let step = 1; step <= 30; step += 1) {
+    const now = 16 + step * 16;
+    app.setNow(now);
+    app.host.dispatch("pointermove", {
+      pointerType: "mouse",
+      clientX: 180 + step * 12,
+      clientY: 300,
+    });
+    app.runFrame(now);
+  }
+  const vertices = app.gl.uploadSnapshots.at(-1)!;
+  const headX = vertices[2];
+  const headY = vertices[3];
+  const tailBase = (19 * 2) * 9;
+  const tailX = vertices[tailBase + 2];
+  const tailY = vertices[tailBase + 3];
+  assert.ok(Math.hypot(headX - tailX, headY - tailY) >= 120,
+    "tail should preserve multi-frame propagation instead of collapsing in one frame");
+});
+
+test("pointer MeshLine trail keeps sustained fast circles inside a bounded envelope", () => {
+  const centerX = 600;
+  const centerY = 360;
+  const radius = 100;
+  for (const radiansPerFrame of [0.18, 0.2, 0.215, 0.265]) {
+    const app = runtime({ width: 1_280, height: 720 });
+    app.context.PointerSilkTrail.create({ host: app.host, enabled: true });
+    let largestTrailRadius = 0;
+    for (let step = 0; step < 240; step += 1) {
+      const now = 16 + step * 16;
+      const angle = step * radiansPerFrame;
+      app.setNow(now);
+      app.host.dispatch("pointermove", {
+        pointerType: "mouse",
+        clientX: 40 + centerX + radius * Math.cos(angle),
+        clientY: 60 + centerY + radius * Math.sin(angle),
+      });
+      app.runFrame(now);
+      if (step < 120) continue;
+      const vertices = app.gl.uploadSnapshots.at(-1)!;
+      for (let line = 0; line < 4; line += 1) {
+        const lineBase = line * 40 * 9;
+        for (let point = 0; point < 20; point += 1) {
+          const pointBase = lineBase + point * 2 * 9;
+          largestTrailRadius = Math.max(largestTrailRadius,
+            Math.hypot(vertices[pointBase + 2] - centerX, vertices[pointBase + 3] - centerY));
+        }
+      }
+    }
+    assert.ok(largestTrailRadius <= 160,
+      `100px pointer circles at ${radiansPerFrame}rad/frame must stay inside 160px, got ${largestTrailRadius.toFixed(1)}px`);
+  }
+});
+
 test("pointer MeshLine trail follows reduced-motion, fine-pointer, and pointer-type guards", () => {
   for (const options of [{ reduced: true }, { fine: false }]) {
     const app = runtime(options);
@@ -452,15 +540,20 @@ test("pointer MeshLine source preserves Makio follow dynamics without random or 
   assert.match(trailSource, /NUM_LINES = 4/);
   assert.match(trailSource, /SPRINGS = new Float32Array/);
   assert.match(trailSource, /FRICTIONS = new Float32Array/);
+  assert.match(trailSource, /for \(let point = NUM_POINTS - 1; point >= 1; point -= 1\)/);
   assert.match(trailSource, /pointXs\[index\] \+= \(pointXs\[index - 1\] - pointXs\[index\]\) \* 0\.9/);
   assert.match(trailSource, /mouseSpeed \+= .* \* 0\.15/);
   assert.match(trailSource, /gl\.drawArrays\(gl\.TRIANGLE_STRIP/);
   assert.match(trailSource, /IDLE_STOP_MS = HOLD_MS \+ FADE_MS/);
   assert.match(trailSource, /MAX_COLOR_PIXELS = 800_000/);
-  assert.match(trailSource, /MAX_LINE_WIDTH_PX = 11/);
-  assert.match(trailSource, /12\.5 \* mouseSpeed \/ \(0\.38 \+ mouseSpeed\)/);
-  assert.match(trailSource, /SPRINGS = new Float32Array\(\[0\.057, 0\.06, 0\.063, 0\.066\]\)/);
-  assert.match(trailSource, /RADII = new Float32Array\(\[5, 7, 9, 6\]\)/);
+  assert.match(trailSource, /MAX_LINE_WIDTH_PX = 22/);
+  assert.match(trailSource, /MAX_OFFSET_RADIUS_PX = 26/);
+  assert.match(trailSource, /MAX_HEAD_LAG_PX = 32/);
+  assert.match(trailSource, /MATERIAL_OPACITY = 0\.76/);
+  assert.match(trailSource, /projectedWidthPx = referenceWorldWidth \* cssHeight \/ CAMERA_WORLD_HEIGHT_AT_PLANE/);
+  assert.match(trailSource, /SPRINGS = new Float32Array\(\[0\.041, 0\.054, 0\.068, 0\.079\]\)/);
+  assert.match(trailSource, /FRICTIONS = new Float32Array\(\[0\.898, 0\.867, 0\.834, 0\.802\]\)/);
+  assert.match(trailSource, /OFFSET_WORLD_RADII = new Float32Array\(\[0\.11, 0\.18, 0\.27, 0\.23\]\)/);
   assert.match(trailSource, /Copyright \(c\) 2025 David Ronai/);
   assert.doesNotMatch(trailSource, /Math\.random|localStorage|sessionStorage|readPixels|drawWindow|html2canvas|createRadialGradient|drawImage|shadowBlur|CanvasRenderingContext2D/);
   assert.doesNotMatch(trailSource, /stopPropagation|setPointerCapture/);

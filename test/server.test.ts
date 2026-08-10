@@ -797,7 +797,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /styles\.css\?v=61/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /pointer-silk-trail\.js\?v=5/);
+  assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
   assert.match(pageText, /app\.js\?v=72/);
   assert.match(pageText, /id="liveTaskIdentity"/);
   assert.doesNotMatch(pageText, /class="navigation-status"/);

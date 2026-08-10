@@ -35,8 +35,8 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 ### 主工作区绢缎鼠标尾迹
 
-- `PointerSilkTrail.create({ host, platform, enabled })` 仅在 `#mainWorkspace` 内惰性创建一张 `pointer-events:none` 的 WebGL2 Canvas，返回 `setEnabled` / `setPlatform` / `suspend(reason)` / `resume(reason)` / `destroy`。它只接受 `pointer:fine` 的 mouse 移动，不捕获指针、不阻断业务交互，也不覆盖导航、顶栏、右侧 Inspector 或弹窗。视觉与动力学直接参考 MIT 许可的 Makio MeshLine Follow 源码：4 条独立绢线各持有 20 个控制点、固定环形偏移和不同的 spring/friction，头点受力追随指针，后续点以 `lerp(0.9)` 逐级跟进；指针速度经 0.15 平滑后控制共享线宽，两端在 10% 范围内收尖。客户端不引入 Vue/Three.js 运行时，而是用一个低功耗 WebGL2 program/VAO/VBO 将四条抗锯齿 triangle strip 直接渲染。
-- 热路径仅复用预分配的 `Float32Array`：80 个控制点、4 组速度和 160 个宽线顶点；无随机数、粒子、模糊、业务 DOM 读取或每帧对象分配。最后一次移动后保持 72 ms，再用 348 ms 淡出，到 420 ms 立即清空并将空闲 RAF 降为 0。渲染 DPR 不超过 1.25，颜色缓冲不超过 800,000 像素；Canvas 与 ResizeObserver 只在首次合格移动后分配，上下文/编译/上传/绘制/RAF 异常会锁存失败并完整释放 GPU 表面。
+- `PointerSilkTrail.create({ host, platform, enabled })` 仅在 `#mainWorkspace` 内惰性创建一张 `pointer-events:none` 的 WebGL2 Canvas，返回 `setEnabled` / `setPlatform` / `suspend(reason)` / `resume(reason)` / `destroy`。它只接受 `pointer:fine` 的 mouse 移动，不捕获指针、不阻断业务交互，也不覆盖导航、顶栏、右侧 Inspector 或弹窗。Follow 动力学参考 MIT 许可的 Makio MeshLine：4 条独立绢线各持有 20 个控制点，确定性参数覆盖参考范围，并以递增 spring `[0.041,0.054,0.068,0.079]` 反向配对递减 friction `[0.898,0.867,0.834,0.802]`，避免 high-spring/high-momentum 共振；每帧先从 point 19 倒序传播到 point 1，使 follower 读取前一帧 predecessor，再更新 head，避免正序更新造成同帧塌缩。head 相对其目标偏移位置的 lag 还经过 `MAX_HEAD_LAG_PX=32` 软限幅，限幅后同步回写速度。速度仍以 0.15 平滑；参考 world-space 线宽和偏移经相机平面投影为 CSS 像素，线宽上限 22 px、偏移半径上限 26 px，两端在 10% 范围内收尖。
+- 热路径仅复用预分配的 `Float32Array`：80 个控制点、4 组速度/偏移和 160 个宽线顶点；每帧一次 `bufferSubData` 上传后执行 4 次 `TRIANGLE_STRIP` draw，材质 opacity 为 0.76，无纹理、FBO、随机数、粒子、模糊、后处理、业务 DOM 读取或每帧对象分配。客户端不引入 Vue/Three.js 运行时，只使用一个低功耗 WebGL2 program/VAO/VBO。最后一次移动后保持 72 ms，再用 348 ms 淡出，到 420 ms 立即清空并将空闲 RAF 降为 0。渲染 DPR 不超过 1.25，颜色缓冲不超过 800,000 像素；Canvas 与 ResizeObserver 只在首次合格移动后分配，上下文/编译/上传/绘制/RAF 异常会锁存失败并完整释放 GPU 表面。
 - 关闭开关、reduced-motion 或粗指针会立即释放表面；任意弹窗打开、平台切换、页面 hidden/blur 则通过可叠加 reason 停止 RAF 并清空采样/画面，可保留已惰性分配的空 Canvas。恢复时不重放旧轨迹，只等新移动。`pagehide` 彻底 `destroy()`；BFCache `pageshow` 重建单例。桌面 `desktop-settings.json` v2 持久化 `closeBehavior` 与默认开启的 `cursorTrailEnabled`，v1 迁移保留关闭行为并补默认值，partial update 不重置未提交字段。无 Electron bridge 的浏览器模式只修改当前会话内存，刷新后默认开启，不写 localStorage/sessionStorage 或调用服务端偏好 API。
 
 ### 折叠 Inspector 的代理池提示
@@ -69,7 +69,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 ## 验收不变量
 
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
-- 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 弹簧链、速度线宽、端点 taper、4 条 40 顶点 triangle strip、420 ms 与 DPR/像素上限不可回归，并明确排除随机数、粒子、模糊和业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
+- 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 链按 point 19→1 倒序传播后才更新 head，递增 spring 与递减 friction 的确定性抗共振配对覆盖参考范围，并保留 32 px head-lag 软限幅。对 100 px 半径、持续 240 帧的圆周输入，必须分别扫描 0.18、0.20、0.215、0.265 rad/frame，并验证四条线的全部 20 个点始终处于 160 px 包络内。world-space 宽度/偏移投影后分别受 22 px/26 px 上限约束，峰值 opacity 为 0.76，每帧只有一次上传和 4 次 40 顶点 `TRIANGLE_STRIP` draw。实现不得引入纹理、FBO、随机数、粒子、模糊、后处理或业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，DPR/像素上限不可回归，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
 - 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。

@@ -15,7 +15,10 @@
   const POINTER_DELTA_RESET_MS = 50;
   const MAX_DPR = 1.25;
   const MAX_COLOR_PIXELS = 800_000;
-  const MAX_LINE_WIDTH_PX = 11;
+  const MAX_LINE_WIDTH_PX = 22;
+  const MAX_OFFSET_RADIUS_PX = 26;
+  const MAX_HEAD_LAG_PX = 32;
+  const MATERIAL_OPACITY = 0.76;
   const CAMERA_WORLD_HEIGHT_AT_PLANE = 10.411;
   const CONTEXT_OPTIONS = Object.freeze({
     alpha: true,
@@ -26,14 +29,15 @@
     premultipliedAlpha: true,
     powerPreference: "low-power",
   });
-  // Keep the four lines as one compact cursor cluster. The reference demo
-  // randomizes a wider range, but those extremes bloom during fast circles
-  // in a dense productivity UI, so use four close deterministic samples.
-  const SPRINGS = new Float32Array([0.057, 0.06, 0.063, 0.066]);
-  const FRICTIONS = new Float32Array([0.85, 0.853, 0.856, 0.859]);
-  const RADII = new Float32Array([5, 7, 9, 6]);
-  const OFFSET_X = new Float32Array([RADII[0], 0, -RADII[2], 0]);
-  const OFFSET_Y = new Float32Array([0, RADII[1], 0, -RADII[3]]);
+  // Deterministic samples spanning the reference demo's complete spring,
+  // friction and 0.1..0.3 world-unit offset ranges. World-space values are
+  // projected through the same camera plane instead of being mistaken for px.
+  const SPRINGS = new Float32Array([0.041, 0.054, 0.068, 0.079]);
+  // Pair the highest spring with the lowest retained momentum. Sorting both
+  // arrays in the same direction creates a resonant line that can magnify a
+  // fast circular pointer path by more than 2.5x.
+  const FRICTIONS = new Float32Array([0.898, 0.867, 0.834, 0.802]);
+  const OFFSET_WORLD_RADII = new Float32Array([0.11, 0.18, 0.27, 0.23]);
   const PALETTES = Object.freeze({
     netease: Object.freeze([
       new Float32Array([0.843, 0.275, 0.31]),
@@ -176,6 +180,8 @@
     const pointYs = new Float32Array(NUM_LINES * NUM_POINTS);
     const velocityXs = new Float32Array(NUM_LINES);
     const velocityYs = new Float32Array(NUM_LINES);
+    const offsetXs = new Float32Array(NUM_LINES);
+    const offsetYs = new Float32Array(NUM_LINES);
     const vertexData = new Float32Array(NUM_LINES * VERTICES_PER_LINE * FLOATS_PER_VERTEX);
 
     let active = Boolean(enabled);
@@ -288,6 +294,15 @@
       hostTop = rect.top;
       cssWidth = Math.max(1, rect.width);
       cssHeight = Math.max(1, rect.height);
+      const worldToCssPixels = cssHeight / CAMERA_WORLD_HEIGHT_AT_PLANE;
+      offsetXs[0] = Math.min(MAX_OFFSET_RADIUS_PX, OFFSET_WORLD_RADII[0] * worldToCssPixels);
+      offsetYs[0] = 0;
+      offsetXs[1] = 0;
+      offsetYs[1] = Math.min(MAX_OFFSET_RADIUS_PX, OFFSET_WORLD_RADII[1] * worldToCssPixels);
+      offsetXs[2] = -Math.min(MAX_OFFSET_RADIUS_PX, OFFSET_WORLD_RADII[2] * worldToCssPixels);
+      offsetYs[2] = 0;
+      offsetXs[3] = 0;
+      offsetYs[3] = -Math.min(MAX_OFFSET_RADIUS_PX, OFFSET_WORLD_RADII[3] * worldToCssPixels);
       const desiredDpr = Math.min(MAX_DPR, Math.max(1, devicePixelRatio || 1));
       const rawPixels = cssWidth * cssHeight * desiredDpr * desiredDpr;
       const pixelScale = rawPixels > MAX_COLOR_PIXELS
@@ -377,8 +392,8 @@
 
     function seedLines() {
       for (let line = 0; line < NUM_LINES; line += 1) {
-        const x = targetX + OFFSET_X[line];
-        const y = targetY + OFFSET_Y[line];
+        const x = targetX + offsetXs[line];
+        const y = targetY + offsetYs[line];
         velocityXs[line] = 0;
         velocityYs[line] = 0;
         const pointStart = line * NUM_POINTS;
@@ -394,17 +409,34 @@
       if (!seeded) seedLines();
       for (let line = 0; line < NUM_LINES; line += 1) {
         const pointStart = line * NUM_POINTS;
-        const headX = pointXs[pointStart];
-        const headY = pointYs[pointStart];
-        velocityXs[line] = (velocityXs[line] + (targetX + OFFSET_X[line] - headX) * SPRINGS[line]) * FRICTIONS[line];
-        velocityYs[line] = (velocityYs[line] + (targetY + OFFSET_Y[line] - headY) * SPRINGS[line]) * FRICTIONS[line];
-        pointXs[pointStart] = headX + velocityXs[line];
-        pointYs[pointStart] = headY + velocityYs[line];
-        for (let point = 1; point < NUM_POINTS; point += 1) {
+        // Update from tail to head so every follower reads the previous
+        // frame's predecessor. Updating forwards collapses the whole chain in
+        // one frame and makes the reference Follow trail about 9x shorter.
+        for (let point = NUM_POINTS - 1; point >= 1; point -= 1) {
           const index = pointStart + point;
           pointXs[index] += (pointXs[index - 1] - pointXs[index]) * 0.9;
           pointYs[index] += (pointYs[index - 1] - pointYs[index]) * 0.9;
         }
+        const headX = pointXs[pointStart];
+        const headY = pointYs[pointStart];
+        const desiredX = targetX + offsetXs[line];
+        const desiredY = targetY + offsetYs[line];
+        velocityXs[line] = (velocityXs[line] + (desiredX - headX) * SPRINGS[line]) * FRICTIONS[line];
+        velocityYs[line] = (velocityYs[line] + (desiredY - headY) * SPRINGS[line]) * FRICTIONS[line];
+        let nextHeadX = headX + velocityXs[line];
+        let nextHeadY = headY + velocityYs[line];
+        const lagX = nextHeadX - desiredX;
+        const lagY = nextHeadY - desiredY;
+        const lag = Math.hypot(lagX, lagY);
+        if (lag > MAX_HEAD_LAG_PX) {
+          const scale = MAX_HEAD_LAG_PX / lag;
+          nextHeadX = desiredX + lagX * scale;
+          nextHeadY = desiredY + lagY * scale;
+          velocityXs[line] = nextHeadX - headX;
+          velocityYs[line] = nextHeadY - headY;
+        }
+        pointXs[pointStart] = nextHeadX;
+        pointYs[pointStart] = nextHeadY;
       }
     }
 
@@ -453,9 +485,9 @@
         const recentMoveY = idleFor <= POINTER_DELTA_RESET_MS ? pointerMoveY : 0;
         const speed = Math.hypot(recentMoveX, recentMoveY) / (dt / 16 || 1) * 0.01;
         mouseSpeed += (Math.min(1, Math.max(0.01, speed)) - mouseSpeed) * 0.15;
-        const responsiveWidth = 1.1 + 12.5 * mouseSpeed / (0.38 + mouseSpeed);
-        const viewportScale = Math.min(1, cssHeight / (CAMERA_WORLD_HEIGHT_AT_PLANE * 64));
-        const targetWidth = Math.min(MAX_LINE_WIDTH_PX, responsiveWidth * viewportScale);
+        const referenceWorldWidth = Math.min(1, Math.max(0.01, mouseSpeed));
+        const projectedWidthPx = referenceWorldWidth * cssHeight / CAMERA_WORLD_HEIGHT_AT_PLANE;
+        const targetWidth = Math.min(MAX_LINE_WIDTH_PX, projectedWidthPx);
         lineWidthPx += (targetWidth - lineWidthPx) * 0.15;
         const fade = idleFor <= HOLD_MS ? 1 : 1 - (idleFor - HOLD_MS) / FADE_MS;
 
@@ -465,7 +497,7 @@
         gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
         gl.bufferSubData(gl.ARRAY_BUFFER, 0, vertexData);
         gl.uniform1f(uniforms.lineWidth, lineWidthPx);
-        gl.uniform1f(uniforms.opacity, Math.max(0, fade) * 0.48);
+        gl.uniform1f(uniforms.opacity, Math.max(0, fade) * MATERIAL_OPACITY);
         for (let line = 0; line < NUM_LINES; line += 1) {
           gl.uniform3fv(uniforms.colors[line], activePalette[line]);
         }
