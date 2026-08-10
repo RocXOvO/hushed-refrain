@@ -501,7 +501,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   const config = await options(directory);
   config.source = "record";
   config.commentPageSize = 100;
-  const activities: Array<{ songId: string; songName?: string; workerId?: string; pageInSong: number; requestingPage?: number; commentsProcessed: number; totalComments?: number }> = [];
+  const activities: Array<{ songId: string; songName?: string; workerId?: string; pageInSong: number; requestingPage?: number; commentsProcessed: number; totalComments?: number; coveragePercent?: number; done?: boolean }> = [];
   const requestActivities: Array<{ phase: string; songId?: string; songName?: string; workerId?: string; startedAt?: string }> = [];
   config.onSongProgress = (activity) => activities.push(activity);
   config.onRequestActivity = (activity) => requestActivities.push(activity);
@@ -552,6 +552,7 @@ test("pooled source scan processes songs concurrently across proxy lanes", async
   assert.ok(activities.some((activity) => activity.pageInSong === 1 && activity.requestingPage === undefined));
   assert.ok(activities.every((activity) => /^worker-\d+$/.test(activity.workerId ?? "")));
   assert.ok(activities.some((activity) => activity.songId === "3" && activity.commentsProcessed === 1 && activity.totalComments === 1));
+  assert.ok(activities.filter((activity) => activity.done).every((activity) => activity.coveragePercent === 100));
   assert.ok(requestActivities.some((activity) => activity.phase === "start" && activity.songId === "3" && activity.songName === "song-3" && /^worker-\d+$/.test(activity.workerId ?? "")));
   assert.ok(requestActivities.filter((activity) => activity.phase === "start").every((activity) => Number.isFinite(Date.parse(activity.startedAt ?? ""))));
 });
@@ -1080,6 +1081,8 @@ test("pooled source scan pre-shards one song across all waiting proxy lanes", as
   const directory = await mkdtemp(join(tmpdir(), "ncm-finder-one-song-pool-"));
   const config = await options(directory);
   config.source = "record";
+  const activities: Array<{ done?: boolean; coveragePercent?: number }> = [];
+  config.onSongProgress = (activity) => activities.push(activity);
   const tracker = { active: 0, maxActive: 0, calls: [] as Array<{ pageNo: number; cursor: string }> };
   const makeClient = (): NcmClient => ({
     getLoginProfile: async () => undefined,
@@ -1118,8 +1121,11 @@ test("pooled source scan pre-shards one song across all waiting proxy lanes", as
   assert.equal(report.matches, 3);
   assert.equal(tracker.maxActive, 3);
   assert.equal(tracker.calls.length, 3);
-  assert.equal(tracker.calls.filter((call) => call.pageNo === 1).length, 3);
+  assert.equal(tracker.calls.filter((call) => call.pageNo === 2).length, 3);
+  assert.equal(tracker.calls.filter((call) => call.pageNo === 1).length, 0);
   assert.equal(new Set(tracker.calls.map((call) => call.cursor)).size, 3);
+  assert.equal(activities.at(-1)?.done, true);
+  assert.equal(activities.at(-1)?.coveragePercent, 100);
   const state = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(state.songProgress[0].commentShards.length, 3);
   assert.ok(state.songProgress[0].commentShards.every((shard: { done: boolean }) => shard.done));
@@ -1131,12 +1137,14 @@ test("a resumed source scan expands existing shards to the new transport capacit
   config.source = "record";
   let active = 0;
   let maxActive = 0;
+  const pageNos: number[] = [];
   const client: NcmClient = {
     getLoginProfile: async () => undefined,
     getUserRecord: async () => [{ id: "only-song", name: "only", sources: ["record"] }],
     getLikedSongs: async () => [],
     getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
-    getSongCommentsByCursor: async () => {
+    getSongCommentsByCursor: async (_songId, _pageSize, pageNo) => {
+      pageNos.push(pageNo);
       active += 1;
       maxActive = Math.max(maxActive, active);
       await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1156,14 +1164,110 @@ test("a resumed source scan expands existing shards to the new transport capacit
   const pausedState = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(pausedState.songProgress[0].commentShards.length, 3);
   assert.equal(pausedState.songProgress[0].commentShards.filter((shard: { done: boolean }) => !shard.done).length, 2);
+  for (const shard of pausedState.songProgress[0].commentShards) {
+    if (!shard.done) shard.pageNo = 1;
+  }
+  await writeFile(config.statePath, `${JSON.stringify(pausedState)}\n`, "utf8");
 
   maxActive = 0;
+  pageNos.length = 0;
   const completed = await runPooledCommentFinder(lanes(5), { ...config, workersPerLane: 1, requestBudget: 100 });
   assert.equal(completed.status, "complete");
   assert.equal(maxActive, 5);
+  assert.ok(pageNos.every((pageNo) => pageNo >= 2));
+  assert.ok(pageNos.includes(2), "newly split cursor chains restart with non-first-page semantics");
   const completedState = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(completedState.songProgress[0].commentShards.length, 6);
   assert.ok(completedState.songProgress[0].commentShards.every((shard: { done: boolean }) => shard.done));
+  assert.ok(completedState.songProgress[0].commentShards.every((shard: { pageNo: number }) => shard.pageNo >= 2));
+});
+
+test("a legacy explicit-cursor shard resumes with non-first-page semantics without capacity expansion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-resume-legacy-page-one-"));
+  const config = await options(directory);
+  config.source = "record";
+  const pageNos: number[] = [];
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "only-song", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async (_songId, _pageSize, pageNo) => {
+      pageNos.push(pageNo);
+      return { comments: [], hasMore: false };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const lanes = (count: number) => Array.from({ length: count }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: governor(100),
+  }));
+
+  const paused = await runPooledCommentFinder(lanes(2), { ...config, workersPerLane: 1, requestBudget: 1 });
+  assert.equal(paused.status, "paused");
+  const legacy = JSON.parse(await readFile(config.statePath, "utf8"));
+  const unfinished = legacy.songProgress[0].commentShards.filter((shard: { done: boolean }) => !shard.done);
+  assert.equal(unfinished.length, 2);
+  for (const shard of unfinished) shard.pageNo = 1;
+  await writeFile(config.statePath, `${JSON.stringify(legacy)}\n`, "utf8");
+
+  pageNos.length = 0;
+  const completed = await runPooledCommentFinder(lanes(2), { ...config, workersPerLane: 1, requestBudget: 100 });
+  assert.equal(completed.status, "complete");
+  assert.deepEqual(pageNos.sort(), [2, 2]);
+  const migrated = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.ok(migrated.songProgress[0].commentShards.every((shard: { pageNo: number }) => shard.pageNo >= 2));
+});
+
+test("a song added to an old checkpoint keeps its own immutable time-coverage upper bound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-new-song-coverage-bound-"));
+  const config = await options(directory);
+  config.source = "record";
+  const initialClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "old-song", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({ comments: [], hasMore: false }),
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  assert.equal((await runCommentFinder(initialClient, governor(10), config)).status, "complete");
+  const oldState = JSON.parse(await readFile(config.statePath, "utf8"));
+  oldState.createdAt = new Date(Date.UTC(2020, 0, 1)).toISOString();
+  await writeFile(config.statePath, `${JSON.stringify(oldState)}\n`, "utf8");
+
+  const activities: Array<{ songId: string; coveragePercent?: number; done?: boolean }> = [];
+  config.onSongProgress = (activity) => activities.push(activity);
+  let requestedCursor = "";
+  const refreshedClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [
+      { id: "old-song", sources: ["record"] },
+      { id: "new-song", sources: ["record"] },
+    ],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async (songId, _pageSize, _pageNo, cursor) => {
+      assert.equal(songId, "new-song");
+      requestedCursor = cursor;
+      return {
+        comments: [{ commentId: "other", userId: "9", content: "other", time: Date.UTC(2023, 0, 1) + 1 }],
+        hasMore: true,
+        nextCursor: String(Date.UTC(2023, 0, 1)),
+      };
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const paused = await runCommentFinder(refreshedClient, governor(2), config);
+  assert.equal(paused.status, "paused");
+  const newSongActivity = activities.filter((activity) => activity.songId === "new-song").at(-1);
+  assert.ok((newSongActivity?.coveragePercent ?? 0) > 0);
+  assert.ok((newSongActivity?.coveragePercent ?? 100) < 100);
+  const pausedState = JSON.parse(await readFile(config.statePath, "utf8"));
+  const newSongIndex = pausedState.songs.findIndex((song: { id: string }) => song.id === "new-song");
+  assert.equal(pausedState.songProgress[newSongIndex].commentEndTime, Number(requestedCursor));
+  assert.ok(pausedState.songProgress[newSongIndex].commentEndTime > Date.parse(pausedState.createdAt));
 });
 
 test("pooled source shard scheduling keeps the per-song page cap exact", async () => {
@@ -1171,6 +1275,8 @@ test("pooled source shard scheduling keeps the per-song page cap exact", async (
   const config = await options(directory);
   config.source = "record";
   config.maxCommentPagesPerSong = 2;
+  const activities: Array<{ done?: boolean; truncated?: boolean; coveragePercent?: number }> = [];
+  config.onSongProgress = (activity) => activities.push(activity);
   let calls = 0;
   const client: NcmClient = {
     getLoginProfile: async () => undefined,
@@ -1201,6 +1307,9 @@ test("pooled source shard scheduling keeps the per-song page cap exact", async (
   assert.equal(report.coverageComplete, false);
   const state = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.deepEqual(state.truncatedSongIds, ["only-song"]);
+  assert.equal(activities.at(-1)?.done, true);
+  assert.equal(activities.at(-1)?.truncated, true);
+  assert.equal(activities.at(-1)?.coveragePercent, undefined);
 });
 
 test("a song that naturally ends on its page cap is not marked truncated", async () => {

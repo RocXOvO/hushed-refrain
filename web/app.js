@@ -1407,6 +1407,8 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
     totalComments: finiteNumber(song.totalComments),
     progressPercent: finiteNumber(song.progressPercent),
     progressBasis: song.progressBasis === "time" ? "time" : "comments",
+    done: Boolean(song.done),
+    truncated: Boolean(song.truncated),
   }));
   const activeWorkers = normalized.reduce((total, song) => total + song.workers, 0);
   const workerCapacity = Math.max(0, Number(configuredWorkers || 0));
@@ -1469,8 +1471,10 @@ function createActiveSongRow() {
 
 function updateActiveSongRow(entry, song) {
   entry.song = song;
-  entry.badge.textContent = song.workers > 0 ? "扫描中" : "等待调度";
-  entry.badge.classList.toggle("is-waiting", song.workers === 0);
+  entry.badge.textContent = song.truncated ? "达到页数上限" : song.done ? "已完成" : song.workers > 0 ? "扫描中" : "等待调度";
+  entry.badge.classList.toggle("is-waiting", !song.done && song.workers === 0);
+  entry.badge.classList.toggle("is-complete", song.done && !song.truncated);
+  entry.badge.classList.toggle("is-truncated", song.truncated);
   entry.name.textContent = song.name || "正在读取歌曲名称";
   entry.id.textContent = song.id;
   entry.workers.textContent = `${fmt(song.workers)} 工作线程`;
@@ -1482,7 +1486,7 @@ function renderSongReadProgress(song, entry) {
   const total = song.totalComments !== undefined && song.totalComments > 0
     ? Math.max(comments, song.totalComments)
     : undefined;
-  const measuredPercent = total ? comments / total * 100 : undefined;
+  const measuredPercent = !song.truncated && total ? comments / total * 100 : undefined;
   const percent = Math.max(0, Math.min(100, song.progressPercent ?? measuredPercent ?? 0));
   const activeRequest = song.workers > 0
     ? ` · ${fmt(song.workers)} 个分片请求中${song.requestStartedAt !== undefined
@@ -1493,7 +1497,9 @@ function renderSongReadProgress(song, entry) {
     ? ` · 已完成 ${fmt(song.pagesProcessed)} 页`
     : "";
   const coverage = percent > 0 && percent < 1 ? "<1" : String(Math.round(percent));
-  const label = song.progressBasis === "time" && song.progressPercent !== undefined
+  const label = song.truncated
+    ? `已读 ${fmt(comments)} 条${completedPages} · 达到每首最大页数，未覆盖全部评论`
+    : song.progressBasis === "time" && song.progressPercent !== undefined
     ? `已读 ${fmt(comments)} 条 · 时间覆盖 ${coverage}%${completedPages}${activeRequest}`
     : total
     ? `已读 ${fmt(comments)} / ${fmt(total)} 条 · ${coverage}%${completedPages}${activeRequest}`

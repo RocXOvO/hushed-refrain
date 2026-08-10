@@ -159,6 +159,8 @@ interface ActiveSongSnapshot {
   totalComments?: number;
   progressPercent?: number;
   progressBasis?: "comments" | "time";
+  done?: boolean;
+  truncated?: boolean;
 }
 
 interface JobSnapshot extends PagePerformanceSnapshot {
@@ -748,9 +750,11 @@ class JobManager {
       onSchedulerActivity: (activity) => logger.scheduler(activity),
       onSongProgress: (activity) => {
         if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
-        const progressPercent = activity.totalComments && activity.totalComments > 0
-          ? Math.min(100, activity.commentsProcessed / activity.totalComments * 100)
-          : undefined;
+        const progressPercent = activity.truncated ? undefined : activity.coveragePercent ?? (
+          activity.totalComments && activity.totalComments > 0
+            ? Math.min(100, activity.commentsProcessed / activity.totalComments * 100)
+            : undefined
+        );
         this.activeSongProgress.delete(activity.songId);
         this.activeSongProgress.set(activity.songId, {
           name: activity.songName ?? this.songNameById.get(activity.songId),
@@ -758,7 +762,9 @@ class JobManager {
           commentsProcessed: activity.commentsProcessed,
           totalComments: activity.totalComments,
           progressPercent,
-          progressBasis: "comments",
+          progressBasis: activity.coveragePercent === undefined && !activity.truncated ? "comments" : "time",
+          done: activity.done,
+          truncated: activity.truncated,
         });
         this.trimActiveSongProgress();
         if (activity.done) this.removeScheduledSong(activity.songId);
@@ -1103,7 +1109,6 @@ class JobManager {
     for (const [workerId, scheduled] of this.activeSongByWorker) {
       if (scheduled.id === songId) this.activeSongByWorker.delete(workerId);
     }
-    this.activeSongProgress.delete(songId);
   }
 
   private trimActiveSongProgress(): void {

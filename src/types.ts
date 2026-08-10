@@ -273,6 +273,8 @@ export interface SongScanProgress {
   commentOffset: number;
   totalComments?: number;
   pageInSong: number;
+  /** Immutable upper time bound for this song's current scan generation. */
+  commentEndTime?: number;
   commentCursor?: string;
   commentPageNo?: number;
   commentShards?: CommentTimeShard[];
@@ -347,7 +349,9 @@ export interface SongScanActivity {
   requestingPage?: number;
   commentsProcessed: number;
   totalComments?: number;
+  coveragePercent?: number;
   done?: boolean;
+  truncated?: boolean;
 }
 
 export interface ScanRequestActivity {

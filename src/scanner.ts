@@ -13,7 +13,7 @@ import {
   executeProxyRequest,
   type ProxyTransportGate,
 } from "./proxy-transport-gate";
-import { mergeCommentTotal } from "./progress";
+import { mergeCommentTotal, timeCoveragePercent } from "./progress";
 import { nextDescendingCursor } from "./cursor-pagination";
 import { ResultAccumulator } from "./result-accumulator";
 import { JsonlResultWriter } from "./results";
@@ -303,6 +303,8 @@ export async function runPooledCommentFinder(
             undefined,
             undefined,
             true,
+            sourceSongCoveragePercent(state, progress, state.songs[songIndex].id),
+            true,
           );
           notifySongPermit(songIndex);
           return "stopped";
@@ -369,6 +371,8 @@ export async function runPooledCommentFinder(
             progress.totalComments,
             workerId,
             requestedPageNo,
+            undefined,
+            sourceSongCoveragePercent(state, progress, song.id),
           );
           attempts += 1;
           const networkStartedAt = Date.now();
@@ -515,6 +519,8 @@ export async function runPooledCommentFinder(
         workerId,
         undefined,
         progress.done,
+        sourceSongCoveragePercent(state, progress, song.id),
+        state.truncatedSongIds.includes(song.id),
       );
       await checkpoint();
       if (added > 0 && options.stopAfterFirst) {
@@ -763,6 +769,18 @@ async function runSongScan(
       state.pageInSong >= options.maxCommentPagesPerSong
     ) {
       markSongTruncated(state, currentSongIndex);
+      publishSongProgress(
+        options,
+        song,
+        songProgress.pageInSong,
+        songProgress.commentOffset,
+        songProgress.totalComments,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        true,
+      );
       syncSongCursor(state);
       await checkpoint();
       continue;
@@ -786,6 +804,8 @@ async function runSongScan(
         songProgress.totalComments,
         undefined,
         requestedPageNo,
+        undefined,
+        sourceSongCoveragePercent(state, songProgress, song.id),
       );
       return client.getSongCommentsByCursor(
         song.id,
@@ -860,6 +880,8 @@ async function runSongScan(
       undefined,
       undefined,
       songProgress.done,
+      sourceSongCoveragePercent(state, songProgress, song.id),
+      state.truncatedSongIds.includes(song.id),
     );
     if (naturallyCompleted) await persistSongCoverageIfEligible(options, state, currentSongIndex);
     await checkpoint();
@@ -1027,6 +1049,7 @@ function initialSongProgress(initialCursor: string): NonNullable<ScanState["song
   return {
     commentOffset: 0,
     pageInSong: 0,
+    commentEndTime: Number(initialCursor),
     commentCursor: initialCursor,
     commentPageNo: 1,
     done: false,
@@ -1540,6 +1563,7 @@ function ensureSongProgress(state: ScanState): void {
     state.songProgress = state.songs.map((_, index) => ({
       commentOffset: index === state.songIndex ? state.commentOffset : 0,
       pageInSong: index === state.songIndex ? state.pageInSong : 0,
+      commentEndTime: Number(initialCommentCursor),
       commentCursor: initialCommentCursor,
       commentPageNo: 1,
       done: index < state.songIndex || state.finished,
@@ -1548,6 +1572,23 @@ function ensureSongProgress(state: ScanState): void {
   for (const progress of state.songProgress) {
     progress.commentCursor ??= initialCommentCursor;
     progress.commentPageNo ??= 1;
+    for (const shard of progress.commentShards ?? []) {
+      if (!Number.isInteger(shard.pageNo) || shard.pageNo < 2) shard.pageNo = 2;
+    }
+    if (!Number.isInteger(progress.commentEndTime)) {
+      const shardEndTime = Math.max(
+        ...((progress.commentShards ?? [])
+          .map((shard) => shard.endTime)
+          .filter((value) => Number.isInteger(value))),
+        Number.NEGATIVE_INFINITY,
+      );
+      const initialCursor = progress.pageInSong === 0 ? Number(progress.commentCursor) : Number.NaN;
+      progress.commentEndTime = Number.isInteger(shardEndTime)
+        ? shardEndTime
+        : Number.isInteger(initialCursor)
+        ? initialCursor
+        : undefined;
+    }
   }
   state.pagesProcessed ??= state.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
 }
@@ -1556,6 +1597,26 @@ function inspectedComments(state: ScanState): number {
   if (state.strategy === "history") return state.commentOffset;
   return state.songProgress?.reduce((total, progress) => total + progress.commentOffset, 0)
     ?? state.commentOffset;
+}
+
+function sourceSongCoveragePercent(
+  state: ScanState,
+  progress: NonNullable<ScanState["songProgress"]>[number],
+  songId: string,
+): number | undefined {
+  if (state.truncatedSongIds.includes(songId)) return undefined;
+  if (progress.done) return 100;
+  const endTime = progress.commentEndTime;
+  if (typeof endTime !== "number" || !Number.isFinite(endTime) || endTime <= SOURCE_SCAN_START_TIME) return undefined;
+  if (progress.commentShards?.length) {
+    return timeCoveragePercent(SOURCE_SCAN_START_TIME, endTime, progress.commentShards);
+  }
+  const cursor = Number(progress.commentCursor);
+  if (!Number.isFinite(cursor)) return undefined;
+  const remainingEnd = Math.max(SOURCE_SCAN_START_TIME, Math.min(endTime, cursor));
+  return Math.max(0, Math.min(100, Math.round(
+    (1 - (remainingEnd - SOURCE_SCAN_START_TIME) / (endTime - SOURCE_SCAN_START_TIME)) * 100,
+  )));
 }
 
 function prepareSourceWork(state: ScanState, desiredWorkItems: number, maxPages: number): SourceScanWork[] {
@@ -1618,11 +1679,10 @@ function expandExistingSourceShards(
     let expanded = false;
     for (const candidate of candidates) {
       const nextShardId = shards.reduce((maximum, shard) => Math.max(maximum, shard.id), -1) + 1;
-      const pageNo = candidate.pageNo;
       const split = splitRemainingTimeShard(candidate, nextShardId);
       if (!split) continue;
-      Object.assign(candidate, split.current, { pageNo });
-      shards.push({ ...split.sibling, pageNo });
+      Object.assign(candidate, split.current);
+      shards.push(split.sibling);
       expanded = true;
       break;
     }
@@ -1646,8 +1706,7 @@ function shardRemainingSong(
   const availablePages = maxPages > 0 ? maxPages - progress.pageInSong : 64;
   if (availablePages <= 1) return [];
   const shardCount = Math.max(2, Math.min(64, desiredShards, availablePages));
-  progress.commentShards = createTimeShards(SOURCE_SCAN_START_TIME, endTime, shardCount)
-    .map((shard) => ({ ...shard, pageNo: progress.commentPageNo ?? 1 }));
+  progress.commentShards = createTimeShards(SOURCE_SCAN_START_TIME, endTime, shardCount);
   return progress.commentShards.map((shard) => ({ songIndex, shardId: shard.id }));
 }
 
@@ -1668,9 +1727,8 @@ function splitSourceShardIfUseful(
   const split = splitRemainingTimeShard(shard, nextShardId);
   if (!split) return [currentWork];
   const { sibling, splitAt, remainingStart, remainingEnd } = split;
-  const pageNo = shard.pageNo;
-  Object.assign(shard, split.current, { pageNo });
-  progress.commentShards!.push({ ...sibling, pageNo });
+  Object.assign(shard, split.current);
+  progress.commentShards!.push(sibling);
   publishSchedulerActivity(options, {
     type: "adaptive-split",
     songId,
@@ -1729,6 +1787,8 @@ function publishSongProgress(
   workerId?: string,
   requestingPage?: number,
   done?: boolean,
+  coveragePercent?: number,
+  truncated?: boolean,
 ): void {
   try {
     options.onSongProgress?.({
@@ -1739,7 +1799,9 @@ function publishSongProgress(
       requestingPage,
       commentsProcessed,
       totalComments,
+      coveragePercent,
       done,
+      truncated,
     });
   } catch {
     // Status delivery must never interrupt the scan.

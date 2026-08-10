@@ -62,6 +62,25 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
       pageInSong: index === parsed.songIndex ? parsed.pageInSong : 0,
       done: index < parsed.songIndex || parsed.finished,
     }));
+    for (const progress of parsed.songProgress) {
+      for (const shard of progress.commentShards ?? []) {
+        if (!Number.isInteger(shard.pageNo) || shard.pageNo < 2) shard.pageNo = 2;
+      }
+      if (!Number.isInteger(progress.commentEndTime)) {
+        const shardEndTime = Math.max(
+          ...((progress.commentShards ?? [])
+            .map((shard) => shard.endTime)
+            .filter((value) => Number.isInteger(value))),
+          Number.NEGATIVE_INFINITY,
+        );
+        const initialCursor = progress.pageInSong === 0 ? Number(progress.commentCursor) : Number.NaN;
+        progress.commentEndTime = Number.isInteger(shardEndTime)
+          ? shardEndTime
+          : Number.isInteger(initialCursor)
+          ? initialCursor
+          : undefined;
+      }
+    }
     parsed.pagesProcessed ??= parsed.songProgress.reduce((total, progress) => total + progress.pageInSong, 0);
     return parsed;
   });
@@ -163,6 +182,7 @@ function migrateLegacyOffsetState(state: ScanState, options: ScanOptions): void 
     resetPages += progress.pageInSong;
     progress.commentOffset = 0;
     progress.pageInSong = 0;
+    progress.commentEndTime = Number(initialCommentCursor);
     progress.commentCursor = initialCommentCursor;
     progress.commentPageNo = 1;
     progress.done = false;

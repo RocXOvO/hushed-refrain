@@ -795,10 +795,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=62/);
+  assert.match(pageText, /styles\.css\?v=64/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=74/);
+  assert.match(pageText, /app\.js\?v=75/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);
@@ -884,6 +884,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const app = await fetch(`${base}/app.js`);
   assert.equal(app.status, 200);
   const appText = await app.text();
+  const serverSource = await readFile(resolve("src/server.ts"), "utf8");
   assert.match(appText, /year:\s*"numeric"/);
   assert.match(appText, /clockDuration/);
   assert.match(appText, /renderRuntimeTimer/);
@@ -930,6 +931,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /tabSwitchVersion/);
   assert.match(appText, /renderActiveSongs/);
   assert.match(appText, /renderSongReadProgress/);
+  assert.match(appText, /coveragePercent/);
+  assert.match(serverSource, /activity\.truncated \? undefined : activity\.coveragePercent/);
+  assert.match(appText, /song\.truncated \? "达到页数上限"/);
+  assert.match(appText, /classList\.toggle\("is-complete", song\.done && !song\.truncated\)/);
+  assert.match(appText, /classList\.toggle\("is-truncated", song\.truncated\)/);
   assert.match(appText, /refreshActiveSongRequestAges/);
   assert.match(appText, /个分片请求中/);
   assert.match(appText, /inspectorOverlayQuery\.addEventListener\("change"/);
@@ -937,6 +943,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /pageLifecycleSuspended = false[\s\S]*startRuntimeTimer\(\)[\s\S]*scheduleRefreshLoop\(0\)[\s\S]*scheduleAuthRefreshLoop\(0\)[\s\S]*connectResultStream\(\)/);
   assert.match(appText, /function scheduleRefreshLoop[\s\S]*if \(pageLifecycleSuspended\) return/);
   assert.match(appText, /时间覆盖/);
+  assert.match(appText, /达到每首最大页数，未覆盖全部评论/);
+  assert.match(appText, /!song\.truncated && total \? comments \/ total \* 100 : undefined/);
   assert.match(appText, /topologyCapacityNote/);
   assert.match(appText, /工作线程活跃/);
   assert.match(appText, /formatRate\(job\.commentsPerSecond\)/);
@@ -1116,6 +1124,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   const styles = await fetch(`${base}/styles.css`);
   assert.equal(styles.status, 200);
   const styleText = await styles.text();
+  assert.match(styleText, /\.activity-status\.is-complete/);
+  assert.match(styleText, /\.pool-build-notice\s*\{[\s\S]*right:\s*84px;/);
+  assert.match(styleText, /@media \(max-width:\s*1280px\)[\s\S]*\.pool-build-notice\s*\{\s*right:\s*108px;/);
+  assert.match(styleText, /@media \(max-width:\s*820px\)[\s\S]*\.pool-build-notice\s*\{[^}]*right:\s*82px;[^}]*left:\s*12px;/);
   assert.match(styleText, /scrollbar-color:/);
   assert.match(styleText, /::-webkit-scrollbar-thumb/);
   assert.match(styleText, /\.navigation-rail/);

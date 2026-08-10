@@ -44,7 +44,12 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 ### 折叠 Inspector 的代理池提示
 
 - Inspector 收起时，代理池 `starting` 或 `running + refreshing` 在主界面显示一个显式、可点击的全局提示；点击后切到代理池视图并展开 Inspector。Inspector 已展开、池稳定运行或停止时提示必须隐藏。
+- 提示右边界必须避开 Inspector 的折叠 rail/overlay peek：桌面、`1280/821` 浮层断点与 `820/390` 窄屏断点均保留正间距且不得增加横向溢出。资源缓存变化后用真实 CSS 重新加载测量，不能仅依赖静态正则。
 - 提示以 `building | refreshing | hidden` 签名去重，轮询同一状态不得重复写 live-region 文本或重播入场动画；平台切换期间也不播放提示入场。`aria-live`/`aria-atomic` 只属于内部状态文本，不让整个按钮反复播报。
+
+### 并行歌曲活动进度
+
+- 网易云用户来源的歌曲完成度使用 Scanner 发出的持久化时间覆盖，不使用上游实时 `totalComments` 比例判定终态。每首歌持久保存自己的不可变 `commentEndTime`，旧检查点中新加入歌曲不会继承任务的旧创建时间上界。新建、恢复扩容或自适应拆分的显式 cursor 链统一从 `pageNo=2` 的非首屏语义开始；自然完成行在任务仍运行时保留为 `已完成`/100%，活动列表仍受既有容量上限约束，任务终态统一清空。`maxCommentPagesPerSong` 达到上限且仍有未读范围时发出独立 `truncated` 终态，活动行显示“达到页数上限”与“未覆盖全部评论”，不能复用完成色或 100% 覆盖；若最后允许页恰好自然结束，则自然完成优先。
 
 ## 歌曲搜索
 
@@ -72,7 +77,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
 - 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 链按 point 19→1 倒序传播后才更新 head，递增 spring 与递减 friction 的确定性抗共振配对覆盖参考范围，并保留 32 px head-lag 软限幅。对 100 px 半径、持续 240 帧的圆周输入，必须分别扫描 0.18、0.20、0.215、0.265 rad/frame，并验证四条线的全部 20 个点始终处于 160 px 包络内。world-space 宽度/偏移投影后分别受 22 px/26 px 上限约束，峰值 opacity 为 0.76，每帧只有一次上传和 4 次 40 顶点 `TRIANGLE_STRIP` draw。实现不得引入纹理、FBO、随机数、粒子、模糊、后处理或业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，DPR/像素上限不可回归，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
-- 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
+- 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；真实 CSS reload 后还要在桌面、`1280/821` 与 `820/390` 断点测得提示到右栏为正间距且不增加横向溢出。PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
 - 来源选择测试必须覆盖滑动高亮的几何对齐、听歌排行↔喜欢歌曲快速反向、排行范围的 `aria-hidden`/`inert`、reduced-motion 静态收敛，以及 1280、900、390 px 下无横向溢出与控制台错误。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。
 - 网易云登录 Cookie 只在网易云工作区显示为“已保存网易云登录”；QQ 工作区固定显示“本地服务”并隐藏网易云二维码登录按钮。

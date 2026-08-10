@@ -523,6 +523,121 @@ test("task startup capsule advances phases and settles without an elapsed-time s
   assert.equal(appSource.includes("taskStartupElapsed"), false);
 });
 
+test("completed time-sharded songs remain visibly complete instead of disappearing at a live total ratio", () => {
+  const classes = new Set<string>();
+  const entry = {
+    badge: {
+      textContent: "",
+      classList: { toggle(name: string, enabled: boolean) { enabled ? classes.add(name) : classes.delete(name); } },
+    },
+    name: { textContent: "" },
+    id: { textContent: "" },
+    workers: { textContent: "" },
+  };
+  let rendered: unknown;
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return String(value); },
+    renderSongReadProgress(song: unknown) { rendered = song; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("updateActiveSongRow")}
+    globalThis.api = { updateActiveSongRow };
+  `, context);
+  const api = context.api as { updateActiveSongRow(entry: unknown, song: unknown): void };
+  const song = {
+    id: "65800",
+    name: "小幸运",
+    workers: 0,
+    done: true,
+    commentsProcessed: 9_000,
+    totalComments: 10_000,
+    progressPercent: 100,
+    progressBasis: "time",
+  };
+
+  api.updateActiveSongRow(entry, song);
+  assert.equal(entry.badge.textContent, "已完成");
+  assert.equal(classes.has("is-complete"), true);
+  assert.equal(classes.has("is-waiting"), false);
+  assert.equal(rendered, song);
+});
+
+test("page-capped songs are labelled truncated instead of falsely complete", () => {
+  const classes = new Set<string>();
+  const entry = {
+    badge: {
+      textContent: "",
+      classList: { toggle(name: string, enabled: boolean) { enabled ? classes.add(name) : classes.delete(name); } },
+    },
+    name: { textContent: "" },
+    id: { textContent: "" },
+    workers: { textContent: "" },
+  };
+  let rendered: unknown;
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return String(value); },
+    renderSongReadProgress(song: unknown) { rendered = song; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("updateActiveSongRow")}
+    globalThis.api = { updateActiveSongRow };
+  `, context);
+  const song = {
+    id: "65800",
+    name: "小幸运",
+    workers: 0,
+    done: true,
+    truncated: true,
+    commentsProcessed: 5_000,
+    totalComments: 10_000,
+    progressBasis: "time",
+  };
+
+  (context.api as { updateActiveSongRow(entry: unknown, song: unknown): void }).updateActiveSongRow(entry, song);
+  assert.equal(entry.badge.textContent, "达到页数上限");
+  assert.equal(classes.has("is-truncated"), true);
+  assert.equal(classes.has("is-complete"), false);
+  assert.equal(classes.has("is-waiting"), false);
+  assert.equal(rendered, song);
+});
+
+test("a truncated song never paints a full progress bar from a stale comment total", () => {
+  let unknown = false;
+  let ariaLabel = "";
+  const entry = {
+    progressLabel: { textContent: "" },
+    progressTrack: { classList: { toggle(_name: string, enabled: boolean) { unknown = enabled; } } },
+    progressFill: { style: { width: "" } },
+    progress: { setAttribute(_name: string, value: string) { ariaLabel = value; } },
+  };
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return String(value); },
+    duration(value: number) { return `${value}s`; },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("renderSongReadProgress")}
+    globalThis.api = { renderSongReadProgress };
+  `, context);
+  const song = {
+    workers: 0,
+    done: true,
+    truncated: true,
+    commentsProcessed: 5_000,
+    totalComments: 5_000,
+    pagesProcessed: 5,
+    progressBasis: "time",
+  };
+
+  (context.api as { renderSongReadProgress(song: unknown, entry: unknown): void }).renderSongReadProgress(song, entry);
+  assert.match(entry.progressLabel.textContent, /达到每首最大页数，未覆盖全部评论/);
+  assert.equal(ariaLabel, entry.progressLabel.textContent);
+  assert.equal(entry.progressFill.style.width, "0%");
+  assert.equal(unknown, true);
+});
+
 test("task completion waits for the startup capsule to leave before opening settlement", () => {
   let nextTimer = 0;
   const timers = new Map<number, () => void>();
