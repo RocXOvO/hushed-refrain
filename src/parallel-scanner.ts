@@ -17,7 +17,11 @@ import { AsyncWorkQueue } from "./work-queue";
 import { createTimeShards, splitRemainingTimeShard } from "./time-shards";
 import { workerCountForTopology } from "./worker-topology";
 import {
+  commentScopeComplete,
   commentFloorsComplete,
+  createFloorCheckpointBatcher,
+  discoverCommentFloorThreads,
+  includesCommentFloors,
   pendingCommentFloorRoots,
   processCommentFloors,
   COMMENT_FLOOR_PAGE_SIZE,
@@ -48,10 +52,16 @@ class LaneRequestFailure extends Error {
   }
 }
 
+interface ParallelScanWork {
+  shard: CommentTimeShard;
+  floorParentCommentId?: string;
+}
+
 export async function runParallelSongScan(
   lanes: ParallelCommentLane[],
   options: ParallelSongScanOptions,
 ): Promise<ParallelSongScanReport> {
+  options.commentScope ??= "root-and-floor-v1";
   if (lanes.length === 0) throw new Error("At least one comment lane is required.");
   const startedAt = Date.now();
   const loaded = options.fresh ? undefined : await loadParallelState(options.statePath);
@@ -95,13 +105,17 @@ export async function runParallelSongScan(
       );
     }
 
-    const initialRootWork = state.shards
+    const initialRootWork: ParallelScanWork[] = state.shards
       .filter((shard) => !shard.done)
-      .sort((left, right) => right.endTime - left.endTime);
-    const queue = new AsyncWorkQueue(
-      initialRootWork.length === 0 && !commentFloorsComplete(state.floorThreads) && state.shards[0]
-        ? [state.shards[0]]
-        : initialRootWork,
+      .sort((left, right) => right.endTime - left.endTime)
+      .map((shard) => ({ shard }));
+    const floorCarrier = state.shards[0];
+    const initialFloorWork: ParallelScanWork[] = includesCommentFloors(options.commentScope) && floorCarrier
+      ? state.floorThreads.filter((thread) => !thread.done)
+        .map((thread) => ({ shard: floorCarrier, floorParentCommentId: thread.parentCommentId }))
+      : [];
+    const queue = new AsyncWorkQueue<ParallelScanWork>(
+      initialFloorWork.length > 0 ? initialFloorWork : initialRootWork,
     );
     const blockedLanes = new Set<string>();
     const unavailableLanes = new Set<string>();
@@ -125,6 +139,7 @@ export async function runParallelSongScan(
     const floorThreadTasks = new Map<string, Promise<void>>();
     const reservedFloorPages = new Set<string>();
     const reservedRootPages = new Set<string>();
+    const floorCheckpointBatcher = createFloorCheckpointBatcher(checkpoint);
     let nextShardId = state.shards.reduce((maximum, shard) => Math.max(maximum, shard.id), -1) + 1;
     const allLanesUnavailable = (): boolean => lanes.every((lane) =>
       blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)
@@ -189,9 +204,11 @@ export async function runParallelSongScan(
     const scanPendingFloorPage = async (
       lane: ParallelCommentLane,
       workerId: string,
+      parentCommentId: string,
       shardId?: number,
     ): Promise<"none" | "processed" | "matched"> => {
-      const root = pendingCommentFloorRoots(state.floorThreads)[0];
+      const root = pendingCommentFloorRoots(state.floorThreads)
+        .find((candidate) => candidate.commentId === parentCommentId);
       if (!root) return "none";
       const current = floorThreadTasks.get(root.commentId);
       if (current) {
@@ -200,7 +217,7 @@ export async function runParallelSongScan(
         } catch (error) {
           if (!(error instanceof LaneRequestFailure || error instanceof CooldownRequired)) throw error;
         }
-        return scanPendingFloorPage(lane, workerId, shardId);
+        return "none";
       }
       let pageMatched = false;
       const task = processCommentFloors({
@@ -277,16 +294,13 @@ export async function runParallelSongScan(
               route: "song-comment-floor",
               capturedAt: new Date().toISOString(),
             }));
-          for (const record of records) {
-            const outcome = await results.record(record);
-            pageMatched ||= outcome.counted;
-          }
+          pageMatched ||= (await results.recordMany(records)) > 0;
         },
         checkpointPage: async (_root, _thread, page) => {
           state.floorPagesProcessed += 1;
           state.replyCommentsInspected += page.comments.length;
-          state.finished = Boolean(state.rootDone) && commentFloorsComplete(state.floorThreads);
-          await checkpoint(true);
+          state.finished = commentScopeComplete(options.commentScope, Boolean(state.rootDone), state.floorThreads);
+          await floorCheckpointBatcher.pageCompleted();
           reservedFloorPages.delete(root.commentId);
           if (pageMatched && options.stopAfterFirst) {
             matched = true;
@@ -303,12 +317,24 @@ export async function runParallelSongScan(
     const scanShardPage = async (
       lane: ParallelCommentLane,
       workerId: string,
-      shard: CommentTimeShard,
-    ): Promise<CommentTimeShard[]> => {
+      work: ParallelScanWork,
+    ): Promise<ParallelScanWork[]> => {
       if (stopRequested) return [];
-      const pendingFloor = await scanPendingFloorPage(lane, workerId, shard.id);
-      if (pendingFloor === "matched") return [];
-      if (pendingFloor === "processed") return shard.done && commentFloorsComplete(state.floorThreads) ? [] : [shard];
+      const { shard } = work;
+      if (work.floorParentCommentId !== undefined) {
+        const pendingFloor = await scanPendingFloorPage(lane, workerId, work.floorParentCommentId, shard.id);
+        if (pendingFloor === "matched") return [];
+        if (pendingFloor === "processed") {
+          const thread = state.floorThreads.find((candidate) =>
+            candidate.parentCommentId === work.floorParentCommentId
+          );
+          if (thread && !thread.done) return [work];
+          if (commentFloorsComplete(state.floorThreads)) {
+            return state.shards.filter((candidate) => !candidate.done).map((candidate) => ({ shard: candidate }));
+          }
+        }
+        return [];
+      }
       const requestedCursor = shard.cursor;
       const rootTaskKey = `${shard.id}:${shard.pageNo}:${requestedCursor}`;
       if (shard.done || !reserveRootRequest(rootTaskKey)) return [];
@@ -427,122 +453,13 @@ export async function runParallelSongScan(
           return [];
         }
       }
-      let floorMatched = false;
-      const processRootFloor = async (root: typeof rangedComments[number]): Promise<void> => {
-        const current = floorThreadTasks.get(root.commentId);
-        if (current) {
-          try {
-            await current;
-          } catch (error) {
-            if (!(error instanceof LaneRequestFailure || error instanceof CooldownRequired)) throw error;
-          }
-          return processRootFloor(root);
-        }
-        const task = processCommentFloors({
-          roots: [root],
-          threads: state.floorThreads,
-          fetchPage: async (_root, thread) => {
-        if (!lane.client.getCommentFloor) throw new Error("Comment floor API is unavailable on this lane.");
-        if (!reserveFloorRequest(root.commentId)) throw new RequestBudgetExhausted(options.requestBudget);
-        const floorStartedAt = Date.now();
-        const floorActivity = {
-          lane: lane.name,
-          workerId,
-          operation: "comment-floor" as const,
-          songId: options.songId,
-          songName: options.songName,
-          page: thread.pageNo,
-          parentCommentId: root.commentId,
-          shardId: shard.id,
-          startedAt: new Date(floorStartedAt).toISOString(),
-        };
-        publishRequestActivity(options, { ...floorActivity, phase: "start" });
-        let floorAttempts = 0;
-        let floorNetworkElapsedMs = 0;
-        try {
-          const floorResult = await executeProxyRequest(
-            lane,
-            `comment_floor:${options.songId}:${root.commentId}`,
-            async () => {
-              floorAttempts += 1;
-              const networkStartedAt = Date.now();
-              try {
-                return await lane.client.getCommentFloor!(
-                  options.songId,
-                  root.commentId,
-                  COMMENT_FLOOR_PAGE_SIZE,
-                  thread.nextTime,
-                );
-              } finally {
-                floorNetworkElapsedMs += Date.now() - networkStartedAt;
-              }
-            },
-          );
-          publishRequestActivity(options, {
-            ...floorActivity,
-            phase: "success",
-            elapsedMs: Date.now() - floorStartedAt,
-            networkElapsedMs: floorNetworkElapsedMs,
-            attempts: floorAttempts,
-            comments: floorResult.comments.length,
-            effectiveComments: floorResult.comments.length,
-            totalComments: floorResult.total,
-            hasMore: floorResult.hasMore,
-          });
-          return floorResult;
-        } catch (error) {
-          const status = remoteStatus(error);
-          publishRequestActivity(options, {
-            ...floorActivity,
-            phase: "failure",
-            elapsedMs: Date.now() - floorStartedAt,
-            networkElapsedMs: floorNetworkElapsedMs,
-            attempts: floorAttempts,
-            status,
-            rateLimited: error instanceof CooldownRequired || status === 403 || status === 429,
-            error: errorMessage(error),
-          });
-          if (error instanceof CooldownRequired || error instanceof RequestBudgetExhausted || error instanceof RunCancelled) {
-            throw error;
-          }
-          throw new LaneRequestFailure(lane.name, error);
-          }
-          },
-          persistPage: async (_root, _thread, floorPage) => {
-            const records = floorPage.comments
-              .filter((comment) => comment.userId === options.uid)
-              .map<FoundComment>((comment) => ({
-                ...comment,
-                songId: options.songId,
-                songName: options.songName,
-                route: "song-comment-floor",
-                capturedAt: new Date().toISOString(),
-              }));
-            for (const record of records) {
-              const outcome = await results.record(record);
-              floorMatched ||= outcome.counted;
-            }
-          },
-          checkpointPage: async (_root, _thread, floorPage) => {
-            state.floorPagesProcessed += 1;
-            state.replyCommentsInspected += floorPage.comments.length;
-            await checkpoint(true);
-            reservedFloorPages.delete(root.commentId);
-            if (floorMatched && options.stopAfterFirst) {
-              matched = true;
-              stopScheduling();
-            }
-          },
-          shouldStopAfterPage: () => floorMatched && options.stopAfterFirst,
-        }).finally(() => floorThreadTasks.delete(root.commentId));
-        floorThreadTasks.set(root.commentId, task);
-        await task;
-      };
-      for (const root of rangedComments) {
-        await processRootFloor(root);
-        if (floorMatched && options.stopAfterFirst) break;
+      const existingFloorParents = new Set(state.floorThreads.map((thread) => thread.parentCommentId));
+      if (includesCommentFloors(options.commentScope)) {
+        discoverCommentFloorThreads(rangedComments, state.floorThreads);
       }
-      if (floorMatched && options.stopAfterFirst) return [];
+      const newFloorWork: ParallelScanWork[] = state.floorThreads
+        .filter((thread) => !thread.done && !existingFloorParents.has(thread.parentCommentId))
+        .map((thread) => ({ shard, floorParentCommentId: thread.parentCommentId }));
 
       shard.pagesProcessed += 1;
       shard.pageNo += 1;
@@ -552,7 +469,7 @@ export async function runParallelSongScan(
 
       const numericNextCursor = nextCursor === undefined ? undefined : Number(nextCursor);
       const cursorPassedShardStart = numericNextCursor !== undefined && numericNextCursor <= shard.startTime;
-      let nextWork: CommentTimeShard[] = [];
+      let nextWork: ParallelScanWork[] = [];
       if (crossedShardStart || nextCursor === undefined || cursorPassedShardStart) {
         shard.done = true;
       } else {
@@ -576,14 +493,14 @@ export async function runParallelSongScan(
             remainingEnd,
             waitingWorkers,
           });
-          nextWork = [shard, sibling];
+          nextWork = [{ shard }, { shard: sibling }];
         } else {
-          nextWork = [shard];
+          nextWork = [{ shard }];
         }
       }
       await checkpoint();
       reservedRootPages.delete(rootTaskKey);
-      return stopRequested ? [] : nextWork;
+      return stopRequested ? [] : [...newFloorWork, ...nextWork];
     };
 
     const runWorker = async (workerIndex: number): Promise<void> => {
@@ -597,25 +514,25 @@ export async function runParallelSongScan(
           permit.release();
           return;
         }
-        const shard = await queue.take();
-        if (!shard) {
+        const work = await queue.take();
+        if (!work) {
           permit.release();
           return;
         }
-        let requeue: CommentTimeShard[] = [];
+        let requeue: ParallelScanWork[] = [];
         let laneRequestActive = false;
         try {
           if (blockedLanes.has(lane.name) || unavailableLanes.has(lane.name)) {
-            requeue = stopRequested ? [] : [shard];
+            requeue = stopRequested ? [] : [work];
             continue;
           }
           laneRequestActive = true;
           activeLaneRequests.set(lane.name, (activeLaneRequests.get(lane.name) ?? 0) + 1);
           if (!recovery.ready) {
-            requeue = [shard];
+            requeue = [work];
             continue;
           }
-          requeue = await scanShardPage(lane, workerId, shard);
+          requeue = await scanShardPage(lane, workerId, work);
           recovery.recordSuccess();
           unavailableLanes.delete(lane.name);
           laneAllocator.notify();
@@ -624,14 +541,14 @@ export async function runParallelSongScan(
             blockedLanes.add(lane.name);
             unavailableLanes.delete(lane.name);
             laneAllocator.notify();
-            requeue = shard.done ? [] : [shard];
+            requeue = work.shard.done && work.floorParentCommentId === undefined ? [] : [work];
             continue;
           }
           if (error instanceof LaneRequestFailure) {
             const retryAfterMs = recovery.recordFailure();
             const recoveryTimer = setTimeout(() => laneAllocator.notify(), retryAfterMs);
             recoveryTimer.unref?.();
-            requeue = shard.done ? [] : [shard];
+            requeue = work.shard.done && work.floorParentCommentId === undefined ? [] : [work];
             if (recovery.failureCount >= MAX_CONSECUTIVE_LANE_FAILURES) {
               if (!blockedLanes.has(lane.name)) unavailableLanes.add(lane.name);
               laneAllocator.notify();
@@ -674,7 +591,7 @@ export async function runParallelSongScan(
     if (fatalError) throw fatalError;
 
     state.rootDone = state.shards.every((shard) => shard.done);
-    state.finished = state.rootDone && commentFloorsComplete(state.floorThreads);
+    state.finished = commentScopeComplete(options.commentScope, state.rootDone, state.floorThreads);
     await checkpoint(true);
     const status = matched && options.stopAfterFirst
       ? "matched"
@@ -723,7 +640,7 @@ function publishCheckpointProgress(
       shards: state.shards.length,
       shardsComplete: state.shards.filter((shard) => shard.done).length,
       coveragePercent: timeCoveragePercent(state.startTime, state.endTime, state.shards),
-      coverageComplete: rootDone && commentFloorsComplete(state.floorThreads),
+      coverageComplete: commentScopeComplete(options.commentScope, rootDone, state.floorThreads),
       pagesProcessed: state.pagesProcessed,
       floorPagesProcessed: state.floorPagesProcessed,
       commentsInspected: parallelCommentsInspected(state),
@@ -766,6 +683,7 @@ function createParallelState(
   return {
     version: 2,
     kind: "parallel-song",
+    commentScope: options.commentScope,
     uid: options.uid,
     songId: options.songId,
     songName: options.songName,
@@ -799,9 +717,16 @@ export async function loadParallelState(path: string): Promise<ParallelSongScanS
     if (state.version !== 2 || state.kind !== "parallel-song") {
       throw new Error("Unsupported parallel scan state.");
     }
+    state.commentScope ??= "root-and-floor-v1";
+    if (state.commentScope !== "root-only-v1" && state.commentScope !== "root-and-floor-v1") {
+      throw new Error("Invalid parallel comment scope.");
+    }
     state.floorThreads = normalizeCommentFloorThreads(state.floorThreads);
+    if (!includesCommentFloors(state.commentScope) && state.floorThreads.length > 0) {
+      throw new Error("Root-only parallel checkpoint contains comment floor work.");
+    }
     state.rootDone ??= state.shards.every((shard) => shard.done);
-    state.finished = state.rootDone && commentFloorsComplete(state.floorThreads);
+    state.finished = commentScopeComplete(state.commentScope, state.rootDone, state.floorThreads);
     if (!Number.isInteger(state.floorPagesProcessed) || state.floorPagesProcessed < 0 ||
       !Number.isInteger(state.replyCommentsInspected) || state.replyCommentsInspected < 0) {
       throw new Error("Invalid parallel comment floor checkpoint.");
@@ -826,6 +751,7 @@ function assertCompatible(
   if (state.endTime !== options.endTime) mismatches.push("endTime");
   if (state.shardCount !== options.shardCount) mismatches.push("shardCount");
   if (state.pageSize !== options.pageSize) mismatches.push("pageSize");
+  if (state.commentScope !== options.commentScope) mismatches.push("commentScope");
   if (mismatches.length > 0) {
     throw new Error(`Parallel state mismatch (${mismatches.join(", ")}); use --fresh or another state path.`);
   }

@@ -65,8 +65,8 @@ export class JsonlResultWriter {
   ) {}
 
   async initialize(): Promise<void> {
-    if (this.initialized) return;
     if (this.closed) throw new Error("JSONL result writer is closed.");
+    if (this.initialized) return;
     this.initialization ??= this.initializeInternal();
     await this.initialization;
   }
@@ -112,21 +112,32 @@ export class JsonlResultWriter {
   }
 
   async append(record: FoundComment): Promise<boolean> {
+    return (await this.appendBatch([record])).length > 0;
+  }
+
+  /** Persists one logical response page with one write and one fsync. */
+  async appendBatch(records: readonly FoundComment[]): Promise<FoundComment[]> {
     await this.initialize();
     if (this.closing) throw new Error("JSONL result writer is closing.");
     this.assertWritable();
-    let added = false;
+    let added: FoundComment[] = [];
     const write = this.appendTail.then(async () => {
       this.assertWritable();
-      if (this.existingIds.has(record.commentId)) return;
-      const stored = {
+      const batchIds = new Set<string>();
+      added = records.filter((record) => {
+        if (this.existingIds.has(record.commentId) || batchIds.has(record.commentId)) return false;
+        batchIds.add(record.commentId);
+        return true;
+      }).map((record) => ({
         ...record,
         commentUrl: record.commentUrl ?? neteaseCommentUrl(record.songId, record.commentId),
-      };
-      await this.persist(`${JSON.stringify(stored)}\n`);
-      this.existingIds.add(record.commentId);
-      added = true;
-      try { this.onAppend?.(stored); } catch { /* UI delivery must not interrupt persistence. */ }
+      }));
+      if (added.length === 0) return;
+      await this.persist(added.map((record) => `${JSON.stringify(record)}\n`).join(""));
+      for (const record of added) {
+        this.existingIds.add(record.commentId);
+        try { this.onAppend?.(record); } catch { /* UI delivery must not interrupt persistence. */ }
+      }
     });
     this.appendTail = write.catch(() => {});
     await write;
@@ -137,6 +148,13 @@ export class JsonlResultWriter {
     if (this.closed) return;
     this.closing ??= (async () => {
       try {
+        // initialize() may already be reading a large existing JSONL file or
+        // opening its append handle. Wait for that ownership transfer before
+        // closing so a concurrent close cannot leave a late-opened handle
+        // behind. Initialization failures already clean up their own handle.
+        if (this.initialization) {
+          try { await this.initialization; } catch { /* Preserve the initialize caller's error. */ }
+        }
         await this.appendTail;
         const file = this.file;
         this.file = undefined;

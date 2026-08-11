@@ -92,6 +92,7 @@ async function options(directory: string): Promise<ParallelSongScanOptions> {
     uid: "42",
     songId: "186016",
     songName: "song",
+    commentScope: "root-and-floor-v1",
     startTime: 0,
     endTime: 100,
     shardCount: 2,
@@ -138,6 +139,94 @@ test("scans time shards concurrently and writes a real match shape", async () =>
   assert.equal(result.songId, "186016");
   assert.deepEqual(liveMatches, ["comment-75"]);
   assert.ok(checkpoints.some((activity) => activity.shardsComplete === 2 && activity.pagesProcessed === 2 && activity.requestsTotal === 2));
+});
+
+test("root-only parallel scope completes without requesting comment floors", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-root-only-"));
+  const config = await options(directory);
+  config.commentScope = "root-only-v1";
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  let floorCalls = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({
+      comments: [{ commentId: "root", userId: "9", content: "root", time: 50, replyCount: 50 }],
+      hasMore: false,
+      total: 51,
+    }),
+    getCommentFloor: async () => {
+      floorCalls += 1;
+      throw new Error("root-only scope must not request floors");
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  const report = await runParallelSongScan([{
+    name: "lane",
+    client,
+    governor: governor(),
+  }], config);
+  assert.equal(report.status, "complete");
+  assert.equal(report.floorPagesProcessed, 0);
+  assert.equal(floorCalls, 0);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.commentScope, "root-only-v1");
+  assert.deepEqual(state.floorThreads, []);
+});
+
+test("parallel floors fan out across parents while duplicate parent work stays single-flight", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-floor-fanout-"));
+  const config = await options(directory);
+  config.shardCount = 1;
+  config.workersPerLane = 1;
+  config.maxWorkers = 4;
+  const parents = Array.from({ length: 8 }, (_, index) => `parent-${index + 1}`);
+  let active = 0;
+  let peak = 0;
+  const activeParents = new Set<string>();
+  const usedLanes = new Set<string>();
+  const lanes = Array.from({ length: 4 }, (_, index) => {
+    const name = `lane-${index + 1}`;
+    const client: NcmClient = {
+      getLoginProfile: async () => undefined,
+      getUserRecord: async () => [],
+      getLikedSongs: async () => [],
+      getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+      getSongCommentsByCursor: async () => ({
+        comments: parents.map((commentId) => ({
+          commentId,
+          userId: "9",
+          content: "root",
+          time: 50,
+          replyCount: 1,
+        })),
+        hasMore: false,
+        total: parents.length,
+      }),
+      getCommentFloor: async (_songId, parentCommentId) => {
+        assert.equal(activeParents.has(parentCommentId), false);
+        activeParents.add(parentCommentId);
+        usedLanes.add(name);
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        active -= 1;
+        activeParents.delete(parentCommentId);
+        return { parentCommentId, comments: [], hasMore: false, total: 1 };
+      },
+      getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+    };
+    return { name, client, governor: governor() };
+  });
+
+  const report = await runParallelSongScan(lanes, config);
+  assert.equal(report.status, "complete");
+  assert.equal(report.floorPagesProcessed, parents.length);
+  assert.equal(peak, 4);
+  assert.equal(usedLanes.size, 4);
 });
 
 test("parallel scanning expands floor replies before completing a shard", async () => {

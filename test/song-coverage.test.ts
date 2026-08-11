@@ -24,3 +24,15 @@ test("coverage owner mismatch is rejected instead of crossing UID boundaries", a
 
   await assert.rejects(loadSongCoverage(path, "99"), /UID|owner/i);
 });
+
+test("coverage completion never crosses comment scopes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-coverage-scope-"));
+  const path = join(directory, "coverage.json");
+  await mergeSongCoverage(path, "42", "root-only-v1", ["A"]);
+
+  await assert.rejects(
+    loadSongCoverage(path, "42", "root-and-floor-v1"),
+    /scope/i,
+  );
+  assert.deepEqual(Object.keys((await loadSongCoverage(path, "42", "root-only-v1")).songs), ["A"]);
+});

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
 import { CooldownRequired, SourcePrivacyRestricted } from "../src/errors";
+import { createFloorCheckpointBatcher } from "../src/comment-floor";
+import { ProxyTransportGate } from "../src/proxy-transport-gate";
 import { runCommentFinder, runPooledCommentFinder } from "../src/scanner";
 import type {
   CommentPage,
@@ -79,12 +81,89 @@ function governor(budget: number): RequestGovernor {
   });
 }
 
+test("floor checkpoint batching keeps one forced write in flight without losing concurrent dirty pages", async () => {
+  let stateRevision = 0;
+  let activeWrites = 0;
+  let peakWrites = 0;
+  const persistedRevisions: number[] = [];
+  const releases: Array<() => void> = [];
+  const batcher = createFloorCheckpointBatcher(async (force) => {
+    if (!force) return;
+    activeWrites += 1;
+    peakWrites = Math.max(peakWrites, activeWrites);
+    persistedRevisions.push(stateRevision);
+    await new Promise<void>((resolve) => releases.push(resolve));
+    activeWrites -= 1;
+  }, { now: () => 0 });
+
+  const completions = Array.from({ length: 32 }, () => {
+    stateRevision += 1;
+    return batcher.pageCompleted();
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(releases.length, 1);
+  assert.deepEqual(persistedRevisions, [4]);
+  releases.shift()!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(releases.length, 1);
+  assert.deepEqual(persistedRevisions, [4, 32]);
+  releases.shift()!();
+  await Promise.all(completions);
+
+  assert.equal(peakWrites, 1);
+  assert.deepEqual(persistedRevisions, [4, 32]);
+});
+
+test("floor checkpoint batching forces the next completed page after 400ms", async () => {
+  let now = 0;
+  const forcedRevisions: number[] = [];
+  let stateRevision = 0;
+  const batcher = createFloorCheckpointBatcher(async (force) => {
+    if (force) forcedRevisions.push(stateRevision);
+  }, { now: () => now });
+
+  for (let index = 0; index < 3; index += 1) {
+    stateRevision += 1;
+    await batcher.pageCompleted();
+  }
+  assert.deepEqual(forcedRevisions, []);
+  now = 400;
+  stateRevision += 1;
+  await batcher.pageCompleted();
+  assert.deepEqual(forcedRevisions, [4]);
+});
+
+test("floor checkpoint batching restores claimed dirty pages after a failed forced write", async () => {
+  let stateRevision = 0;
+  let forceAttempts = 0;
+  const persistedRevisions: number[] = [];
+  const batcher = createFloorCheckpointBatcher(async (force) => {
+    if (!force) return;
+    forceAttempts += 1;
+    if (forceAttempts === 1) throw new Error("checkpoint failed");
+    persistedRevisions.push(stateRevision);
+  }, { now: () => 0 });
+
+  for (let index = 0; index < 3; index += 1) {
+    stateRevision += 1;
+    await batcher.pageCompleted();
+  }
+  stateRevision += 1;
+  await assert.rejects(batcher.pageCompleted(), /checkpoint failed/);
+  stateRevision += 1;
+  await batcher.pageCompleted();
+
+  assert.equal(forceAttempts, 2);
+  assert.deepEqual(persistedRevisions, [5]);
+});
+
 async function options(directory: string): Promise<ScanOptions> {
   return {
     uid: "42",
     strategy: "scan",
     source: "both",
     recordScope: "all",
+    commentScope: "root-and-floor-v1",
     statePath: join(directory, "state.json"),
     outputPath: join(directory, "comments.jsonl"),
     commentPageSize: 2,
@@ -459,7 +538,7 @@ test("pooled floor-first recovery honors pre-abort and interrupts a pending floo
   assert.deepEqual(calls, { catalog: 1, root: 1, floor: 1 });
 });
 
-test("pooled floor failover spends one logical budget slot and leaves the next slot usable", async () => {
+test("pooled floor failover spends one logical budget per durable floor page", async () => {
   const directory = await mkdtemp(join(tmpdir(), "ncm-pooled-floor-budget-failover-"));
   const config = await options(directory);
   config.source = "record";
@@ -505,12 +584,305 @@ test("pooled floor failover spends one logical budget slot and leaves the next s
     { name: "healthy", client: healthyClient, governor: governor(100) },
   ], { ...config, workersPerLane: 1, maxWorkers: 2 });
 
-  assert.equal(report.status, "paused");
+  assert.equal(report.status, "complete");
   assert.deepEqual(healthyTimes, [-1, 10]);
   assert.equal(rootCalls, 1);
   const state = JSON.parse(await readFile(config.statePath, "utf8"));
   assert.equal(state.songProgress[0].floorThreads[0].done, true);
-  assert.equal(state.songProgress[0].rootDone, false);
+  assert.equal(state.songProgress[0].rootDone, true);
+});
+
+test("root-only source scope never discovers or requests comment floors", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-root-only-source-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.commentScope = "root-only-v1";
+  config.requestBudget = 10;
+  let floorCalls = 0;
+  const client: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({
+      comments: [{ commentId: "root-target", userId: "42", content: "root", replyCount: 99 }],
+      hasMore: false,
+      total: 100,
+    }),
+    getCommentFloor: async () => {
+      floorCalls += 1;
+      throw new Error("root-only scope must not request floors");
+    },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+
+  const report = await runPooledCommentFinder([{
+    name: "direct",
+    client,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 1 });
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.floorPagesProcessed, 0);
+  assert.equal(floorCalls, 0);
+  const state = JSON.parse(await readFile(config.statePath, "utf8"));
+  assert.equal(state.commentScope, "root-only-v1");
+  assert.deepEqual(state.songProgress[0].floorThreads, []);
+});
+
+test("pooled floors use multiple lanes across parents while each parent stays single-flight", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-parallelism-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  const parents = Array.from({ length: 8 }, (_, index) => `parent-${index + 1}`);
+  const seedClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({
+      comments: parents.map((commentId) => ({ commentId, userId: "9", content: "root", replyCount: 1 })),
+      hasMore: false,
+      total: parents.length,
+    }),
+    getCommentFloor: async () => { throw new Error("seed budget must stop before floors"); },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  assert.equal((await runPooledCommentFinder([{
+    name: "seed",
+    client: seedClient,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 1 })).status, "paused");
+
+  let active = 0;
+  let peak = 0;
+  const activeParents = new Set<string>();
+  const usedLanes = new Set<string>();
+  const starts: Array<{ lane: string; at: number }> = [];
+  config.requestBudget = parents.length;
+  const transportGate = new ProxyTransportGate({ maxConcurrent: 4, minStartDelayMs: 50 });
+  const lanes = Array.from({ length: 4 }, (_, index) => {
+    const name = `lane-${index + 1}`;
+    const client: NcmClient = {
+      ...seedClient,
+      getCommentFloor: async (_songId, parentCommentId) => {
+        assert.equal(activeParents.has(parentCommentId), false);
+        activeParents.add(parentCommentId);
+        usedLanes.add(name);
+        starts.push({ lane: name, at: Date.now() });
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, 260));
+        active -= 1;
+        activeParents.delete(parentCommentId);
+        return { parentCommentId, comments: [], hasMore: false, total: 1 };
+      },
+    };
+    return {
+      name,
+      client,
+      governor: new RequestGovernor({
+        minDelayMs: 300,
+        jitterMs: 100,
+        maxRetries: 0,
+        forbiddenCooldownMs: 60_000,
+        requestBudget: 100,
+      }),
+      transportGate,
+    };
+  });
+
+  const report = await runPooledCommentFinder(lanes, {
+    ...config,
+    workersPerLane: 1,
+    maxWorkers: 4,
+  });
+  assert.equal(report.status, "complete");
+  assert.equal(peak, 4);
+  assert.equal(usedLanes.size, 4);
+  const orderedStarts = starts.toSorted((left, right) => left.at - right.at);
+  for (let index = 1; index < orderedStarts.length; index += 1) {
+    assert.ok(orderedStarts[index].at - orderedStarts[index - 1].at >= 45);
+  }
+  for (const name of usedLanes) {
+    const laneStarts = starts.filter((entry) => entry.lane === name).map((entry) => entry.at);
+    for (let index = 1; index < laneStarts.length; index += 1) {
+      assert.ok(laneStarts[index] - laneStarts[index - 1] >= 290);
+    }
+  }
+});
+
+test("eight exits and 32 workers sustain bounded floor throughput at 300ms plus 100ms jitter", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-eight-lane-throughput-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  const parents = Array.from({ length: 32 }, (_, index) => `parent-${index + 1}`);
+  const seedClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({
+      comments: parents.map((commentId) => ({ commentId, userId: "9", content: "root", replyCount: 40 })),
+      hasMore: false,
+      total: parents.length * 41,
+    }),
+    getCommentFloor: async () => { throw new Error("seed budget must stop before floors"); },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  assert.equal((await runPooledCommentFinder([{
+    name: "seed",
+    client: seedClient,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 1 })).status, "paused");
+
+  const responseMs = 200;
+  const expectedReplies = parents.length * 40;
+  const usedLanes = new Set<string>();
+  const activeParents = new Set<string>();
+  const starts: Array<{ lane: string; at: number }> = [];
+  let active = 0;
+  let peak = 0;
+  config.requestBudget = parents.length;
+  const transportGate = new ProxyTransportGate({ maxConcurrent: 32, minStartDelayMs: 50 });
+  const lanes = Array.from({ length: 8 }, (_, index) => {
+    const name = `lane-${index + 1}`;
+    const client: NcmClient = {
+      ...seedClient,
+      getCommentFloor: async (_songId, parentCommentId) => {
+        assert.equal(activeParents.has(parentCommentId), false);
+        activeParents.add(parentCommentId);
+        usedLanes.add(name);
+        starts.push({ lane: name, at: Date.now() });
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, responseMs));
+        active -= 1;
+        activeParents.delete(parentCommentId);
+        return {
+          parentCommentId,
+          comments: Array.from({ length: 40 }, (_, replyIndex) => ({
+            commentId: `${parentCommentId}-reply-${replyIndex + 1}`,
+            parentCommentId,
+            userId: "9",
+            content: "reply",
+          })),
+          hasMore: false,
+          total: 40,
+        };
+      },
+    };
+    return {
+      name,
+      client,
+      governor: new RequestGovernor({
+        minDelayMs: 300,
+        jitterMs: 100,
+        maxRetries: 0,
+        forbiddenCooldownMs: 60_000,
+        requestBudget: 100,
+      }),
+      transportGate,
+    };
+  });
+
+  const startedAt = Date.now();
+  const report = await runPooledCommentFinder(lanes, {
+    ...config,
+    workersPerLane: 4,
+    maxWorkers: 32,
+  });
+  const elapsedMs = Date.now() - startedAt;
+  const repliesPerSecond = expectedReplies / (elapsedMs / 1_000);
+
+  assert.equal(report.status, "complete");
+  assert.equal(report.lanes, 8);
+  assert.equal(report.workers, 32);
+  assert.equal(report.floorPagesProcessed, parents.length);
+  assert.equal(report.replyCommentsInspected, expectedReplies);
+  assert.equal(usedLanes.size, 8);
+  assert.ok(peak >= 3, `expected concurrent floor work, observed peak ${peak}`);
+  assert.ok(
+    repliesPerSecond >= 200,
+    `expected at least 200 synthetic full-page replies/s, observed ${repliesPerSecond.toFixed(1)}`,
+  );
+  const orderedStarts = starts.toSorted((left, right) => left.at - right.at);
+  for (let index = 1; index < orderedStarts.length; index += 1) {
+    assert.ok(orderedStarts[index].at - orderedStarts[index - 1].at >= 45);
+  }
+  for (const name of usedLanes) {
+    const laneStarts = starts.filter((entry) => entry.lane === name).map((entry) => entry.at);
+    for (let index = 1; index < laneStarts.length; index += 1) {
+      assert.ok(laneStarts[index] - laneStarts[index - 1] >= 290);
+    }
+  }
+  context.diagnostic(
+    `8 exits × 4 workers: ${expectedReplies} synthetic replies in ${elapsedMs}ms (${repliesPerSecond.toFixed(1)} replies/s)`,
+  );
+});
+
+test("one floor cursor stays serial while successful pages rotate across exits", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-floor-lane-rotation-"));
+  const config = await options(directory);
+  config.source = "record";
+  config.requestBudget = 1;
+  const seedClient: NcmClient = {
+    getLoginProfile: async () => undefined,
+    getUserRecord: async () => [{ id: "1", sources: ["record"] }],
+    getLikedSongs: async () => [],
+    getSongComments: async () => ({ comments: [], hotComments: [], more: false }),
+    getSongCommentsByCursor: async () => ({
+      comments: [{ commentId: "parent", userId: "9", content: "root", replyCount: 4 }],
+      hasMore: false,
+      total: 5,
+    }),
+    getCommentFloor: async () => { throw new Error("seed budget must stop before floors"); },
+    getUserCommentHistory: async () => ({ comments: [], hasMore: false }),
+  };
+  assert.equal((await runPooledCommentFinder([{
+    name: "seed",
+    client: seedClient,
+    governor: governor(100),
+  }], { ...config, workersPerLane: 1 })).status, "paused");
+
+  const calls: Array<{ lane: string; time: number }> = [];
+  let active = 0;
+  let peak = 0;
+  config.requestBudget = 4;
+  const lanes = Array.from({ length: 4 }, (_, index) => {
+    const name = `lane-${index + 1}`;
+    const client: NcmClient = {
+      ...seedClient,
+      getCommentFloor: async (_songId, parentCommentId, _limit, time) => {
+        active += 1;
+        peak = Math.max(peak, active);
+        calls.push({ lane: name, time });
+        await new Promise((resolve) => setTimeout(resolve, 2));
+        active -= 1;
+        const pageIndex = time === -1 ? 0 : time / 10;
+        return {
+          parentCommentId,
+          comments: [],
+          hasMore: pageIndex < 3,
+          nextTime: pageIndex < 3 ? (pageIndex + 1) * 10 : undefined,
+          total: 4,
+        };
+      },
+    };
+    return { name, client, governor: governor(100) };
+  });
+
+  const report = await runPooledCommentFinder(lanes, {
+    ...config,
+    workersPerLane: 1,
+    maxWorkers: 4,
+  });
+  assert.equal(report.status, "complete");
+  assert.equal(peak, 1);
+  assert.deepEqual(calls.map((call) => call.time), [-1, 10, 20, 30]);
+  assert.equal(new Set(calls.map((call) => call.lane)).size, 4);
 });
 
 test("pooled root failover reuses one logical page reservation and page-cap slot", async () => {

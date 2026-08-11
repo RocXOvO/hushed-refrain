@@ -95,6 +95,41 @@ test("sync failure is latched before publishing or accepting later records", asy
   assert.equal(writer.has("2"), false);
 });
 
+test("appends one logical response page with one write and one sync", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-result-batch-"));
+  const path = join(root, "comments.jsonl");
+  const writes: string[] = [];
+  let syncs = 0;
+  const writer = new JsonlResultWriter(path, undefined, async () => {}, {
+    async openAppendFile() {
+      return {
+        async write(contents) { writes.push(contents); },
+        async sync() { syncs += 1; },
+        async close() {},
+      };
+    },
+  });
+  const base = {
+    userId: "target",
+    content: "match",
+    route: "song-comment-floor" as const,
+    parentCommentId: "parent",
+    capturedAt: new Date(0).toISOString(),
+  };
+
+  const added = await writer.appendBatch([
+    { ...base, commentId: "1" },
+    { ...base, commentId: "2" },
+    { ...base, commentId: "2" },
+  ]);
+  await writer.close();
+
+  assert.deepEqual(added.map((record) => record.commentId), ["1", "2"]);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].trim().split("\n").length, 2);
+  assert.equal(syncs, 1);
+});
+
 test("closes the append handle when damaged-tail repair cannot be synced", async () => {
   const root = await mkdtemp(join(tmpdir(), "ncm-result-tail-sync-failure-"));
   const path = join(root, "comments.jsonl");
@@ -158,4 +193,37 @@ test("close drains an already accepted append before closing the handle", async 
     route: "song-comments",
     capturedAt: new Date(0).toISOString(),
   }), /closed|closing/);
+});
+
+test("close waits for an in-flight initialization before closing its late-opened handle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "ncm-result-close-initialize-"));
+  const path = join(root, "comments.jsonl");
+  let releaseOpen!: () => void;
+  let announceOpen!: () => void;
+  const openStarted = new Promise<void>((resolve) => { announceOpen = resolve; });
+  const openReleased = new Promise<void>((resolve) => { releaseOpen = resolve; });
+  const events: string[] = [];
+  const writer = new JsonlResultWriter(path, undefined, async () => {}, {
+    async openAppendFile() {
+      events.push("open-start");
+      announceOpen();
+      await openReleased;
+      events.push("open-finish");
+      return {
+        async write() { events.push("write"); },
+        async sync() { events.push("sync"); },
+        async close() { events.push("close"); },
+      };
+    },
+  });
+
+  const initialize = writer.initialize();
+  await openStarted;
+  const close = writer.close();
+  releaseOpen();
+
+  await initialize;
+  await close;
+  assert.deepEqual(events, ["open-start", "open-finish", "close"]);
+  await assert.rejects(writer.initialize(), /closed/);
 });

@@ -663,6 +663,13 @@ test("uses root-and-floor checkpoints with reusable target-v3 results and isolat
   assert.equal(likes.coveragePath, record.coveragePath);
   assert.doesNotMatch(record.statePath, /web-state-42-record\.json$/);
   assert.doesNotMatch(likes.outputPath, /target-v2/);
+  const rootOnly = sourceTaskPaths("/data", "42", "record", "all", "root-only-v1");
+  assert.match(rootOnly.statePath, /web-state-42-record-root-only-target-v4\.json$/);
+  assert.match(rootOnly.outputPath, /web-comments-42-root-only-target-v3\.jsonl$/);
+  assert.match(rootOnly.coveragePath, /web-song-coverage-42-root-only-target-v4\.json$/);
+  assert.notEqual(rootOnly.statePath, record.statePath);
+  assert.notEqual(rootOnly.outputPath, record.outputPath);
+  assert.notEqual(rootOnly.coveragePath, record.coveragePath);
 });
 
 test("migrates only an exactly matching legacy weekly source checkpoint", async () => {
@@ -776,7 +783,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="taskSidebar"/);
   assert.match(pageText, /id="runtimeInspector"/);
   assert.match(pageText, /id="toolbarStartButton"/);
-  assert.match(pageText, /持续扫描并实时输出/);
+  assert.equal((pageText.match(/name="includeCommentFloors"[^>]*checked/g) ?? []).length, 2);
+  assert.match(pageText, /关闭楼中楼后只扫顶层评论/);
   assert.match(pageText, /updateProgress/);
   assert.match(pageText, /重启并安装|下载更新/);
   assert.match(pageText, /如何获取用户 UID/);
@@ -805,7 +813,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /styles\.css\?v=65/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=78/);
+  assert.match(pageText, /app\.js\?v=79/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);
@@ -956,7 +964,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /已搜索/);
   assert.doesNotMatch(appText, /`已读 \$\{fmt\(comments\)\} 条 · 时间覆盖/);
   assert.match(appText, /达到每首最大页数，未覆盖全部评论/);
-  assert.match(appText, /measuredPercent = total !== undefined && total > 0 \? comments \/ total \* 100 : undefined/);
+  assert.match(appText, /measuredPercent = !rootOnly && total !== undefined && total > 0 \? comments \/ total \* 100 : undefined/);
   assert.match(appText, /Math\.min\(song\.truncated \|\| !song\.done \? 99\.99 : 100, rawPercent\)/);
   assert.match(appText, /topologyCapacityNote/);
   assert.match(appText, /工作线程活跃/);
@@ -1706,34 +1714,35 @@ test("dashboard restores the last task descriptor from the persistent runtime ro
     task: { version: number; platform: string; requestIntervalSemantics: string; input: Record<string, unknown> };
     adjustments: string[];
   };
-  assert.equal(restored.task.version, 3);
+  assert.equal(restored.task.version, 4);
   assert.equal(restored.task.platform, "netease");
   assert.equal(restored.task.requestIntervalSemantics, "per-start-v1");
   assert.equal(restored.task.input.minDelayMs, 111);
   assert.equal(restored.task.input.jitterMs, 34);
   assert.equal(restored.task.input.songId, descriptor.input.songId);
-  assert.deepEqual(restored.adjustments, ["netease-request-spacing-per-start-v1"]);
+  assert.equal(restored.task.input.includeCommentFloors, true);
+  assert.deepEqual(restored.adjustments, ["netease-request-spacing-per-start-v1", "netease-comment-scope-root-and-floor-v1"]);
   const persisted = JSON.parse(await readFile(join(dataDirectory, "resume-task.json"), "utf8")) as {
     version: number;
     requestIntervalSemantics: string;
   };
-  assert.equal(persisted.version, 3);
+  assert.equal(persisted.version, 4);
   assert.equal(persisted.requestIntervalSemantics, "per-start-v1");
   const second = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
   assert.equal(second.status, 200);
   const secondValue = await second.json() as { task: { version: number }; adjustments?: string[] };
-  assert.equal(secondValue.task.version, 3);
+  assert.equal(secondValue.task.version, 4);
   assert.equal(secondValue.adjustments, undefined);
 });
 
-test("current request-start spacing descriptors are never migrated twice", () => {
+test("current scoped descriptors are never migrated twice", () => {
   const descriptor = {
-    version: 3 as const,
+    version: 4 as const,
     platform: "netease" as const,
     mode: "parallel" as const,
     requestIntervalSemantics: "per-start-v1" as const,
     updatedAt: "2026-08-08T00:00:00.000Z",
-    input: { uid: "42", songId: "186016", workersPerProxy: 3, minDelayMs: 111, jitterMs: 34 },
+    input: { uid: "42", songId: "186016", includeCommentFloors: false, workersPerProxy: 3, minDelayMs: 111, jitterMs: 34 },
   };
   assert.deepEqual(normalizeResumeTaskForClient(descriptor), { task: descriptor });
 });
@@ -1747,7 +1756,7 @@ test("legacy QQ resume keeps its saved custom request-start spacing", () => {
     input: { target: "synthetic-target", pageSize: 25, minDelayMs: 3_000, jitterMs: 1_000 },
   };
   const restored = normalizeResumeTaskForClient(descriptor);
-  assert.equal(restored.task.version, 3);
+  assert.equal(restored.task.version, 4);
   assert.equal(restored.task.input.minDelayMs, 3_000);
   assert.equal(restored.task.input.jitterMs, 1_000);
   assert.equal(restored.adjustments, undefined);
@@ -1772,7 +1781,7 @@ test("dashboard normalizes a legacy QQ page size without changing its resume gen
   const response = await fetch(`http://127.0.0.1:${address.port}/api/resume`);
   assert.equal(response.status, 200);
   const value = await response.json() as { task: typeof descriptor & { version: number; requestIntervalSemantics: string }; adjustments: string[] };
-  assert.equal(value.task.version, 3);
+  assert.equal(value.task.version, 4);
   assert.equal(value.task.requestIntervalSemantics, "per-start-v1");
   assert.equal(value.task.input.pageSize, 25);
   assert.equal(value.task.input.target, descriptor.input.target);
@@ -1918,12 +1927,13 @@ test("dashboard restores a valid legacy temp descriptor after an interrupted Win
     task: { version: number; platform: string; requestIntervalSemantics: string; input: Record<string, unknown> };
     adjustments: string[];
   };
-  assert.equal(restored.task.version, 3);
+  assert.equal(restored.task.version, 4);
   assert.equal(restored.task.platform, "netease");
   assert.equal(restored.task.input.uid, "42");
   assert.equal(restored.task.input.minDelayMs, 2_500);
   assert.equal(restored.task.input.jitterMs, 800);
-  assert.deepEqual(restored.adjustments, ["netease-request-spacing-per-start-v1"]);
+  assert.equal(restored.task.input.includeCommentFloors, true);
+  assert.deepEqual(restored.adjustments, ["netease-request-spacing-per-start-v1", "netease-comment-scope-root-and-floor-v1"]);
 });
 
 test("dashboard reports an empty cross-version task descriptor explicitly", async (context) => {

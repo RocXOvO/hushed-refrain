@@ -25,7 +25,7 @@ import {
   SOURCE_RESULT_VERSION,
   SOURCE_STATE_VERSION,
 } from "./state";
-import type { ScanOptions, SourceSelection, Strategy } from "./types";
+import type { CommentScope, ScanOptions, SourceSelection, Strategy } from "./types";
 
 const help = `
 ncm-comments - 乐评寻踪·网易云评论检索 CLI
@@ -54,6 +54,7 @@ Scan options:
   --jitter-ms N                      default: 800
   --max-retries N                    default: 3 (network/5xx only)
   --forbidden-cooldown-ms N          default: 900000
+  --no-comment-floors                scan top-level comments only
   --proxy URL                         optional static HTTP/HTTPS proxy
   --stop-after-first
   --dry-run
@@ -73,6 +74,7 @@ Parallel song options:
   --max-pages N                     default: 0 (all top-level pages; floor replies use request budget)
   --min-delay-ms N                  default: 111 between starts on one exit
   --jitter-ms N                     default: 34 added to that start interval
+  --no-comment-floors               scan top-level comments only
   --stop-after-first
   --fresh
 
@@ -216,6 +218,7 @@ async function scanSongCommand(args: string[]): Promise<void> {
       state: { type: "string" },
       "stop-after-first": { type: "boolean", default: false },
       fresh: { type: "boolean", default: false },
+      "no-comment-floors": { type: "boolean", default: false },
     },
     strict: true,
   });
@@ -245,11 +248,15 @@ async function scanSongCommand(args: string[]): Promise<void> {
     "forbidden-cooldown-ms",
     1_000,
   );
+  const commentScope: CommentScope = parsed.values["no-comment-floors"]
+    ? "root-only-v1"
+    : "root-and-floor-v1";
+  const scopeSuffix = commentScope === "root-only-v1" ? "-root-only" : "";
   const statePath = resolve(
-    parsed.values.state ?? `data/parallel-state-${uid}-${songId}-v2.json`,
+    parsed.values.state ?? `data/parallel-state-${uid}-${songId}${scopeSuffix}-v2.json`,
   );
   const outputPath = resolve(
-    parsed.values.output ?? `data/parallel-comments-${uid}-${songId}.jsonl`,
+    parsed.values.output ?? `data/parallel-comments-${uid}-${songId}${scopeSuffix}.jsonl`,
   );
   const previous = parsed.values.fresh ? undefined : await loadParallelState(statePath);
   let proxies = proxyList(parsed.values.proxy, parsed.values["proxy-list"]);
@@ -300,6 +307,7 @@ async function scanSongCommand(args: string[]): Promise<void> {
     shardCount,
     pageSize,
     workersPerLane,
+    commentScope,
     requestBudget,
     maxPages,
     stopAfterFirst: parsed.values["stop-after-first"]!,
@@ -371,6 +379,7 @@ async function scanCommand(args: string[]): Promise<void> {
       "stop-after-first": { type: "boolean", default: false },
       "dry-run": { type: "boolean", default: false },
       fresh: { type: "boolean", default: false },
+      "no-comment-floors": { type: "boolean", default: false },
     },
     strict: true,
   });
@@ -380,6 +389,10 @@ async function scanCommand(args: string[]): Promise<void> {
   const source = oneOf(parsed.values.source, ["record", "likes", "playlists", "both", "all"] as const, "source");
   const strategy = oneOf(parsed.values.strategy, ["auto", "scan", "history"] as const, "strategy");
   const recordScope = oneOf(parsed.values["record-scope"], ["all", "week", "both"] as const, "record-scope");
+  const commentScope: CommentScope = parsed.values["no-comment-floors"]
+    ? "root-only-v1"
+    : "root-and-floor-v1";
+  const scopeSuffix = commentScope === "root-only-v1" ? "-root-only" : "";
   const cookiePath = resolve(parsed.values["cookie-file"]!);
   const cookie = await readCookie(cookiePath);
 
@@ -388,10 +401,11 @@ async function scanCommand(args: string[]): Promise<void> {
     strategy: strategy as Strategy,
     source: source as SourceSelection,
     recordScope,
+    commentScope,
     cookie,
-    statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}${(source === "record" || source === "both" || source === "all") && recordScope !== "all" ? `-record-${recordScope}` : ""}-target-v${SOURCE_STATE_VERSION}.json`),
-    outputPath: resolve(parsed.values.output ?? `data/comments-${uid}-target-v${SOURCE_RESULT_VERSION}.jsonl`),
-    coveragePath: resolve(parsed.values.coverage ?? `data/song-coverage-${uid}-target-v${SOURCE_COVERAGE_VERSION}.json`),
+    statePath: resolve(parsed.values.state ?? `data/state-${uid}-${source}${(source === "record" || source === "both" || source === "all") && recordScope !== "all" ? `-record-${recordScope}` : ""}${scopeSuffix}-target-v${SOURCE_STATE_VERSION}.json`),
+    outputPath: resolve(parsed.values.output ?? `data/comments-${uid}${scopeSuffix}-target-v${SOURCE_RESULT_VERSION}.jsonl`),
+    coveragePath: resolve(parsed.values.coverage ?? `data/song-coverage-${uid}${scopeSuffix}-target-v${SOURCE_COVERAGE_VERSION}.json`),
     commentPageSize: integer(parsed.values["comment-page-size"], "comment-page-size", 1, 2_000),
     historyPageSize: integer(parsed.values["history-page-size"], "history-page-size", 1, 100),
     requestBudget: integer(parsed.values["request-budget"], "request-budget", 1),
@@ -401,7 +415,7 @@ async function scanCommand(args: string[]): Promise<void> {
     fresh: parsed.values.fresh!,
     dryRun: parsed.values["dry-run"]!,
   };
-  if (!parsed.values.state && (source === "record" || source === "both")) {
+  if (!parsed.values.state && commentScope === "root-and-floor-v1" && (source === "record" || source === "both")) {
     const legacyPath = resolve(`data/state-${uid}-${source}-target-v${SOURCE_STATE_VERSION}.json`);
     const scopedPath = resolve(`data/state-${uid}-${source}-record-week-target-v${SOURCE_STATE_VERSION}.json`);
     await migrateLegacyWeekState(legacyPath, scopedPath, uid, source);

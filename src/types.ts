@@ -2,6 +2,7 @@ export type SongSource = "record" | "record-week" | "likes" | "playlists";
 export type SourceSelection = "record" | "likes" | "playlists" | "both" | "all";
 export type RecordScope = "all" | "week" | "both";
 export type Strategy = "auto" | "scan" | "history";
+export type CommentScope = "root-only-v1" | "root-and-floor-v1";
 
 export interface SongSourceMembership {
   source: SongSource;
@@ -194,6 +195,7 @@ export interface CommentFloorProgress {
 export interface ParallelSongScanState {
   version: 2;
   kind: "parallel-song";
+  commentScope: CommentScope;
   uid: string;
   songId: string;
   songName?: string;
@@ -225,6 +227,7 @@ export interface ParallelSongScanOptions {
   endTime: number;
   shardCount: number;
   pageSize: number;
+  commentScope: CommentScope;
   workersPerLane: number;
   /** Hard ceiling for the number of actual worker loops in this task. */
   maxWorkers?: number;
@@ -333,7 +336,7 @@ export interface SongScanProgress {
 export interface ScanState {
   version: 1 | 2 | 3 | 4;
   commentPagination?: "cursor-v1";
-  commentScope?: "root-and-floor-v1";
+  commentScope?: CommentScope;
   commentPageSize?: number;
   uid: string;
   strategy: "scan" | "history";
@@ -373,6 +376,7 @@ export interface ScanOptions {
   strategy: Strategy;
   source: SourceSelection;
   recordScope: RecordScope;
+  commentScope: CommentScope;
   cookie?: string;
   statePath: string;
   outputPath: string;

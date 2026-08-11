@@ -2,7 +2,11 @@ import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { readAtomicJson, removeAtomicFile, writeAtomicJson } from "./atomic-file";
-import { commentFloorsComplete, normalizeCommentFloorThreads } from "./comment-floor";
+import {
+  commentScopeComplete,
+  includesCommentFloors,
+  normalizeCommentFloorThreads,
+} from "./comment-floor";
 import type { ScanOptions, ScanState } from "./types";
 
 export const SOURCE_CATALOG_VERSION = 3;
@@ -18,7 +22,7 @@ export function createState(
   return {
     version: 4,
     commentPagination: "cursor-v1",
-    commentScope: "root-and-floor-v1",
+    commentScope: options.commentScope,
     commentPageSize: options.commentPageSize,
     uid: options.uid,
     strategy,
@@ -59,7 +63,10 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
     if (![1, 2, 3, 4].includes(parsed.version)) throw new Error(`Unsupported state version: ${parsed.version}`);
     const needsFloorRescan = parsed.version < 4 && parsed.strategy === "scan";
     parsed.version = 4;
-    parsed.commentScope = "root-and-floor-v1";
+    parsed.commentScope ??= "root-and-floor-v1";
+    if (parsed.commentScope !== "root-only-v1" && parsed.commentScope !== "root-and-floor-v1") {
+      throw new Error("Invalid comment scope in source checkpoint.");
+    }
     parsed.strategyResolved ??= true;
     parsed.sourcesLoaded ??= parsed.songs.length > 0 || parsed.sourceSongCount > 0 || parsed.finished;
     parsed.sourceErrors ??= [];
@@ -73,8 +80,11 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
     }));
     for (const progress of parsed.songProgress) {
       progress.floorThreads = normalizeCommentFloorThreads(progress.floorThreads);
+      if (!includesCommentFloors(parsed.commentScope) && progress.floorThreads.length > 0) {
+        throw new Error("Root-only source checkpoint contains comment floor work.");
+      }
       progress.rootDone ??= progress.done;
-      progress.done = Boolean(progress.rootDone) && commentFloorsComplete(progress.floorThreads);
+      progress.done = commentScopeComplete(parsed.commentScope, Boolean(progress.rootDone), progress.floorThreads);
       progress.floorPagesProcessed ??= progress.floorThreads.reduce((total, thread) => total + thread.pagesProcessed, 0);
       progress.replyCommentsProcessed ??= progress.floorThreads.reduce((total, thread) => total + thread.repliesProcessed, 0);
       for (const shard of progress.commentShards ?? []) {
@@ -100,7 +110,7 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
     parsed.replyCommentsInspected ??= parsed.songProgress.reduce((total, progress) => total + (progress.replyCommentsProcessed ?? 0), 0);
     if (parsed.strategy === "scan") {
       parsed.finished = parsed.songProgress.every((progress) =>
-        progress.done && commentFloorsComplete(progress.floorThreads)
+        commentScopeComplete(parsed.commentScope!, Boolean(progress.rootDone), progress.floorThreads)
       );
       parsed.coverageComplete &&= parsed.finished;
     }
@@ -193,6 +203,7 @@ export function assertCompatibleState(state: ScanState, options: ScanOptions): v
   if (state.uid !== options.uid) mismatches.push("uid");
   if (state.source !== options.source) mismatches.push("source");
   if (state.recordScope !== options.recordScope) mismatches.push("recordScope");
+  if (state.commentScope !== options.commentScope) mismatches.push("commentScope");
   if (
     (options.source === "likes" || options.source === "playlists" || options.source === "both" || options.source === "all") &&
     state.sourceCatalogVersion !== SOURCE_CATALOG_VERSION

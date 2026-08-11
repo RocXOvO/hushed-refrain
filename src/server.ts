@@ -80,6 +80,7 @@ import { taskElapsedMs, TaskCoordinator, type TaskAcquisitionBlock } from "./tas
 import { readTaskLog, TaskLogger } from "./task-log";
 import type {
   FoundComment,
+  CommentScope,
   ParallelSongScanReport,
   RunReport,
   ScanOptions,
@@ -138,7 +139,7 @@ interface PlatformResumeTaskDescriptor {
 }
 
 interface CurrentResumeTaskDescriptor {
-  version: 3;
+  version: 3 | 4;
   platform: "netease" | "qq";
   mode: "source" | "parallel" | "song" | "likes";
   requestIntervalSemantics: "per-start-v1";
@@ -171,6 +172,7 @@ interface ActiveSongSnapshot {
   progressBasis?: "comments" | "time";
   done?: boolean;
   truncated?: boolean;
+  commentScope?: CommentScope;
 }
 
 interface JobSnapshot extends PagePerformanceSnapshot {
@@ -179,6 +181,7 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   uid?: string;
   source?: SourceSelection;
   recordScope?: RecordScope;
+  commentScope?: CommentScope;
   startedAt?: string;
   finishedAt?: string;
   songs: number;
@@ -233,6 +236,7 @@ interface ParallelJobSnapshot extends PagePerformanceSnapshot {
   uid?: string;
   songId?: string;
   songName?: string;
+  commentScope?: CommentScope;
   activeSongs: ActiveSongSnapshot[];
   startedAt?: string;
   finishedAt?: string;
@@ -271,6 +275,7 @@ interface StartJobInput {
   uid?: unknown;
   source?: unknown;
   recordScope?: unknown;
+  includeCommentFloors?: unknown;
   pageSize?: unknown;
   requestBudget?: unknown;
   minDelayMs?: unknown;
@@ -291,6 +296,7 @@ interface StartJobInput {
 interface StartParallelInput {
   uid?: unknown;
   songId?: unknown;
+  includeCommentFloors?: unknown;
   workersPerProxy?: unknown;
   maxProxyLanes?: unknown;
   hostConcurrency?: unknown;
@@ -646,6 +652,7 @@ class JobManager {
       throw new HttpError(401, "喜欢歌曲需要网易云登录，请先点击“二维码登录”完成登录。");
     }
     const recordScope = selection(input.recordScope ?? "all", ["all", "week", "both"] as const, "recordScope");
+    const commentScope = requestedCommentScope(input.includeCommentFloors);
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const minDelayMs = integer(input.minDelayMs ?? 2_500, "minDelayMs", 0, 600_000);
     const jitterMs = integer(input.jitterMs ?? 800, "jitterMs", 0, 600_000);
@@ -664,11 +671,11 @@ class JobManager {
     const proxy = proxyUrl(input.proxy);
     const allowDirect = bool(input.allowDirect);
     const fresh = bool(input.fresh);
-    const taskPaths = sourceTaskPaths(this.paths.data, uid, source, recordScope);
+    const taskPaths = sourceTaskPaths(this.paths.data, uid, source, recordScope, commentScope);
     const nextStatePath = taskPaths.statePath;
     const nextOutputPath = taskPaths.outputPath;
     const nextCoveragePath = taskPaths.coveragePath;
-    if (source === "record" || source === "both") {
+    if (commentScope === "root-and-floor-v1" && (source === "record" || source === "both")) {
       await migrateLegacyWeekSourceState(this.paths.data, uid, source);
     }
     const activePool = await readProxyPool(this.paths.pool);
@@ -728,6 +735,7 @@ class JobManager {
       strategy: "scan",
       source,
       recordScope,
+      commentScope,
       cookie,
       statePath: nextStatePath,
       outputPath: nextOutputPath,
@@ -765,7 +773,7 @@ class JobManager {
       onSchedulerActivity: (activity) => logger.scheduler(activity),
       onSongProgress: (activity) => {
         if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
-        const progressPercent = commentProgressPercent(
+        const progressPercent = commentScope === "root-only-v1" ? undefined : commentProgressPercent(
           activity.commentsProcessed,
           activity.totalComments,
           activity.done,
@@ -783,6 +791,7 @@ class JobManager {
           progressBasis: "comments",
           done: activity.done,
           truncated: activity.truncated,
+          commentScope,
         });
         this.trimActiveSongProgress();
         if (activity.done) this.removeScheduledSong(activity.songId);
@@ -805,7 +814,7 @@ class JobManager {
     this.statePath = nextStatePath;
     this.outputPath = nextOutputPath;
     this.snapshotValue = {
-      ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope,
+      ...emptySnapshot(), id: activeId, status: "running", uid, source, recordScope, commentScope,
       startedAt, proxyEnabled: selectedPoolEntries.length > 0 || Boolean(proxy),
       lanes: this.lanes.length, workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
       workersPerLane, hostConcurrency, pageSize: commentPageSize, minDelayMs, jitterMs,
@@ -821,6 +830,7 @@ class JobManager {
       uid,
       source,
       recordScope,
+      commentScope,
       pageSize: commentPageSize,
       lanes: this.lanes.length,
       workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency),
@@ -835,7 +845,7 @@ class JobManager {
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
-        version: 3,
+        version: 4,
         platform: "netease",
         mode: "source",
         requestIntervalSemantics: "per-start-v1",
@@ -844,6 +854,7 @@ class JobManager {
           uid,
           source,
           recordScope,
+          includeCommentFloors: commentScope === "root-and-floor-v1",
           pageSize: commentPageSize,
           requestBudget,
           minDelayMs,
@@ -1057,6 +1068,7 @@ class JobManager {
         ? `${snapshot.songsProcessed.toLocaleString("zh-CN")} / ${snapshot.songs.toLocaleString("zh-CN")} 首歌曲；`
           + `目录 ${snapshot.catalogSongs.toLocaleString("zh-CN")}，历史完成 ${snapshot.historicalCompletedSongs.toLocaleString("zh-CN")}，`
           + `复用 ${snapshot.reusedSongs.toLocaleString("zh-CN")}，新增待扫 ${snapshot.newPendingSongs.toLocaleString("zh-CN")}`
+          + (snapshot.commentScope === "root-only-v1" ? "；仅扫描顶层评论，未读取楼中楼" : "")
         : "歌曲目录未读取，数量未知",
       exportedAt: new Date().toISOString(),
       comments: comments.reverse(),
@@ -1189,6 +1201,7 @@ class ParallelJobManager {
     try {
     const uid = numericId(input.uid, "UID");
     const songId = numericId(input.songId, "歌曲 ID");
+    const commentScope = requestedCommentScope(input.includeCommentFloors);
     const workersPerLane = integer(input.workersPerProxy ?? 3, "workersPerProxy", 1, 16);
     const maxProxyLanes = integer(input.maxProxyLanes ?? 0, "maxProxyLanes", 0, 32);
     const hostConcurrency = integer(
@@ -1229,10 +1242,11 @@ class ParallelJobManager {
       }),
     }));
     const song = await executeProxyRequest(this.lanes[0], `song_detail:${songId}`, () => this.lanes[0].client.getSongInfo(songId));
-    const previousPath = join(this.paths.data, `parallel-state-${uid}-${songId}-v2.json`);
+    const scopeSuffix = commentScope === "root-only-v1" ? "-root-only" : "";
+    const previousPath = join(this.paths.data, `parallel-state-${uid}-${songId}${scopeSuffix}-v2.json`);
     const previous = bool(input.fresh) ? undefined : await loadParallelState(previousPath);
     this.statePath = previousPath;
-    this.outputPath = join(this.paths.data, `parallel-comments-${uid}-${songId}.jsonl`);
+    this.outputPath = join(this.paths.data, `parallel-comments-${uid}-${songId}${scopeSuffix}.jsonl`);
     const activeId = randomUUID();
     this.abortController = new AbortController();
     this.activeWorkers.clear();
@@ -1245,7 +1259,7 @@ class ParallelJobManager {
     );
     this.snapshotValue = {
       ...emptyParallelSnapshot(), id: activeId, status: "running", uid, songId,
-      songName: song.name, activeSongs: [{ id: songId, name: song.name, workers: 0 }], startedAt, lanes: this.lanes.length,
+      songName: song.name, commentScope, activeSongs: [{ id: songId, name: song.name, workers: 0, commentScope }], startedAt, lanes: this.lanes.length,
       laneSelection: selectedPool.selection,
       workers: workerCountForTopology(this.lanes.length, workersPerLane, hostConcurrency), shards: shardCount,
       workersPerLane, hostConcurrency, configuredShardCount: shardCount, pageSize, minDelayMs, jitterMs,
@@ -1260,6 +1274,7 @@ class ParallelJobManager {
       uid,
       songId,
       songName: song.name,
+      commentScope,
       pageSize,
       shards: shardCount,
       lanes: this.lanes.length,
@@ -1275,7 +1290,7 @@ class ParallelJobManager {
     });
     try {
       await saveResumeTask(this.paths.resumeTask, {
-        version: 3,
+        version: 4,
         platform: "netease",
         mode: "parallel",
         requestIntervalSemantics: "per-start-v1",
@@ -1283,6 +1298,7 @@ class ParallelJobManager {
         input: {
           uid,
           songId,
+          includeCommentFloors: commentScope === "root-and-floor-v1",
           workersPerProxy: workersPerLane,
           maxProxyLanes,
           hostConcurrency,
@@ -1303,6 +1319,7 @@ class ParallelJobManager {
     void runParallelSongScan(this.lanes, {
       uid, songId, songName: song.name, startTime: previous?.startTime ?? song.publishTime ?? Date.UTC(2000, 0, 1),
       endTime: previous?.endTime ?? Date.now(), shardCount, pageSize, workersPerLane,
+      commentScope,
       maxWorkers: hostConcurrency,
       requestBudget, maxPages, stopAfterFirst: false,
       fresh: bool(input.fresh), statePath: this.statePath, outputPath: this.outputPath,
@@ -1469,7 +1486,7 @@ class ParallelJobManager {
       pagesProcessed: snapshot.pagesProcessed,
       floorPagesProcessed: snapshot.floorPagesProcessed,
       commentsInspected: snapshot.commentsInspected,
-      coverageLabel: parallelCoverageLabel(snapshot.coveragePercent, snapshot.coverageComplete),
+      coverageLabel: parallelCoverageLabel(snapshot.coveragePercent, snapshot.coverageComplete, snapshot.commentScope),
       exportedAt: new Date().toISOString(),
       comments: comments.reverse(),
     };
@@ -1508,6 +1525,7 @@ class ParallelJobManager {
         requestStartedAt: this.activeWorkers.size > 0
           ? Math.min(...this.activeWorkers.values())
           : undefined,
+        commentScope: this.snapshotValue.commentScope,
       }],
     };
   }
@@ -2093,7 +2111,7 @@ async function migrateResumeTaskForClient(
     const descriptor = await readResumeTask(path);
     if (!descriptor) return { task: null };
     const normalized = normalizeResumeTaskForClient(descriptor);
-    if (descriptor.version !== 3) await writeAtomicJson(path, normalized.task);
+    if (descriptor.version !== 4) await writeAtomicJson(path, normalized.task);
     return normalized;
   });
 }
@@ -2119,7 +2137,7 @@ export function normalizeResumeTaskForClient(
   const platform = descriptor.version === 1 ? "netease" : descriptor.platform;
   let input = { ...descriptor.input };
   const adjustments: string[] = [];
-  if (platform === "netease" && descriptor.version !== 3) {
+  if (platform === "netease" && descriptor.version < 3) {
     const workersFallback = descriptor.mode === "parallel" ? 3 : 1;
     const oldMinFallback = descriptor.mode === "parallel" ? 333 : 2_500;
     const oldJitterFallback = descriptor.mode === "parallel" ? 100 : 800;
@@ -2140,8 +2158,12 @@ export function normalizeResumeTaskForClient(
       adjustments.push("qq-comment-page-size-25");
     }
   }
+  if (platform === "netease" && descriptor.version < 4) {
+    input = { ...input, includeCommentFloors: true };
+    adjustments.push("netease-comment-scope-root-and-floor-v1");
+  }
   const task: CurrentResumeTaskDescriptor = {
-    version: 3,
+    version: 4,
     platform,
     mode: descriptor.mode,
     requestIntervalSemantics: "per-start-v1",
@@ -2172,7 +2194,7 @@ async function readResumeTask(path: string): Promise<ResumeTaskDescriptor | unde
         && (value.platform === "netease"
           ? value.mode === "source" || value.mode === "parallel"
           : value.mode === "song" || value.mode === "likes");
-      const validCurrent = value.version === 3
+      const validCurrent = (value.version === 3 || value.version === 4)
         && value.requestIntervalSemantics === "per-start-v1"
         && (value.platform === "netease" || value.platform === "qq")
         && (value.platform === "netease"
@@ -2583,8 +2605,17 @@ function commentProgressPercent(
 function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, coverageComplete: false, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 
-export function parallelCoverageLabel(coveragePercent: number, coverageComplete: boolean): string {
+export function parallelCoverageLabel(
+  coveragePercent: number,
+  coverageComplete: boolean,
+  commentScope: CommentScope = "root-and-floor-v1",
+): string {
   const percent = Math.max(0, Math.min(100, coveragePercent)).toFixed(1);
+  if (commentScope === "root-only-v1") {
+    return coverageComplete
+      ? "顶层时间范围已完成；未读取楼中楼"
+      : `顶层时间范围 ${percent}%，任务尚未完整完成；未读取楼中楼`;
+  }
   if (coverageComplete) return "顶层时间范围与楼中楼均已完成";
   if (Number(percent) >= 100) return "顶层时间范围 100.0%，楼中楼尚未完成";
   return `顶层时间范围 ${percent}%，任务尚未完整完成`;
@@ -2617,6 +2648,11 @@ function optionalNumber(value: unknown, name: string, minimum: number, maximum: 
   return parsed;
 }
 function bool(value: unknown): boolean { return value === true; }
+function requestedCommentScope(value: unknown): CommentScope {
+  if (value === undefined) return "root-and-floor-v1";
+  if (typeof value !== "boolean") throw new HttpError(400, "楼中楼开关格式错误。");
+  return value ? "root-and-floor-v1" : "root-only-v1";
+}
 function proxyUrl(value: unknown): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string") throw new HttpError(400, "代理地址格式错误。");
@@ -2663,13 +2699,15 @@ export function sourceTaskPaths(
   uid: string,
   source: SourceSelection,
   recordScope: RecordScope = "all",
+  commentScope: CommentScope = "root-and-floor-v1",
 ): { statePath: string; outputPath: string; coveragePath: string } {
   const includesRecord = source === "record" || source === "both" || source === "all";
+  const scopeSuffix = commentScope === "root-only-v1" ? "-root-only" : "";
   const stateSource = includesRecord && recordScope !== "all" ? `${source}-record-${recordScope}` : source;
   return {
-    statePath: join(dataRoot, `web-state-${uid}-${stateSource}-target-v${SOURCE_STATE_VERSION}.json`),
-    outputPath: join(dataRoot, `web-comments-${uid}-target-v${SOURCE_RESULT_VERSION}.jsonl`),
-    coveragePath: join(dataRoot, `web-song-coverage-${uid}-target-v${SOURCE_COVERAGE_VERSION}.json`),
+    statePath: join(dataRoot, `web-state-${uid}-${stateSource}${scopeSuffix}-target-v${SOURCE_STATE_VERSION}.json`),
+    outputPath: join(dataRoot, `web-comments-${uid}${scopeSuffix}-target-v${SOURCE_RESULT_VERSION}.jsonl`),
+    coveragePath: join(dataRoot, `web-song-coverage-${uid}${scopeSuffix}-target-v${SOURCE_COVERAGE_VERSION}.json`),
   };
 }
 

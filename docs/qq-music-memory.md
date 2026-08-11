@@ -38,7 +38,7 @@
 - 直接数字（含 19 位）与可逆 8/12/16 classic token 显示完整 `QQ <number>`；可逆 28 字符微信登录 token 只显示 `微信用户`；其他已接受 opaque 值显示 `EncryptUin <value>`。官方 URL 本身不回显。
 - Dashboard 用户探测、歌曲详情/搜索、数字 canonical 解析、正向验证和普通目标的后台资料补全固定走独立 4 秒本机直连 Lane，忽略池与手动代理；opaque canonical 保持本地零请求，`微信用户` 不发补全请求。
 - 上述 lookup-only 请求仍受 Manager lease、Governor、Gate、取消、单飞/代际约束，但不创建或改变扫描 generation。只有正式评论/来源分页进入扫描代理拓扑。
-- 可信本地 UI 的目标展示规则不授权日志、错误、诊断、导出文件名、fixture 或 Release 示例保存完整 token。QQ 实时结果仍显示 `authorEncryptUin` 是当前未修 P1，见 `code-audit.md`。
+- 用户明确可见的默认 PDF 文件名会包含完整 canonical UID/EncryptUin，并仅做 Windows 文件名兼容清理；这不授权日志、错误、诊断、fixture 或 Release 示例保存完整 token。QQ 实时结果仍显示 `authorEncryptUin` 是当前未修 P1，见 `code-audit.md`。
 
 ## 共享应用边界
 
@@ -46,7 +46,7 @@
 - Generation 至少绑定 platform、mode、jobId、canonical target 和 owned state/output path。REST/SSE/log/report 异步读取前后都要复核；新启动预检失败不得偷换旧结果 generation。
 - 四个前端 viewKey 始终完整隔离；QQ Manager 只在自身单 Manager 语义需要时使 QQ sibling generation 失效。
 - `/api/tasks/active` 与 `/api/tasks/stop` 是真实全局任务事实源。更新、窗口退出和顶部停止不能根据当前可见平台猜测要停止的 Manager。
-- 当前 web cache-busters 为 styles 65、platform-wave 15、pointer-silk-trail 6、app 78；GUI/WebGL 平台交接、网易云来源切换/活动进度、折叠 Inspector 提示与鼠标 MeshLine 细节只维护在 `platform-gui-architecture.md`。
+- 当前 web cache-busters 为 styles 65、platform-wave 15、pointer-silk-trail 6、app 79；GUI/WebGL 平台交接、网易云来源切换/活动进度、折叠 Inspector 提示与鼠标 MeshLine 细节只维护在 `platform-gui-architecture.md`。
 
 ## 变更复验
 

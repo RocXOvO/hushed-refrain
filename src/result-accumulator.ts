@@ -20,7 +20,7 @@ export class ResultAccumulator {
   private readonly seen: Set<string>;
 
   constructor(
-    private readonly writer: Pick<JsonlResultWriter, "append">,
+    private readonly writer: Pick<JsonlResultWriter, "append" | "appendBatch">,
     private readonly checkpoint: ResultCheckpoint,
   ) {
     this.seen = new Set(checkpoint.seenCommentIds);
@@ -40,10 +40,20 @@ export class ResultAccumulator {
   }
 
   async recordMany(records: readonly FoundComment[]): Promise<number> {
+    const pending = records.filter((record) => !this.seen.has(record.commentId));
+    if (pending.length === 0) return 0;
+    const persisted = await this.writer.appendBatch(pending);
     let counted = 0;
-    for (const record of records) {
-      if ((await this.record(record)).counted) counted += 1;
+    for (const record of pending) {
+      if (this.seen.has(record.commentId)) continue;
+      this.seen.add(record.commentId);
+      this.checkpoint.seenCommentIds.push(record.commentId);
+      this.checkpoint.matchCount += 1;
+      counted += 1;
     }
+    // Existing JSONL rows are still checkpoint-owned once rediscovered, even
+    // when the writer correctly skipped publishing them again.
+    void persisted;
     return counted;
   }
 }

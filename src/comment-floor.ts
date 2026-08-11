@@ -1,10 +1,115 @@
 import type {
   CommentFloorPage,
   CommentFloorProgress,
+  CommentScope,
   CommentRecord,
 } from "./types";
 
 export const COMMENT_FLOOR_PAGE_SIZE = 40;
+
+export interface FloorCheckpointBatcher {
+  pageCompleted(): Promise<void>;
+}
+
+/**
+ * Coalesces concurrent floor-page completions into one forced-checkpoint
+ * chain. Pages completed during a write remain dirty for the next batch.
+ */
+export function createFloorCheckpointBatcher(
+  checkpoint: (force: boolean) => Promise<void>,
+  options: { maxPages?: number; maxAgeMs?: number; now?: () => number } = {},
+): FloorCheckpointBatcher {
+  const maxPages = options.maxPages ?? 4;
+  const maxAgeMs = options.maxAgeMs ?? 400;
+  const now = options.now ?? Date.now;
+  if (!Number.isInteger(maxPages) || maxPages <= 0) {
+    throw new Error("Floor checkpoint maxPages must be a positive integer.");
+  }
+  if (!Number.isFinite(maxAgeMs) || maxAgeMs < 0) {
+    throw new Error("Floor checkpoint maxAgeMs must be a non-negative finite number.");
+  }
+
+  let dirtyPages = 0;
+  let lastForcedAt = now();
+  let forcedFlush: Promise<void> | undefined;
+  const forceDue = (): boolean => dirtyPages > 0 && (
+    dirtyPages >= maxPages || now() - lastForcedAt >= maxAgeMs
+  );
+
+  const startForcedFlush = (): Promise<void> => {
+    if (forcedFlush) return forcedFlush;
+    const run = async (): Promise<void> => {
+      while (forceDue()) {
+        const claimedPages = dirtyPages;
+        dirtyPages = 0;
+        try {
+          await checkpoint(true);
+        } catch (error) {
+          dirtyPages += claimedPages;
+          throw error;
+        }
+        lastForcedAt = now();
+      }
+    };
+    const pending = run();
+    const tracked = pending.finally(() => {
+      if (forcedFlush === tracked) forcedFlush = undefined;
+    });
+    forcedFlush = tracked;
+    return tracked;
+  };
+
+  return {
+    async pageCompleted(): Promise<void> {
+      dirtyPages += 1;
+      if (forcedFlush) {
+        await forcedFlush;
+        return;
+      }
+      if (forceDue()) {
+        await startForcedFlush();
+        return;
+      }
+      await checkpoint(false);
+    },
+  };
+}
+
+export function includesCommentFloors(scope: CommentScope): boolean {
+  return scope === "root-and-floor-v1";
+}
+
+export function commentScopeComplete(
+  scope: CommentScope,
+  rootDone: boolean,
+  threads: readonly CommentFloorProgress[] | undefined,
+): boolean {
+  return rootDone && (!includesCommentFloors(scope) || commentFloorsComplete(threads));
+}
+
+/** Registers floor work without starting network I/O. */
+export function discoverCommentFloorThreads(
+  roots: readonly CommentRecord[],
+  threads: CommentFloorProgress[],
+): number {
+  const existing = new Set(threads.map((thread) => thread.parentCommentId));
+  let added = 0;
+  for (const root of roots) {
+    if (!root.replyCount || existing.has(root.commentId)) continue;
+    threads.push({
+      parentCommentId: root.commentId,
+      nextTime: -1,
+      pageNo: 1,
+      pagesProcessed: 0,
+      repliesProcessed: 0,
+      declaredReplies: root.replyCount,
+      done: false,
+    });
+    existing.add(root.commentId);
+    added += 1;
+  }
+  return added;
+}
 
 export interface ProcessCommentFloorsOptions {
   roots: readonly CommentRecord[];
@@ -19,13 +124,13 @@ export interface ProcessCommentFloorsOptions {
     thread: CommentFloorProgress,
     page: CommentFloorPage,
   ) => Promise<void>;
-  /** Persist the advanced thread cursor/count after every successful page. */
+  /** Offer the advanced cursor/count to the caller's checkpoint policy. */
   checkpointPage: (
     root: CommentRecord,
     thread: CommentFloorProgress,
     page: CommentFloorPage,
   ) => Promise<void>;
-  /** Stop after the current page has been durably checkpointed. */
+  /** Stop after the caller has applied its required checkpoint barrier. */
   shouldStopAfterPage?: (
     root: CommentRecord,
     thread: CommentFloorProgress,
@@ -91,16 +196,9 @@ export async function processCommentFloors(options: ProcessCommentFloorsOptions)
     let thread = options.threads.find((candidate) => candidate.parentCommentId === root.commentId);
     if (!thread && !root.replyCount) continue;
     if (!thread) {
-      thread = {
-        parentCommentId: root.commentId,
-        nextTime: -1,
-        pageNo: 1,
-        pagesProcessed: 0,
-        repliesProcessed: 0,
-        declaredReplies: root.replyCount,
-        done: false,
-      };
-      options.threads.push(thread);
+      discoverCommentFloorThreads([root], options.threads);
+      thread = options.threads.find((candidate) => candidate.parentCommentId === root.commentId);
+      if (!thread) continue;
     }
     thread.declaredReplies ??= root.replyCount;
     if (thread.done) continue;

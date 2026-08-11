@@ -120,9 +120,14 @@ export class ProxyTransportGate {
   }
 
   async run<T>(request: () => Promise<T>): Promise<T> {
+    return this.runScheduled(async () => {}, request);
+  }
+
+  /** Reserves the task-wide slot, then the lane clock at the actual start boundary. */
+  async runScheduled<T>(beforeStart: () => Promise<void>, request: () => Promise<T>): Promise<T> {
     await this.acquire();
     try {
-      await this.reserveStart();
+      await this.reserveStart(beforeStart);
       this.throwIfCancelled();
       const value = await request();
       this.recordSuccess();
@@ -150,7 +155,7 @@ export class ProxyTransportGate {
     this.drainCapacity();
   }
 
-  private async reserveStart(): Promise<void> {
+  private async reserveStart(beforeStart: () => Promise<void>): Promise<void> {
     let release = (): void => {};
     const previous = this.startTail;
     this.startTail = new Promise<void>((resolve) => {
@@ -169,6 +174,8 @@ export class ProxyTransportGate {
         const waitMs = this.lastStartedAt + this.currentMinStartDelayMs + jitterMs - this.runtime.now();
         if (waitMs > 0) await this.cancellableSleep(waitMs);
       }
+      this.throwIfCancelled();
+      await beforeStart();
       this.throwIfCancelled();
       this.lastStartedAt = this.runtime.now();
     } finally {
@@ -256,9 +263,10 @@ export function executeProxyRequest<T>(
   label: string,
   request: () => Promise<T>,
 ): Promise<T> {
-  return lane.governor.execute(label, () =>
-    lane.transportGate ? lane.transportGate.run(request) : request()
-  );
+  return lane.transportGate
+    ? lane.governor.executeScheduled(label, (beforeStart, actualRequest) =>
+      lane.transportGate!.runScheduled(beforeStart, actualRequest), request)
+    : lane.governor.execute(label, request);
 }
 
 export function executeBestEffortProxyRequest<T>(
@@ -266,7 +274,8 @@ export function executeBestEffortProxyRequest<T>(
   label: string,
   request: () => Promise<T>,
 ): Promise<T> {
-  return lane.governor.executeBestEffort(label, () =>
-    lane.transportGate ? lane.transportGate.run(request) : request()
-  );
+  return lane.transportGate
+    ? lane.governor.executeBestEffortScheduled(label, (beforeStart, actualRequest) =>
+      lane.transportGate!.runScheduled(beforeStart, actualRequest), request)
+    : lane.governor.executeBestEffort(label, request);
 }

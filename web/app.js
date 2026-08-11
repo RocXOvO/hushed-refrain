@@ -480,6 +480,7 @@ async function startParallel() {
   try {
     const value = payload(el.parallelForm);
     value.fresh = $("#parallelFresh").checked;
+    value.includeCommentFloors = el.parallelForm.elements.includeCommentFloors.checked;
     value.maxProxyLanes = Number(el.exitLimit.value);
     value.hostConcurrency = Number(el.hostConcurrency.value);
     const job = await api("/api/parallel/job", { method: "POST", body: JSON.stringify(value) });
@@ -515,6 +516,7 @@ async function startSource(dryRun) {
     const value = payload(el.sourceForm);
     value.maxCommentPagesPerSong = value.maxPages; delete value.maxPages;
     value.fresh = $("#fresh").checked; value.dryRun = dryRun;
+    value.includeCommentFloors = el.sourceForm.elements.includeCommentFloors.checked;
     value.allowDirect = el.sourceForm.elements.allowDirect.checked;
     value.maxProxyLanes = Number(el.exitLimit.value);
     value.hostConcurrency = Number(el.hostConcurrency.value);
@@ -1488,7 +1490,8 @@ function createActiveSongRow() {
 
 function updateActiveSongRow(entry, song) {
   entry.song = song;
-  const hasUnreadDeclaredComments = song.done && song.totalComments !== undefined
+  const rootOnly = song.commentScope === "root-only-v1";
+  const hasUnreadDeclaredComments = !rootOnly && song.done && song.totalComments !== undefined
     && song.commentsProcessed !== undefined && song.commentsProcessed < song.totalComments;
   entry.badge.textContent = song.truncated ? "达到页数上限" : hasUnreadDeclaredComments
     ? "已完成可读范围" : song.done ? "已完成" : song.workers > 0 ? "扫描中" : "等待调度";
@@ -1502,11 +1505,12 @@ function updateActiveSongRow(entry, song) {
 }
 
 function renderSongReadProgress(song, entry) {
+  const rootOnly = song.commentScope === "root-only-v1";
   const comments = Math.max(0, song.commentsProcessed ?? 0);
   const total = song.totalComments !== undefined && song.totalComments >= 0
     ? Math.max(comments, song.totalComments)
     : undefined;
-  const measuredPercent = total !== undefined && total > 0 ? comments / total * 100 : undefined;
+  const measuredPercent = !rootOnly && total !== undefined && total > 0 ? comments / total * 100 : undefined;
   const rawPercent = measuredPercent ?? song.progressPercent ?? (song.done && !song.truncated ? 100 : 0);
   const percent = Math.max(0, Math.min(song.truncated || !song.done ? 99.99 : 100, rawPercent));
   const activeRequest = song.workers > 0
@@ -1520,7 +1524,9 @@ function renderSongReadProgress(song, entry) {
   const countText = total === undefined
     ? `${fmt(comments)} 条评论`
     : `${fmt(comments)} / ${fmt(total)} 条评论`;
-  const label = song.truncated
+  const label = rootOnly
+    ? `顶层已搜索 ${fmt(comments)} 条${total === undefined ? "" : ` · 上游总数 ${fmt(total)}（含回复，不作为顶层完成依据）`}${song.done ? " · 顶层已完成" : ""}${completedPages}${activeRequest}`
+    : song.truncated
     ? `已搜索 ${countText}${completedPages} · 达到每首最大页数，未覆盖全部评论`
     : total !== undefined
     ? `已搜索 ${countText}${song.done ? (comments < total ? " · 已完成当前可读取范围" : " · 已完成") : ""}${completedPages}${activeRequest}`
@@ -2715,9 +2721,9 @@ async function restoreResumeTask() {
     if (!descriptorView) return false;
     const form = descriptorView.form;
     const allowed = descriptor.mode === "parallel"
-      ? new Set(["uid", "songId", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxProxyLanes", "hostConcurrency"])
+      ? new Set(["uid", "songId", "includeCommentFloors", "workersPerProxy", "shards", "pageSize", "requestBudget", "maxPages", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxProxyLanes", "hostConcurrency"])
       : descriptor.mode === "source"
-      ? new Set(["uid", "source", "recordScope", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"])
+      ? new Set(["uid", "source", "recordScope", "includeCommentFloors", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "workersPerProxy", "allowDirect", "maxProxyLanes", "hostConcurrency"])
       : descriptor.mode === "song"
       ? new Set(["target", "songId", "pageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "allowDirect", "maxProxyLanes", "hostConcurrency"])
       : new Set(["target", "pageSize", "likedPageSize", "requestBudget", "minDelayMs", "jitterMs", "forbiddenCooldownMs", "maxCommentPagesPerSong", "maxSongs", "allowDirect", "maxProxyLanes", "hostConcurrency"]);

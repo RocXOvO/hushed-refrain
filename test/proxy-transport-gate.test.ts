@@ -116,9 +116,9 @@ test("cancellation wakes work waiting for aggregate start spacing", async () => 
 test("governor retries reacquire the shared transport gate", async () => {
   class CountingGate extends ProxyTransportGate {
     entries = 0;
-    override async run<T>(request: () => Promise<T>): Promise<T> {
+    override async runScheduled<T>(beforeStart: () => Promise<void>, request: () => Promise<T>): Promise<T> {
       this.entries += 1;
-      return super.run(request);
+      return super.runScheduled(beforeStart, request);
     }
   }
   const gate = new CountingGate({ maxConcurrent: 1, minStartDelayMs: 0 });
@@ -143,6 +143,36 @@ test("governor retries reacquire the shared transport gate", async () => {
   assert.equal(result, "ok");
   assert.equal(attempts, 2);
   assert.equal(gate.entries, 2);
+});
+
+test("records lane and task spacing at the same actual request boundary", async () => {
+  let now = 1_000;
+  const runtime = {
+    now: () => now,
+    random: () => 0,
+    sleep: async (milliseconds: number) => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      now += milliseconds;
+    },
+  };
+  const gate = new ProxyTransportGate({ maxConcurrent: 4, minStartDelayMs: 50 }, runtime);
+  const governor = new RequestGovernor({
+    requestBudget: 10,
+    minDelayMs: 300,
+    jitterMs: 0,
+    maxRetries: 0,
+    forbiddenCooldownMs: 1_000,
+  }, runtime);
+  const starts: number[] = [];
+  const lane = { governor, transportGate: gate };
+
+  await Promise.all([
+    executeProxyRequest(lane, "one", async () => { starts.push(now); }),
+    executeProxyRequest(lane, "two", async () => { starts.push(now); }),
+  ]);
+
+  assert.equal(starts.length, 2);
+  assert.ok(starts[1] - starts[0] >= 300);
 });
 
 test("automatically reduces aggregate concurrency and start rate after clustered transport failures", async () => {
