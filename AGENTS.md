@@ -4,7 +4,7 @@ This is the compact, durable map for `ncm-comment-finder`. It records current co
 
 ## Current baseline and authorities
 
-- Current release line: `v1.2.0`. A release is valid only when local `main`, `origin/main`, the annotated tag, package/lock, GitHub Release target, exact-SHA Windows workflow, and all five Release assets agree.
+- Current release line: `v1.2.1`. A release is valid only when local `main`, `origin/main`, the annotated tag, package/lock, GitHub Release target, exact-SHA Windows workflow, and all five Release assets agree.
 - Display brand: `乐评寻踪 / MUSIC COMMENT TRACE`; `productName=乐评寻踪`.
 - Stable technical identity: package `ncm-comment-finder`, appId `cn.local.ncm.commentfinder`, repository `RocXOvO/ncm-comment-finder`, artifact stem `NCM-Comment-Finder`, Electron data directory `appData/ncm-comment-finder`. Do not change these as part of a visual rename.
 - Current web cache-busters are `styles.css?v=67`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=6`, and `app.js?v=80`; keep them synchronized with `web/index.html`.
@@ -146,7 +146,7 @@ git diff --check
 
 - Before handoff, run at least check, test, build, and diff-check; add the focused tests for changed behavior. Desktop/preload/updater/build changes also require the relevant desktop smoke/package path. Tests currently lack a strict `check:test` TypeScript gate; do not treat transpile-only execution as type coverage.
 - Routine tests use stubs and loopback services. Real NetEase/QQ/proxy traffic must be explicit, bounded, and never a default gate.
-- The published `v1.2.0` delivery baseline is 589/589 tests with zero failures/cancellations, plus check, build, QQ benchmark, three renderer syntax checks, macOS desktop smoke, and diff-check. Its exact-SHA Windows workflow/package gate passed and all five Release assets were published. The current post-release candidate is 592/592 with the same local gates green; it adds the responsive/root-only presentation work and privacy-restricted source notices described above, but is not a new publication.
+- The `v1.2.1` delivery baseline is 592/592 tests with zero failures/cancellations, plus check, build, QQ benchmark, three renderer syntax checks, macOS desktop smoke, and diff-check. Release validity still requires the exact-SHA Windows workflow/package gate and all five GitHub Release assets.
 - Windows packaging is a manual `workflow_dispatch`: it checks/tests, builds unpacked and NSIS forms, runs packaged startup/PDF smoke, and uploads a seven-day Actions artifact. It does not publish a GitHub Release.
 - Release from one exact final commit/version. Verify tag, `origin/main`, workflow `headSha`, manifests, and assets all agree. Validate `latest.yml` version/path/size/SHA-512 against the installer; build both macOS architectures from the same commit.
 - Publish only exact current-version files from a clean staging set. Local `release/` is non-authoritative and may contain historical files.

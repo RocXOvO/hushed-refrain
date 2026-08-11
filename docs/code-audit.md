@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。已发布 `v1.2.0` 的基线为 589/589；当前未发布候选已复验 `npm run check`、`npm test`（592/592，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖用户来源/单曲并行的楼中楼范围切换与提示，console warning/error 为零。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。`v1.2.1` 已复验 `npm run check`、`npm test`（592/592，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖用户来源/单曲并行的楼中楼范围切换与提示，console warning/error 为零。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
 
 ## 未修复的 P1
 

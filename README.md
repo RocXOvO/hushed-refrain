@@ -148,7 +148,7 @@ npm run desktop:smoke:mac
 git diff --check
 ```
 
-已发布 `v1.2.0` 的交付基线为 589/589 项测试（0 fail / 0 cancelled）。当前未发布候选为 592/592，并通过类型检查、构建、QQ benchmark、三个 renderer 语法检查、macOS 桌面冒烟和 diff-check；真实浏览器验收覆盖楼中楼范围切换、提示与独立结果边界，console warning/error 为零。Windows 安装器由 GitHub Actions 在与 Release 相同的精确提交上执行完整测试、打包应用启动/PDF 冒烟与 NSIS 资产验证；自动化测试默认使用内存桩和回环代理，不会向音乐平台发起真实批量扫描。
+`v1.2.1` 的交付基线为 592/592 项测试（0 fail / 0 cancelled），并通过类型检查、构建、QQ benchmark、三个 renderer 语法检查、macOS 桌面冒烟和 diff-check；真实浏览器验收覆盖楼中楼范围切换、提示与独立结果边界，console warning/error 为零。Windows 安装器由 GitHub Actions 在与 Release 相同的精确提交上执行完整测试、打包应用启动/PDF 冒烟与 NSIS 资产验证；自动化测试默认使用内存桩和回环代理，不会向音乐平台发起真实批量扫描。
 
 ## License
 
