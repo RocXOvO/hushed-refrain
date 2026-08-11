@@ -537,7 +537,7 @@ body[data-platform="qq"] .sidebar {
 .inspector-body { opacity: 1; transform: translateX(0); visibility: visible; transition: transform 210ms cubic-bezier(.2,.8,.2,1), opacity 150ms ease, visibility 0s; }
 .inspector-body { min-width: 0; }
 .inspector .panel-toggle img { transition: transform 210ms cubic-bezier(.2,.8,.2,1); }
-.main-pane { min-width: 0; max-width: 100%; grid-column: 1; padding: 18px 21px 32px; position: relative; isolation: isolate; overflow: hidden; container-type: inline-size; transition: padding 210ms cubic-bezier(.2,.8,.2,1); }
+.main-pane { min-width: 0; min-height: calc(100vh - 58px); max-width: 100%; grid-column: 1; padding: 18px 21px 32px; position: relative; isolation: isolate; overflow: hidden; display: flex; flex-direction: column; container-type: inline-size; transition: padding 210ms cubic-bezier(.2,.8,.2,1); }
 .pointer-silk-trail-canvas { width: 100%; height: 100%; position: absolute; z-index: 12; inset: 0; display: block; contain: strict; pointer-events: none; }
 body.platform-switching .pointer-silk-trail-canvas { visibility: hidden; }
 
@@ -965,7 +965,20 @@ body[data-platform="qq"] .metric.accent { background: #edf8f2; }
 .tab.active img { opacity: 1; }
 body[data-platform="qq"] .tabs { background: #eef2ef; border-color: #d9e1dc; }
 body[data-platform="qq"] .tab.active { color: #116f4b; background: #edf8f2; border-color: #c7e2d2; box-shadow: none; }
-.tab-panel { padding-top: 9px; }
+.tab-panel { min-height: 0; padding-top: 9px; }
+#resultsPanel,
+#activityPanel,
+#logsPanel,
+#poolPanel { min-height: 280px; flex: 1 1 auto; flex-direction: column; }
+#resultsPanel:not([hidden]),
+#activityPanel:not([hidden]),
+#logsPanel:not([hidden]),
+#poolPanel:not([hidden]) { display: flex; }
+#resultsPanel > .table-wrap,
+#activityPanel > .table-wrap,
+#logsPanel > .table-wrap,
+#poolPanel > .table-wrap { min-height: 220px; max-height: none; flex: 1 1 auto; }
+.table-wrap:has(tbody > .empty-row:only-child) table { height: 100%; }
 .results-toolbar { min-height: 44px; margin-bottom: 8px; padding: 7px 9px 7px 11px; display: flex; align-items: center; justify-content: space-between; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); }
 .results-toolbar > div { min-width: 0; display: grid; gap: 2px; }
 .results-toolbar strong { color: var(--ink-soft); font-size: .73rem; }

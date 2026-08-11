@@ -814,7 +814,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /app-icon\.png\?v=2/);
-  assert.match(pageText, /styles\.css\?v=70/);
+  assert.match(pageText, /styles\.css\?v=71/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
   assert.match(pageText, /app\.js\?v=81/);
@@ -1154,6 +1154,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(styleText, /\.activity-table th:nth-child\(4\)\s*\{[^}]*width:\s*340px/s);
   assert.match(styleText, /\.song-read-progress\s*\{[^}]*min-width:\s*300px/s);
   assert.match(styleText, /\.song-read-progress\s*>\s*span:first-child\s*\{[^}]*white-space:\s*normal/s);
+  assert.match(styleText, /\.main-pane\s*\{[^}]*min-height:\s*calc\(100vh - 58px\)[^}]*display:\s*flex[^}]*flex-direction:\s*column/s);
+  assert.match(styleText, /#resultsPanel:not\(\[hidden\]\)[\s\S]*#poolPanel:not\(\[hidden\]\)\s*\{[^}]*display:\s*flex/s);
+  assert.match(styleText, /#resultsPanel\s*>\s*\.table-wrap[\s\S]*#poolPanel\s*>\s*\.table-wrap\s*\{[^}]*min-height:\s*220px[^}]*max-height:\s*none[^}]*flex:\s*1 1 auto/s);
+  assert.match(styleText, /\.table-wrap:has\(tbody\s*>\s*\.empty-row:only-child\) table\s*\{[^}]*height:\s*100%/s);
   assert.match(styleText, /\.status-capsule-stack\s*\{[^}]*position:\s*fixed[^}]*right:\s*328px[^}]*bottom:\s*18px[^}]*flex-direction:\s*column/s);
   assert.match(styleText, /body\.inspector-collapsed \.status-capsule-stack\s*\{[^}]*right:\s*84px/s);
   assert.match(styleText, /@media \(max-width:\s*1280px\)[\s\S]*\.status-capsule-stack\s*\{[^}]*right:\s*338px[\s\S]*body\.inspector-collapsed \.status-capsule-stack\s*\{[^}]*right:\s*108px/s);
