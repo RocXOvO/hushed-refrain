@@ -713,6 +713,27 @@ test("retained catalog refresh failures render as a continuation notice instead 
   assert.deepEqual(Array.from(notices), ["听歌目录本轮暂时无法刷新，已继续使用检查点中的 489 首歌曲"]);
 });
 
+test("private ranking and likes failures render as friendly source notices", () => {
+  const context: Record<string, unknown> = {
+    fmt(value: number) { return Number(value).toLocaleString("zh-CN"); },
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("sourceErrorNotices")}
+    globalThis.api = { sourceErrorNotices };
+  `, context);
+  const notices = (context.api as { sourceErrorNotices(job: unknown): string[] }).sourceErrorNotices({
+    sourceNotices: ["喜欢的音乐不可访问：目标用户未公开该歌单，本次已跳过该来源。"],
+    sourceErrors: [
+      "record: All selected listening-rank ranges failed: record-all: user_record_all failed (422): 目标用户未公开全部时间听歌排行",
+    ],
+  });
+  assert.deepEqual(Array.from(notices), [
+    "喜欢的音乐不可访问：目标用户未公开该歌单，本次已跳过该来源。",
+    "听歌排行不可访问：目标用户未公开听歌排行，本次已跳过该来源。",
+  ]);
+});
+
 test("task completion waits for the startup capsule to leave before opening settlement", () => {
   let nextTimer = 0;
   const timers = new Map<number, () => void>();

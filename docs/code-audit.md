@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。`v1.2.0` 的本地交付基线已复验 `npm run check`、`npm test`（589/589，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收确认用户来源/单曲并行的楼中楼开关默认开启、可反复切换且提示正确，console warning/error 为零。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。已发布 `v1.2.0` 的基线为 589/589；当前未发布候选已复验 `npm run check`、`npm test`（592/592，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖用户来源/单曲并行的楼中楼范围切换与提示，console warning/error 为零。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
 
 ## 未修复的 P1
 
@@ -32,7 +32,8 @@
 - 使用代理池或显式代理的正式扫描保持 fail-closed；普通用户/歌曲/身份辅助查询固定走有界本机直连。
 - 原子 JSON 使用唯一临时名、`fsync`、Windows rename 有界退避和完整临时文件恢复；coverage、resume、代理池和 PDF 目标各自已有跨进程锁。
 - NetEase 多来源会按 songId 合并并保留 `memberships`；普通歌单只接受显式匹配目标 UID 的创建者证据。旧 weekly 路径迁移在共享锁内建立并验证 scoped 状态后才删除冲突旧文件，身份冲突时不删除。
-- NetEase `CommentScope` 是 `root-only-v1 | root-and-floor-v1`，两个 GUI 视图默认后者。Root-only 零 floor I/O，使用独立 `-root-only` state/result/coverage 路径；source state/coverage v4、parallel state v2 都校验 scope，resume v4 保存开关且旧 resume 默认 full，跨 scope 不复用完成、覆盖或结果。Canonical result 仍为 target-v3，现有 route/parent 字段足够。
+- NetEase 将未公开听歌排行/喜欢的音乐持久为 `sourceNotices`：跳过对应来源、继续可用来源且不提交完整覆盖，单一私密来源也不产生任务错误；真实传输/数据失败继续保留在 `sourceErrors`。前端还会把旧检查点的隐私 422 文案映射成友好提示。
+- NetEase `CommentScope` 是 `root-only-v1 | root-and-floor-v1`，两个 GUI 视图的新任务默认 root-only，并常驻开启楼中楼会极大降速的警告。Root-only 零 floor I/O，使用独立 `-root-only` state/result/coverage 路径；source state/coverage v4、parallel state v2 都校验 scope，resume v4 保存开关且旧 resume 默认 full，跨 scope 不复用完成、覆盖或结果。Canonical result 仍为 target-v3，现有 route/parent 字段足够。
 - `comment_new` 只交付顶层行，但组合 total 含回复。Full scope 的 `comment_floor` 每页 40，从 `time=-1` 开始严格递增，只有 `hasMore=false` 完成。每个 `(song,parent)` 是一页一个的持久工作：同 parent 单飞，不同 parent/歌曲可多 Lane 并行，成功续页可转 Lane，失败接管不重复扣预算。Full scope 只有 root 时间覆盖与全部 floor 完成才提交歌曲/coverage；root-only 仅依 root。
 - NetEase 结果 writer 使用长生命周期 `0600` append handle、完整 write loop 与 `sync`；损坏尾片段保留原文并持久补换行，错误关闭/锁存。一个 floor 页的新命中用一次 `appendBatch` write + fsync 落盘，sync 成功后才发布并推进 cursor/计数/checkpoint。Pooled/parallel 在最多 4 个完成页，或页完成时距上次强刷已达 400 ms 时强刷；终态/停止/错误也强刷。JSONL 先于状态，崩溃最多重放已落盘结果并去重；`close()` 排空已接受 append，所有退出都等待关闭。
 - NetEase 请求预算已统一为逻辑 history/root/floor 页。Pooled source 与 parallel 的同一 root 页跨 Lane failover 复用预算与顶层 cap 保留，floor 失败接管也复用该页保留；串行 Scanner 也按逻辑页扣减，目录、水合与物理 retry 不重复计数。
@@ -44,7 +45,7 @@
 
 ## 当前最低回归矩阵
 
-- NetEase scope/耐久性：默认开关、root-only 零 floor I/O、路径/兼容键/恢复/结果跨 scope 隔离；多 parent 多 Lane 并行与同 parent 单飞；批量写入、4 页/400 ms checkpoint、损坏尾行、write/sync 失败、慢写与 timer 竞争，source/parallel root/floor cursor 精确恢复和 result-before-state 顺序。
+- NetEase scope/耐久性：两视图默认关闭并显示极大降速警告、恢复回填保存值、root-only 零 floor I/O、路径/兼容键/恢复/结果跨 scope 隔离；多 parent 多 Lane 并行与同 parent 单飞；批量写入、4 页/400 ms checkpoint、损坏尾行、write/sync 失败、慢写与 timer 竞争，source/parallel root/floor cursor 精确恢复和 result-before-state 顺序。
 - 跨进程任务：同任务第二进程拒绝、不同任务允许、取消/崩溃释放、共享 output 所有权和全部用户来源组合协调。
 - QQ 隐私：使用合成 EncryptUin sentinel 覆盖 REST、SSE、平台切换、结算和报告，断言完整值不进入可见 DOM、日志或文件名。
 - HTTP/Electron：loopback、Host、Origin、Content-Type、CSRF 正反例；所有对象型 POST 的非对象 400；外链 scheme/host allowlist；QQ 大响应上限。

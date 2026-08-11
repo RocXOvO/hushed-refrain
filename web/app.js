@@ -1404,11 +1404,22 @@ function sourceCoverageSummary(job) {
 }
 
 function sourceErrorNotices(job) {
-  return (job?.sourceErrors || []).map((error) =>
-    String(error).includes("目录刷新失败，已保留上次完整目录")
+  const notices = (job?.sourceNotices || []).map(String);
+  const errors = (job?.sourceErrors || []).map((error) => {
+    const value = String(error);
+    if (
+      /(?:record|listening-rank|听歌排行)/i.test(value) &&
+      /(?:目标用户未公开|已开启隐私)/.test(value)
+    ) return "听歌排行不可访问：目标用户未公开听歌排行，本次已跳过该来源。";
+    if (
+      /(?:likes|喜欢的音乐|喜欢歌曲)/i.test(value) &&
+      /(?:目标用户未公开|已开启隐私)/.test(value)
+    ) return "喜欢的音乐不可访问：目标用户未公开该歌单，本次已跳过该来源。";
+    return value.includes("目录刷新失败，已保留上次完整目录")
       ? `听歌目录本轮暂时无法刷新，已继续使用检查点中的 ${fmt(job.catalogSongs ?? job.songs)} 首歌曲`
-      : String(error)
-  );
+      : value;
+  });
+  return [...notices, ...errors];
 }
 
 function renderActiveSongs(songs, summary, configuredWorkers = 0) {

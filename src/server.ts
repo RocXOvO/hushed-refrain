@@ -224,6 +224,7 @@ interface JobSnapshot extends PagePerformanceSnapshot {
   proxyTransportStartJitterMs?: number;
   coverageComplete: boolean;
   sourceErrors: string[];
+  sourceNotices: string[];
   blockedUntil?: string;
   proxyEnabled: boolean;
   error?: string;
@@ -755,6 +756,7 @@ class JobManager {
           ...this.snapshotValue,
           ...activity,
           sourceErrors: [...activity.sourceErrors],
+          sourceNotices: [...(activity.sourceNotices ?? [])],
         };
       },
       onSongCatalog: (songs) => {
@@ -890,7 +892,7 @@ class JobManager {
           workers: report.workers ?? this.snapshotValue.workers,
           commentsPerSecond: 0,
           proxyTransportEffectiveConcurrent: this.transportGate?.currentMaxConcurrent,
-          sourceErrors: report.sourceErrors, blockedUntil: report.resumeAfter, note: report.note,
+          sourceErrors: report.sourceErrors, sourceNotices: report.sourceNotices ?? [], blockedUntil: report.resumeAfter, note: report.note,
           currentSong: undefined, activeSongs: [],
         };
         this.activeSongByWorker.clear();
@@ -908,6 +910,7 @@ class JobManager {
           newPendingSongs: report.newPendingSongs,
           coverageComplete: report.coverageComplete,
           sourceErrors: report.sourceErrors,
+          sourceNotices: report.sourceNotices ?? [],
           note: report.note,
         });
       })
@@ -991,6 +994,7 @@ class JobManager {
               total + item.commentOffset + (item.replyCommentsProcessed ?? 0), 0) ?? state.commentOffset,
           replyCommentsInspected: state.replyCommentsInspected ?? 0,
           coverageComplete: state.coverageComplete, sourceErrors: state.sourceErrors,
+          sourceNotices: state.sourceNotices ?? [],
           blockedUntil: state.blockedUntil,
         };
       }
@@ -1007,6 +1011,7 @@ class JobManager {
       ...this.snapshotValue,
       activeSongs: this.snapshotValue.activeSongs.map((song) => ({ ...song })),
       sourceErrors: [...this.snapshotValue.sourceErrors],
+      sourceNotices: [...this.snapshotValue.sourceNotices],
     };
   }
 
@@ -2602,7 +2607,7 @@ function commentProgressPercent(
   const ratio = Math.max(0, commentsProcessed) / Math.max(commentsProcessed, totalComments!) * 100;
   return Math.min(truncated || !done ? 99.99 : 100, ratio);
 }
-function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
+function emptySnapshot(): JobSnapshot { return { status: "idle", songs: 0, songsProcessed: 0, catalogLoaded: false, catalogSongs: 0, reusedSongs: 0, historicalCompletedSongs: 0, newPendingSongs: 0, commentOffset: 0, activeSongs: [], matches: 0, requestsTotal: 0, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, commentsPerSecond: 0, elapsedMs: 0, lanes: 0, workers: 0, coverageComplete: false, sourceErrors: [], sourceNotices: [], proxyEnabled: false, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 function emptyParallelSnapshot(): ParallelJobSnapshot { return { status: "idle", activeSongs: [], lanes: 0, workers: 0, shards: 0, shardsComplete: 0, coveragePercent: 0, coverageComplete: false, pagesProcessed: 0, floorPagesProcessed: 0, commentsInspected: 0, replyCommentsInspected: 0, matches: 0, requestsTotal: 0, commentsPerSecond: 0, elapsedMs: 0, pageRequestSamples: 0, pageRequestAttempts: 0, successfulPageRequests: 0, failedPageRequests: 0 }; }
 
 export function parallelCoverageLabel(

@@ -35,6 +35,7 @@ export function createState(
     sourceSongCount: 0,
     sourceTruncated: false,
     sourceErrors: [],
+    sourceNotices: [],
     sourceCatalogVersion: SOURCE_CATALOG_VERSION,
     reusedSongs: 0,
     historicalCompletedSongs: 0,
@@ -70,6 +71,7 @@ export async function loadState(path: string): Promise<ScanState | undefined> {
     parsed.strategyResolved ??= true;
     parsed.sourcesLoaded ??= parsed.songs.length > 0 || parsed.sourceSongCount > 0 || parsed.finished;
     parsed.sourceErrors ??= [];
+    parsed.sourceNotices ??= [];
     parsed.reusedSongs ??= 0;
     parsed.historicalCompletedSongs ??= 0;
     parsed.newPendingSongs ??= 0;

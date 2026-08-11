@@ -275,6 +275,7 @@ export interface ScanCheckpointActivity {
   replyCommentsInspected: number;
   coverageComplete: boolean;
   sourceErrors: string[];
+  sourceNotices?: string[];
   blockedUntil?: string;
 }
 
@@ -349,6 +350,7 @@ export interface ScanState {
   sourceSongCount: number;
   sourceTruncated: boolean;
   sourceErrors: string[];
+  sourceNotices?: string[];
   sourceCatalogVersion?: number;
   reusedSongs?: number;
   historicalCompletedSongs?: number;
@@ -470,6 +472,7 @@ export interface RunReport {
   commentsInspected: number;
   coverageComplete: boolean;
   sourceErrors: string[];
+  sourceNotices?: string[];
   statePath: string;
   outputPath: string;
   resumeAfter?: string;

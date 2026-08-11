@@ -1111,7 +1111,59 @@ test("treats a private or absent weekly ranking as optional when all-time rankin
   assert.equal(report.status, "dry-run");
   assert.equal(report.songs, 1);
   assert.deepEqual(report.sourceErrors, []);
+  assert.deepEqual(report.sourceNotices, [
+    "听歌排行不可访问：目标用户未公开最近一周听歌排行，本次已跳过该来源。",
+  ]);
+  assert.equal(report.coverageComplete, false);
   assert.deepEqual(state.songs[0].sources, ["record"]);
+});
+
+test("a private listening rank is skipped with a notice instead of failing the task", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-private-record-"));
+  const client = new FakeClient();
+  client.getUserRecord = async () => {
+    throw new SourcePrivacyRestricted("目标用户未公开全部时间听歌排行");
+  };
+  const config = await options(directory);
+  config.source = "record";
+  config.dryRun = true;
+
+  const report = await runCommentFinder(client, governor(10), config);
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(report.songs, 0);
+  assert.deepEqual(report.sourceErrors, []);
+  assert.deepEqual(report.sourceNotices, [
+    "听歌排行不可访问：目标用户未公开全部时间听歌排行，本次已跳过该来源。",
+  ]);
+  assert.equal(report.coverageComplete, false);
+});
+
+test("pooled combined sources keep public songs and turn private likes into a notice", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-private-likes-"));
+  const client = new FakeClient();
+  let likedCalls = 0;
+  client.getLikedSongs = async () => {
+    likedCalls += 1;
+    throw new SourcePrivacyRestricted("目标用户未公开喜欢的音乐");
+  };
+  const config = await options(directory);
+  config.source = "both";
+  config.dryRun = true;
+
+  const report = await runPooledCommentFinder([
+    { name: "lane-a", client, governor: governor(20) },
+    { name: "lane-b", client, governor: governor(20) },
+  ], { ...config, workersPerLane: 1, requestBudget: 0 });
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(report.songs, 2);
+  assert.deepEqual(report.sourceErrors, []);
+  assert.deepEqual(report.sourceNotices, [
+    "喜欢的音乐不可访问：目标用户未公开该歌单，本次已跳过该来源。",
+  ]);
+  assert.equal(likedCalls, 1);
+  assert.equal(report.coverageComplete, false);
 });
 
 test("a fresh source checkpoint counts a rediscovered JSONL match without appending it again", async () => {

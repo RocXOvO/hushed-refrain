@@ -85,6 +85,8 @@ interface SourceScanWork {
 interface CollectedSongCatalog {
   songs: SongCandidate[];
   failures: string[];
+  notices: string[];
+  available: boolean;
 }
 
 export async function runCommentFinder(
@@ -858,7 +860,7 @@ export async function runPooledCommentFinder(
     }
     syncSongCursor(state);
     state.finished = state.songProgress!.every((progress) => progress.done);
-    state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0;
+    state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0 && (state.sourceNotices?.length ?? 0) === 0;
     if (!state.finished && blockedLanes.size === lanes.length) {
       const retryAfterMs = Math.max(...blockedLanes.values());
       if (Number.isFinite(retryAfterMs)) state.blockedUntil = new Date(Date.now() + retryAfterMs).toISOString();
@@ -1254,7 +1256,8 @@ async function runSongScan(
   state.coverageComplete =
     !state.sourceTruncated &&
     state.truncatedSongIds.length === 0 &&
-    state.sourceErrors.length === 0;
+    state.sourceErrors.length === 0 &&
+    (state.sourceNotices?.length ?? 0) === 0;
   await checkpoint();
   return report(state, governor, options, initialRequests, "complete");
 }
@@ -1377,6 +1380,7 @@ async function reconcileSongCatalog(
     ? state.sourceTruncated || sourceTruncated
     : sourceTruncated;
   state.sourceErrors = collected.failures;
+  state.sourceNotices = collected.notices;
   state.sourceCatalogVersion = SOURCE_CATALOG_VERSION;
   state.sourcesLoaded = true;
   state.reusedSongs = reusedSongs;
@@ -1384,7 +1388,7 @@ async function reconcileSongCatalog(
   state.newPendingSongs = newPendingSongs;
   state.truncatedSongIds = state.truncatedSongIds.filter((songId) => !reusedIds.has(songId));
   state.finished = reconciledProgress.every((progress) => progress.done);
-  state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0;
+  state.coverageComplete = state.finished && !state.sourceTruncated && state.truncatedSongIds.length === 0 && state.sourceErrors.length === 0 && (state.sourceNotices?.length ?? 0) === 0;
   syncSongCursor(state);
 }
 
@@ -1395,6 +1399,7 @@ function retainCatalogAfterRefreshFailure(
 ): void {
   ensureSongProgress(state);
   state.sourceErrors = [`${options.source}: 目录刷新失败，已保留上次完整目录（${errorMessage(error)}）`];
+  state.sourceNotices = [];
   state.reusedSongs = 0;
   state.historicalCompletedSongs = completedSongs(state);
   state.newPendingSongs = 0;
@@ -1453,7 +1458,7 @@ function cloneSongCandidate(song: SongCandidate): SongCandidate {
 }
 
 async function persistEligibleCompletedCoverage(options: ScanOptions, state: ScanState): Promise<void> {
-  if (!options.coveragePath || state.sourceErrors.length > 0 || state.sourceTruncated) return;
+  if (!options.coveragePath || state.sourceErrors.length > 0 || (state.sourceNotices?.length ?? 0) > 0 || state.sourceTruncated) return;
   const truncated = new Set(state.truncatedSongIds);
   const songIds = state.songs.flatMap((song, index) =>
     state.songProgress?.[index]?.done &&
@@ -1470,7 +1475,7 @@ async function persistSongCoverageIfEligible(
   state: ScanState,
   songIndex: number,
 ): Promise<void> {
-  if (!options.coveragePath || state.sourceErrors.length > 0 || state.sourceTruncated) return;
+  if (!options.coveragePath || state.sourceErrors.length > 0 || (state.sourceNotices?.length ?? 0) > 0 || state.sourceTruncated) return;
   const song = state.songs[songIndex];
   const progress = state.songProgress?.[songIndex];
   if (!song || state.truncatedSongIds.includes(song.id) || !progress?.done ||
@@ -1485,6 +1490,8 @@ async function collectSongs(
 ): Promise<CollectedSongCatalog> {
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
+  const notices: string[] = [];
+  let availableSources = 0;
   if (options.source === "record" || options.source === "both" || options.source === "all") {
     try {
       const record = await collectRecordSongs(options, (label, scope) =>
@@ -1492,9 +1499,13 @@ async function collectSongs(
       );
       batches.push(record.songs);
       failures.push(...record.failures);
+      notices.push(...record.notices);
+      if (record.available) availableSources += 1;
     } catch (error) {
-      if (options.source === "record" || isPauseSignal(error)) throw error;
-      failures.push(`record: ${errorMessage(error)}`);
+      if (isPauseSignal(error)) throw error;
+      if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("record"));
+      else if (options.source === "record") throw error;
+      else failures.push(`record: ${errorMessage(error)}`);
     }
   }
   if (options.source === "likes" || options.source === "both" || options.source === "all") {
@@ -1502,9 +1513,12 @@ async function collectSongs(
       batches.push(await collectTargetLikedSongs(client, options, (label, request) =>
         governor.execute(label, request)
       ));
+      availableSources += 1;
     } catch (error) {
-      if (options.source === "likes" || isPauseSignal(error)) throw error;
-      failures.push(`likes: ${errorMessage(error)}`);
+      if (isPauseSignal(error)) throw error;
+      if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("likes"));
+      else if (options.source === "likes") throw error;
+      else failures.push(`likes: ${errorMessage(error)}`);
     }
   }
   if (options.source === "playlists" || options.source === "all") {
@@ -1514,15 +1528,17 @@ async function collectSongs(
       );
       batches.push(playlists.songs);
       failures.push(...playlists.failures);
+      notices.push(...playlists.notices);
+      if (playlists.available) availableSources += 1;
     } catch (error) {
       if (options.source === "playlists" || isPauseSignal(error)) throw error;
       failures.push(`playlists: ${errorMessage(error)}`);
     }
   }
-  if (batches.length === 0) {
+  if (availableSources === 0 && failures.length > 0) {
     throw new Error(`All selected song sources failed: ${failures.join("; ")}`);
   }
-  return { songs: mergeSongs(batches.flat()), failures };
+  return { songs: mergeSongs(batches.flat()), failures, notices, available: availableSources > 0 };
 }
 
 async function collectSongsPooled(
@@ -1531,6 +1547,8 @@ async function collectSongsPooled(
 ): Promise<CollectedSongCatalog> {
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
+  const notices: string[] = [];
+  let availableSources = 0;
   if (options.source === "record" || options.source === "both" || options.source === "all") {
     try {
       const record = await collectRecordSongs(options, (label, scope) =>
@@ -1538,17 +1556,24 @@ async function collectSongsPooled(
       );
       batches.push(record.songs);
       failures.push(...record.failures);
+      notices.push(...record.notices);
+      if (record.available) availableSources += 1;
     } catch (error) {
-      if (options.source === "record" || isPauseSignal(error)) throw error;
-      failures.push(`record: ${errorMessage(error)}`);
+      if (isPauseSignal(error)) throw error;
+      if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("record"));
+      else if (options.source === "record") throw error;
+      else failures.push(`record: ${errorMessage(error)}`);
     }
   }
   if (options.source === "likes" || options.source === "both" || options.source === "all") {
     try {
       batches.push(await collectTargetLikedSongsPooled(lanes, options));
+      availableSources += 1;
     } catch (error) {
-      if (options.source === "likes" || isPauseSignal(error)) throw error;
-      failures.push(`likes: ${errorMessage(error)}`);
+      if (isPauseSignal(error)) throw error;
+      if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("likes"));
+      else if (options.source === "likes") throw error;
+      else failures.push(`likes: ${errorMessage(error)}`);
     }
   }
   if (options.source === "playlists" || options.source === "all") {
@@ -1556,13 +1581,17 @@ async function collectSongsPooled(
       const playlists = await collectTargetUserPlaylistSongsPooled(lanes, options);
       batches.push(playlists.songs);
       failures.push(...playlists.failures);
+      notices.push(...playlists.notices);
+      if (playlists.available) availableSources += 1;
     } catch (error) {
       if (options.source === "playlists" || isPauseSignal(error)) throw error;
       failures.push(`playlists: ${errorMessage(error)}`);
     }
   }
-  if (batches.length === 0) throw new Error(`All selected song sources failed: ${failures.join("; ")}`);
-  return { songs: mergeSongs(batches.flat()), failures };
+  if (availableSources === 0 && failures.length > 0) {
+    throw new Error(`All selected song sources failed: ${failures.join("; ")}`);
+  }
+  return { songs: mergeSongs(batches.flat()), failures, notices, available: availableSources > 0 };
 }
 
 async function collectRecordSongs(
@@ -1572,19 +1601,23 @@ async function collectRecordSongs(
   const scopes = options.recordScope === "both" ? ["all", "week"] as const : [options.recordScope];
   const batches: SongCandidate[][] = [];
   const failures: string[] = [];
+  const notices: string[] = [];
   for (const scope of scopes) {
     try {
       batches.push(await execute(`user_record_${scope}`, scope));
     } catch (error) {
       if (isPauseSignal(error)) throw error;
-      if (scope === "week" && options.recordScope === "both" && batches.length > 0 && isSourcePrivacyRestricted(error)) {
+      if (isSourcePrivacyRestricted(error)) {
+        notices.push(sourcePrivacyNotice("record", scope));
         continue;
       }
       failures.push(`record-${scope}: ${errorMessage(error)}`);
     }
   }
-  if (batches.length === 0) throw new Error(`All selected listening-rank ranges failed: ${failures.join("; ")}`);
-  return { songs: mergeSongs(batches.flat()), failures };
+  if (batches.length === 0 && failures.length > 0) {
+    throw new Error(`All selected listening-rank ranges failed: ${failures.join("; ")}`);
+  }
+  return { songs: mergeSongs(batches.flat()), failures, notices, available: batches.length > 0 };
 }
 
 async function requestFromPool<T>(
@@ -1603,7 +1636,8 @@ async function requestFromPool<T>(
       if (
         error instanceof AuthenticationRequired ||
         error instanceof RequestBudgetExhausted ||
-        error instanceof RunCancelled
+        error instanceof RunCancelled ||
+        isSourcePrivacyRestricted(error)
       ) throw error;
       lastError = error;
     }
@@ -1732,7 +1766,7 @@ async function collectTargetUserPlaylistSongsWithExecutor(
     throw new Error(`All target user playlist details failed: ${failures.join("; ")}`);
   }
   const songs = mergeSongs(successfulBatches.flat()).map((song, index) => ({ ...song, sourceRank: index + 1 }));
-  return { songs, failures };
+  return { songs, failures, notices: [], available: true };
 }
 
 async function requestBestEffortFromPool<T>(
@@ -1894,6 +1928,7 @@ function report(
     commentsInspected: inspectedComments(state),
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
+    sourceNotices: state.sourceNotices ?? [],
     statePath: options.statePath,
     outputPath: options.outputPath,
     ...extra,
@@ -1931,6 +1966,7 @@ function pooledReport(
     commentsInspected: inspectedComments(state),
     coverageComplete: state.coverageComplete,
     sourceErrors: state.sourceErrors,
+    sourceNotices: state.sourceNotices ?? [],
     statePath: options.statePath,
     outputPath: options.outputPath,
     ...extra,
@@ -2226,6 +2262,14 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : JSON.stringify(error);
 }
 
+function sourcePrivacyNotice(source: "record" | "likes", scope?: "all" | "week"): string {
+  if (source === "likes") {
+    return "喜欢的音乐不可访问：目标用户未公开该歌单，本次已跳过该来源。";
+  }
+  const range = scope === "week" ? "最近一周" : scope === "all" ? "全部时间" : "";
+  return `听歌排行不可访问：目标用户未公开${range}听歌排行，本次已跳过该来源。`;
+}
+
 function publishSongProgress(
   options: ScanOptions,
   song: SongCandidate,
@@ -2279,6 +2323,7 @@ function publishCheckpointProgress(options: ScanOptions, state: ScanState): void
       commentsInspected: inspectedComments(state),
       coverageComplete: state.coverageComplete,
       sourceErrors: [...state.sourceErrors],
+      sourceNotices: [...(state.sourceNotices ?? [])],
       blockedUntil: state.blockedUntil,
     });
   } catch {

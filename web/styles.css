@@ -524,7 +524,7 @@ body[data-platform="qq"] .sidebar {
 .inspector-body { opacity: 1; transform: translateX(0); visibility: visible; transition: transform 210ms cubic-bezier(.2,.8,.2,1), opacity 150ms ease, visibility 0s; }
 .inspector-body { min-width: 0; }
 .inspector .panel-toggle img { transition: transform 210ms cubic-bezier(.2,.8,.2,1); }
-.main-pane { min-width: 0; max-width: 100%; grid-column: 1; padding: 18px 21px 32px; position: relative; isolation: isolate; overflow: hidden; container-type: inline-size; }
+.main-pane { min-width: 0; max-width: 100%; grid-column: 1; padding: 18px 21px 32px; position: relative; isolation: isolate; overflow: hidden; container-type: inline-size; transition: padding 210ms cubic-bezier(.2,.8,.2,1); }
 .pointer-silk-trail-canvas { width: 100%; height: 100%; position: absolute; z-index: 12; inset: 0; display: block; contain: strict; pointer-events: none; }
 body.platform-switching .pointer-silk-trail-canvas { visibility: hidden; }
 
@@ -805,6 +805,7 @@ input[type="radio"] { accent-color: var(--accent); }
 .check-row label { display: flex; align-items: center; gap: 5px; }
 .check-option { display: inline-flex; align-items: center; gap: 5px; }
 .continuous-hint { color: var(--muted); font-size: .66rem; line-height: 1.45; }
+.floor-performance-warning { flex: 1 0 100%; padding: 7px 9px; color: var(--warning); background: var(--warning-soft); border: 1px solid color-mix(in srgb, var(--warning) 24%, transparent); border-radius: var(--radius-micro); font-size: .68rem; line-height: 1.45; }
 
 .user-preview { margin-top: -6px; padding: 10px; display: grid; gap: 7px; background: var(--success-soft); border: 1px solid #cce8dc; border-radius: var(--radius-sm); }
 .user-preview > div:first-child { min-width: 0; display: grid; gap: 3px; }
@@ -844,7 +845,7 @@ input[type="radio"] { accent-color: var(--accent); }
 .icon-button:hover:not(:disabled):not([aria-disabled="true"]) { background: var(--surface-raised); border-color: var(--line-strong); box-shadow: 0 4px 12px rgb(20 20 22 / 8%); }
 .compact-button { min-height: 31px; padding: 0 9px; font-size: .7rem; }
 
-.status-badge { min-height: 26px; padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; color: #c5c5c9; border: 1px solid #3f4045; border-radius: var(--radius-pill); font-size: .67rem; }
+.status-badge { min-height: 26px; padding: 0 8px; display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: #c5c5c9; border: 1px solid #3f4045; border-radius: var(--radius-pill); font-size: .67rem; white-space: nowrap; }
 .status-dot { width: 6px; height: 6px; background: #818288; border-radius: 50%; }
 .status-badge.ready .status-dot { background: #35b685; }
 .update-trigger { position: relative; }
@@ -1284,6 +1285,10 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
   .toolbar-context > span { min-width: 80px; padding-inline: 8px; }
 }
 
+@media (min-width: 1281px) {
+  body:not(.task-panel-collapsed) .main-pane { padding-left: 367px; }
+}
+
 @media (max-width: 1280px) {
   .pool-build-notice { right: 108px; }
   .topbar { grid-template-columns: minmax(180px, 1fr) minmax(310px, 440px) auto; gap: 10px; }
@@ -1323,12 +1328,26 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
   .metric:nth-child(6) { min-height: 58px; }
 }
 
-@media (min-width: 821px) and (max-width: 1000px) {
+@media (min-width: 1238px) and (max-width: 1480px) {
+  .topbar { grid-template-columns: minmax(310px, 1fr) minmax(310px, 520px) minmax(310px, 1fr); gap: 10px; }
+  .topbar-end { width: 310px; justify-content: flex-end; }
+  .ui-version-badge { display: none; }
+  [data-desktop-platform="win32"] .topbar { grid-template-columns: minmax(340px, 1fr) minmax(310px, 520px) minmax(340px, 1fr); }
+  [data-desktop-platform="win32"] .topbar-end { width: 340px; }
+  [data-desktop-platform="win32"] .top-actions { gap: 3px; }
+  [data-desktop-platform="win32"] .top-actions .button { width: 34px; padding: 0; }
+  [data-desktop-platform="win32"] .top-actions .button span { display: none; }
+}
+
+@media (min-width: 821px) and (max-width: 1237px) {
   .topbar {
     padding-left: 10px;
-    grid-template-columns: auto minmax(290px, 1fr) auto;
+    grid-template-columns: minmax(71px, 1fr) minmax(290px, 520px) minmax(71px, 1fr);
     gap: 7px;
   }
+  .topbar-end { width: 71px; justify-content: flex-end; }
+  [data-desktop-platform="win32"] .topbar { grid-template-columns: minmax(220px, 1fr) minmax(290px, 520px) minmax(220px, 1fr); }
+  [data-desktop-platform="win32"] .topbar-end { width: 220px; }
   .brand-copy,
   .ui-version-badge,
   .topbar .status-badge,
@@ -1351,6 +1370,7 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
   .platform-portal-tab small { display: none; }
   .platform-glyph { width: 23px; height: 23px; border-radius: 6px; }
   .top-actions .button { width: 34px; padding: 0; }
+  .topbar-end { width: 75px; justify-content: flex-end; }
   .app-shell { min-height: calc(100vh - 56px); display: block; }
   .navigation-rail { min-height: auto; height: 50px; position: sticky; z-index: 80; top: 56px; padding: 6px 8px; flex-direction: row; border-right: 0; border-bottom: 1px solid #343539; }
   .navigation-list { width: 100%; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
