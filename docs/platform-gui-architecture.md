@@ -51,11 +51,12 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 - 热路径仅复用预分配的 `Float32Array`：80 个控制点、4 组速度/偏移和 160 个宽线顶点；每帧一次 `bufferSubData` 上传后执行 4 次 `TRIANGLE_STRIP` draw，材质 opacity 为 0.76，无纹理、FBO、随机数、粒子、模糊、后处理、业务 DOM 读取或每帧对象分配。客户端不引入 Vue/Three.js 运行时，只使用一个低功耗 WebGL2 program/VAO/VBO。最后一次移动后保持 72 ms，再用 348 ms 淡出，到 420 ms 立即清空并将空闲 RAF 降为 0。渲染 DPR 不超过 1.25，颜色缓冲不超过 800,000 像素；Canvas 与 ResizeObserver 只在首次合格移动后分配，上下文/编译/上传/绘制/RAF 异常会锁存失败并完整释放 GPU 表面。
 - 关闭开关、reduced-motion 或粗指针会立即释放表面；任意弹窗打开、平台切换、页面 hidden/blur 则通过可叠加 reason 停止 RAF 并清空采样/画面，可保留已惰性分配的空 Canvas。恢复时不重放旧轨迹，只等新移动。`pagehide` 彻底 `destroy()`；BFCache `pageshow` 重建单例。桌面 `desktop-settings.json` v2 持久化 `closeBehavior` 与默认开启的 `cursorTrailEnabled`，v1 迁移保留关闭行为并补默认值，partial update 不重置未提交字段。无 Electron bridge 的浏览器模式只修改当前会话内存，刷新后默认开启，不写 localStorage/sessionStorage 或调用服务端偏好 API。
 
-### 折叠 Inspector 的代理池提示
+### 右下角状态胶囊栈
 
-- Inspector 收起时，代理池 `starting` 或 `running + refreshing` 在主界面显示一个显式、可点击的全局提示；点击后切到代理池视图并展开 Inspector。Inspector 已展开、池稳定运行或停止时提示必须隐藏。
-- 提示右边界必须避开 Inspector 的折叠 rail/overlay peek：桌面、`1280/821` 浮层断点与 `820/390` 窄屏断点均保留正间距且不得增加横向溢出。资源缓存变化后用真实 CSS 重新加载测量，不能仅依赖静态正则。
-- 提示以 `building | refreshing | hidden` 签名去重，轮询同一状态不得重复写 live-region 文本或重播入场动画；平台切换期间也不播放提示入场。`aria-live`/`aria-atomic` 只属于内部状态文本，不让整个按钮反复播报。
+- 代理池 `starting` / `running + refreshing`、任务启动进度和普通瞬时提示统一属于一个固定在右下角的 `status-capsule-stack`，按出现顺序垂直堆叠，不能再分散到右上角或互相覆盖。代理池胶囊可点击，点击后切到代理池视图并展开 Inspector；Inspector 已展开时其池状态已经可见，冗余的代理池胶囊隐藏。
+- 视觉参考成熟桌面客户端的紧凑状态反馈：实色黑曜表面、14 px 中等圆角、1 px 低对比边框、克制阴影、18 px 状态图标、单行标题与弱化说明；入场只做 8 px 上移与轻微缩放，不再从极小圆点夸张膨胀。普通提示、启动进度和池状态共享相同表面语言，但保留各自的语义图标、细进度与可忽略的“详情”动作。
+- 状态栈右边界必须避开 Inspector：桌面展开态移到 310 px Inspector 左侧，收起态避开 54 px rail；`<=1280px` 展开态避开 310 px overlay，收起态避开 48 px peek；`<=820px` 收起态继续保留正间距，完整 Inspector 展开时隐藏栈以避免覆盖。所有断点不得增加横向溢出。
+- 代理池提示以 `building | refreshing | hidden` 签名去重，轮询同一状态不得重复写 live-region 文本或重播入场动画；平台切换期间也不播放提示入场。`aria-live`/`aria-atomic` 只属于内部状态文本，不让整个按钮反复播报。
 
 ### 并行歌曲活动进度
 
@@ -94,7 +95,7 @@ QQ 视觉层以中性黑灰/白灰为主体，只把 QQ 音乐品牌绿 `#31c27c
 
 - Obsidian Silk Aperture 在 680 ms 先脱离 Canvas 与 busy 标记，下一 compositor RAF 再销毁 GPU 资源并结算 Promise；该交接不得闪回源页面，完成后不留 `requestAnimationFrame`、事件监听器或显存资源。测试同时证明唯一模式、五条确定性褶皱/等高线、244 ms 后全屏 alpha=1、326 ms 唯一提交、每帧单次 fullscreen draw、无 instance/额外 GPU 资源/业务 DOM 动画写入。
 - 鼠标尾迹测试必须证明 Canvas 惰性且只属于 `#mainWorkspace`，输入只有 fine mouse，4×20 链按 point 19→1 倒序传播后才更新 head，递增 spring 与递减 friction 的确定性抗共振配对覆盖参考范围，并保留 32 px head-lag 软限幅。对 100 px 半径、持续 240 帧的圆周输入，必须分别扫描 0.18、0.20、0.215、0.265 rad/frame，并验证四条线的全部 20 个点始终处于 160 px 包络内。world-space 宽度/偏移投影后分别受 22 px/26 px 上限约束，峰值 opacity 为 0.76，每帧只有一次上传和 4 次 40 顶点 `TRIANGLE_STRIP` draw。实现不得引入纹理、FBO、随机数、粒子、模糊、后处理或业务 DOM 捕获；420 ms 空闲、弹窗、平台切换、hidden/blur 后不得留 RAF 或过期轨迹，DPR/像素上限不可回归，关闭、减少动效、粗指针与 pagehide 还必须释放 Canvas/GPU 资源，BFCache 只重建一个实例。设置测试需覆盖 v1→v2迁移、默认 true、partial update、桌面原子持久化与浏览器会话隔离。
-- 代理池提示测试必须覆盖 Inspector 折叠/展开、starting/refreshing/stable 状态、点击展开，以及相同轮询状态不重复写 DOM；真实 CSS reload 后还要在桌面、`1280/821` 与 `820/390` 断点测得提示到右栏为正间距且不增加横向溢出。PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
+- 状态胶囊测试必须覆盖共同 DOM 容器、任务启动/代理池/Toast 同时出现时的垂直堆叠、Inspector 折叠/展开、starting/refreshing/stable、点击展开，以及相同轮询状态不重复写 DOM；真实 CSS reload 后还要在桌面、`1280/821` 与 `820/390` 断点测得栈到右栏为正间距、窄屏展开 Inspector 时不覆盖且文档无横向溢出。PDF 文件名测试必须覆盖双平台完整目标、Windows 禁止/控制字符、尾部点号/空格、设备保留名、180 字符主文件名上限和固定 `.pdf`，PDF smoke 必须覆盖 renderer-to-IPC 链路、累计耗时单调性和完整阶段序列。桌面关闭测试必须覆盖系统关闭与自绘按钮、取消、后台、记住选择、重复/过期决定、renderer 不可用，以及退出期间的最终检查点状态；真实 Electron QA 还要确认没有原生 `showMessageBox`、关闭弹窗与客户端视觉一致。
 - 网易云 scope 测试必须覆盖：两视图默认关闭、常驻极大降速警告、恢复任务回填已保存值且开关可反复切换；root-only 零 floor I/O、组合 total 不作顶层百分比、PDF 标注未读回复；state/coverage/parallel/resume 键与 `-root-only` 路径阻止跨 scope 复用。完整范围还要覆盖 `comment_new` 组合总数但仅顶层行，floor 40 条分页、`time=-1` 起点、严格递增且只信 `hasMore=false`；同 parent 单飞、多 parent/歌曲跨 Lane 并行、成功转 Lane 与失败复用预算；每页一次 `appendBatch` write + fsync 先于 cursor/状态，强刷 single-flight、4 页或页完成时的 400 ms 边界、写中 dirty 页留待下批，终态/停止/错误强刷；root + 全部 floor 共同终态与 PDF 父评论来源。
 - 来源选择测试必须覆盖滑动高亮的几何对齐、听歌排行↔喜欢歌曲快速反向、排行范围的 `aria-hidden`/`inert` 与 reduced-motion 静态收敛；还要覆盖串行/代理池的排行与喜欢隐私、单一/组合来源、覆盖不完整、旧 422 文案映射，以及真实故障仍为错误。响应式真实 QA 在 Windows `win32` 1293×841 CSS px（对应 1940×1261@150% 截图）确认顶栏和文档无溢出、badge 单行、任务面板间隔 21 px；并在 1481/1480/1381/1380/1294/1293/1281/1280/1238/1237/1211/1210/1000/900/821/820/390 px 全部验证无 topbar/document 溢出。网易云↔QQ 在 1381/1293/1280/1238/1237/900 px 的 portal 锚点均为 `dx=0`、`dw=0`，browser 820/390 px 也无横向溢出。
 - 平台快速连续切换最终仅保留最后选择；扫描运行时不允许通过切换绕过停止/互斥逻辑。

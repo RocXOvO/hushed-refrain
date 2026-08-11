@@ -1,6 +1,6 @@
 {
   "name": "hushed-refrain",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "private": true,
   "main": "dist/electron-main.js",
   "description": "Cross-platform music comment tracing for NetEase Cloud Music and QQ Music",
