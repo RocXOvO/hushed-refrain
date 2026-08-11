@@ -776,8 +776,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(page.status, 200);
   assert.match(page.headers.get("content-security-policy") ?? "", /img-src[^;]*\*\.126\.net[^;]*\*\.qlogo\.cn/);
   const pageText = await page.text();
-  assert.match(pageText, /乐评寻踪/);
-  assert.match(pageText, /MUSIC COMMENT TRACE/);
+  assert.match(pageText, /Hushed Refrain/);
+  assert.match(pageText, /THE WORDS LEFT BETWEEN SONGS/);
+  assert.match(pageText, /写不出的喜欢，藏在听过的歌里。/);
+  assert.doesNotMatch(pageText, /乐评寻踪|MUSIC COMMENT TRACE/);
   assert.match(pageText, /NETEASE WORKSPACE/);
   assert.match(pageText, /id="primaryNavigation"/);
   assert.match(pageText, /id="taskSidebar"/);
@@ -810,10 +812,11 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
-  assert.match(pageText, /styles\.css\?v=67/);
+  assert.match(pageText, /app-icon\.png\?v=2/);
+  assert.match(pageText, /styles\.css\?v=68/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=80/);
+  assert.match(pageText, /app\.js\?v=81/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);
@@ -1984,9 +1987,9 @@ test("dashboard exposes the startup update check", async (context) => {
     updateAvailable: true,
     platform: "win32" as const,
     arch: "x64",
-    releaseName: "乐评寻踪 v0.2.0",
+    releaseName: "Hushed Refrain v0.2.0",
     releaseUrl: "https://example.test/releases/v0.2.0",
-    assetName: "NCM-Comment-Finder-Setup-0.2.0.exe",
+    assetName: "Hushed-Refrain-Setup-0.2.0.exe",
     downloadUrl: "https://example.test/download.exe",
     checkedAt: "2026-08-06T00:00:00.000Z",
   };

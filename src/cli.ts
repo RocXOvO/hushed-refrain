@@ -28,7 +28,7 @@ import {
 import type { CommentScope, ScanOptions, SourceSelection, Strategy } from "./types";
 
 const help = `
-ncm-comments - 乐评寻踪·网易云评论检索 CLI
+ncm-comments / hushed-refrain - Hushed Refrain · 网易云评论检索 CLI
 
 Commands:
   auth-qr             Log in with a QR code and save the session cookie

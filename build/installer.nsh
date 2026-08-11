@@ -24,7 +24,7 @@
       Abort
     ${EndIf}
     !insertmacro MUI_HEADER_TEXT "安装选项" "选择安装完成后要创建的快捷方式。"
-    ${NSD_CreateCheckbox} 0 16u 100% 18u "在桌面创建“乐评寻踪”快捷方式"
+    ${NSD_CreateCheckbox} 0 16u 100% 18u "在桌面创建“Hushed Refrain”快捷方式"
     Pop $DesktopShortcutCheckbox
     ${NSD_SetState} $DesktopShortcutCheckbox $DesktopShortcutRequested
     nsDialogs::Show

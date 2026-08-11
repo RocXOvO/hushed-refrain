@@ -215,6 +215,7 @@ test("surfaces a bounded report API error instead of mislabeling it as a stale g
 
 test("packaged PDF smoke traverses the renderer bridge and verifies every durable stage", () => {
   const source = readFileSync(join(process.cwd(), "src", "electron-main.ts"), "utf8");
+  assert.match(source, /hushed-refrain-smoke-\$\{process\.pid\}/);
   assert.match(source, /defaultPath:\s*join\(app\.getPath\("documents"\), resultReportFilename\(request\)\)/);
   assert.match(source, /window\.ncmDesktop\.exportResultsPdf/);
   assert.match(source, /\["save-dialog", "load-report", "fonts", "print", "write", "saved"\]/);

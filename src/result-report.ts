@@ -87,7 +87,7 @@ export function renderResultReportHtml(report: ResultReport): string {
   </div>
   <main>
     <header class="report-header">
-      <div class="brand"><span>乐评寻踪</span><small>MUSIC COMMENT TRACE</small></div>
+      <div class="brand"><span>Hushed Refrain</span><small>THE WORDS LEFT BETWEEN SONGS</small></div>
       <p class="eyebrow">COMMENT SEARCH REPORT</p>
       <h1>${escapeHtml(title)}</h1>
       <p class="subtitle">导出的是任务文件中截至生成时刻已经保存的全部命中结果。</p>
@@ -115,7 +115,7 @@ export function renderResultReportHtml(report: ResultReport): string {
       ${resultTables}
     </section>
 
-    <footer>本报告由乐评寻踪生成 · 评论内容及用户信息来自任务扫描时的${qq ? " QQ 音乐" : "网易云"}公开响应</footer>
+    <footer>本报告由 Hushed Refrain 生成 · 评论内容及用户信息来自任务扫描时的${qq ? " QQ 音乐" : "网易云"}公开响应</footer>
   </main>
   <script src="/report.js"></script>
 </body>

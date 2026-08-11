@@ -2573,7 +2573,7 @@ async function checkUpdates(notifyWhenCurrent) {
 }
 
 function renderUpdate(update) {
-  el.updateReleaseName.textContent = update.releaseName || `乐评寻踪 v${update.latestVersion}`;
+  el.updateReleaseName.textContent = update.releaseName || `Hushed Refrain v${update.latestVersion}`;
   el.updatePublishedAt.textContent = update.publishedAt ? `发布于 ${dateOnly(update.publishedAt)}` : "已有新版本可下载";
   el.currentVersion.textContent = `v${update.currentVersion}`;
   el.latestVersion.textContent = `v${update.latestVersion}`;
@@ -2599,7 +2599,7 @@ function renderWindowsUpdate(state) {
   el.updateIndicator.hidden = !hasUpdate;
 
   if (state.latestVersion) {
-    el.updateReleaseName.textContent = state.releaseName || `乐评寻踪 v${state.latestVersion}`;
+    el.updateReleaseName.textContent = state.releaseName || `Hushed Refrain v${state.latestVersion}`;
     el.updatePublishedAt.textContent = state.releaseDate ? `发布于 ${dateOnly(state.releaseDate)}` : "已有新版本可安装";
     el.currentVersion.textContent = `v${state.currentVersion}`;
     el.latestVersion.textContent = `v${state.latestVersion}`;

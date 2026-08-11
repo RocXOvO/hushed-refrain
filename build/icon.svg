@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Hushed Refrain — Veiled Echo</title>
+  <desc id="desc">A moon-white source and three muted-violet echo arcs interrupted by a quiet veil on an obsidian field.</desc>
+  <defs>
+    <mask id="veiled-echo-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="1024" height="1024">
+      <rect width="1024" height="1024" fill="#fff"/>
+      <path d="M526 226 706 798" fill="none" stroke="#000" stroke-width="58" stroke-linecap="round"/>
+    </mask>
+  </defs>
+  <rect x="56" y="56" width="912" height="912" rx="224" fill="#17171B"/>
+  <rect x="72" y="72" width="880" height="880" rx="208" fill="none" stroke="#F4F0E8" stroke-opacity=".08" stroke-width="4"/>
+  <path d="M526 226 706 798" fill="none" stroke="#8C829C" stroke-opacity=".16" stroke-width="82" stroke-linecap="round"/>
+  <g mask="url(#veiled-echo-mask)" fill="none" stroke-linecap="round">
+    <path d="M448 386c114 44 114 208 0 252" stroke="#F4F0E8" stroke-width="64"/>
+    <path d="M516 318c206 68 206 320 0 388" stroke="#8C829C" stroke-width="52"/>
+    <path d="M584 254c280 90 280 426 0 516" stroke="#8C829C" stroke-opacity=".56" stroke-width="42"/>
+  </g>
+  <circle cx="322" cy="512" r="112" fill="#F4F0E8"/>
+  <path d="M322 400a112 112 0 0 1 0 224c34-52 34-172 0-224Z" fill="#8C829C" fill-opacity=".44"/>
+</svg>

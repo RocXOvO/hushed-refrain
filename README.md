@@ -1,17 +1,17 @@
 <div align="center">
-  <img src="web/app-icon.png" width="96" alt="乐评寻踪图标">
-  <h1>乐评寻踪</h1>
-  <p><strong>MUSIC COMMENT TRACE</strong></p>
-  <p>在网易云音乐与 QQ 音乐的公开歌曲评论中精确定位目标用户。</p>
+  <img src="web/app-icon.png" width="96" alt="Hushed Refrain Veiled Echo 图标">
+  <h1>Hushed Refrain</h1>
+  <p><strong>THE WORDS LEFT BETWEEN SONGS</strong></p>
+  <p>写不出的喜欢，藏在听过的歌里。</p>
   <p>
-    <a href="https://github.com/RocXOvO/ncm-comment-finder/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RocXOvO/ncm-comment-finder?style=flat-square"></a>
-    <a href="https://github.com/RocXOvO/ncm-comment-finder/actions/workflows/windows-package.yml"><img alt="Windows package" src="https://img.shields.io/github/actions/workflow/status/RocXOvO/ncm-comment-finder/windows-package.yml?style=flat-square&label=Windows%20package"></a>
+    <a href="https://github.com/RocXOvO/hushed-refrain/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/RocXOvO/hushed-refrain?style=flat-square"></a>
+    <a href="https://github.com/RocXOvO/hushed-refrain/actions/workflows/windows-package.yml"><img alt="Windows package" src="https://img.shields.io/github/actions/workflow/status/RocXOvO/hushed-refrain/windows-package.yml?style=flat-square&label=Windows%20package"></a>
     <img alt="Node.js 20+" src="https://img.shields.io/badge/Node.js-20%2B-43853d?style=flat-square">
     <img alt="Windows and macOS" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS-59636e?style=flat-square">
   </p>
 </div>
 
-乐评寻踪是一款本地运行的评论检索工具。它把目标 UID、QQ 号、QQ 音乐主页或 EncryptUin 规范为精确身份，在公开歌曲目录与评论分页中查找匹配作者，并提供断点续跑、多出口调度、实时结果、结构化日志和 PDF 报告。
+Hushed Refrain 是一款本地运行的评论检索工具。它把目标 UID、QQ 号、QQ 音乐主页或 EncryptUin 规范为精确身份，在公开歌曲目录与评论分页中查找匹配作者，并提供断点续跑、多出口调度、实时结果、结构化日志和 PDF 报告。
 
 > [!IMPORTANT]
 > 仅用于合法、合理的公开数据查询。请尊重用户隐私、平台规则和请求频率。本项目不会绕过私密听歌排行、喜欢列表或用户歌单，也不承诺覆盖用户的全部历史评论。
@@ -32,19 +32,21 @@
 
 ## 下载
 
-从 [GitHub Releases](https://github.com/RocXOvO/ncm-comment-finder/releases/latest) 下载最新正式版：
+从 [GitHub Releases](https://github.com/RocXOvO/hushed-refrain/releases/latest) 下载最新正式版：
 
 | 平台 | 资产 | 说明 |
 | --- | --- | --- |
-| Windows 10/11 x64 | `NCM-Comment-Finder-Setup-<version>.exe` | 辅助式安装器，支持应用内更新 |
-| macOS 11+ Apple Silicon | `NCM-Comment-Finder-<version>-arm64.dmg` | Apple 芯片 Mac |
-| macOS 11+ Intel | `NCM-Comment-Finder-<version>-x64.dmg` | Intel Mac |
+| Windows 10/11 x64 | `Hushed-Refrain-Setup-<version>.exe` | 辅助式安装器，支持应用内更新 |
+| macOS 11+ Apple Silicon | `Hushed-Refrain-<version>-arm64.dmg` | Apple 芯片 Mac |
+| macOS 11+ Intel | `Hushed-Refrain-<version>-x64.dmg` | Intel Mac |
 
 Windows 当前未配置 Authenticode，首次运行可能出现 SmartScreen 提示。macOS 使用 ad-hoc 签名，尚未进行 Apple Developer ID 公证。应用内更新的 SHA-512 用于校验下载完整性，不等同于代码签名。
 
+v1.3.0 将 appId/bundle ID 与数据目录同步改为 Hushed Refrain。首次启动前请先退出旧客户端；Windows 安装器显式保留旧安装 GUID，升级时继续接管原安装。macOS 因 `.app` 名与 bundle ID 都已更新，可能与旧“乐评寻踪.app”并存，确认设置、断点和结果已迁移后可删除旧应用。
+
 ## 快速开始
 
-1. 安装并启动“乐评寻踪”，在顶部选择网易云音乐或 QQ 音乐。
+1. 安装并启动 Hushed Refrain，在顶部选择网易云音乐或 QQ 音乐。
 2. 填写目标：网易云使用用户主页 `id=` 后的数字 UID；QQ 可使用数字 QQ、官方个人主页 URL 或 EncryptUin。
 3. 选择任务视图和歌曲来源。网易云“喜欢歌曲”需要有效登录会话；QQ 公开喜欢不要求 QQ Cookie。
 4. 高并发扫描建议先在“多 IP 池”中导入或自动优选代理；普通用户资料、歌曲搜索和身份解析始终使用有界本机直连。
@@ -88,7 +90,7 @@ https://music.163.com/#/user/home?id=123456789
 
 ## 数据、恢复与导出
 
-桌面数据保存在 Electron `userData`；源码运行使用项目内 `data/` 与 `.ncm/`。项目不使用数据库：扫描状态是 JSON，结果和日志是追加式 JSONL。网易云结果 writer 使用长连接私有权限文件；一个楼中楼页的全部命中以一次批量 write + fsync 先落 JSONL，再推进 cursor/状态。楼层强刷检查点是 single-flight：最多累计 4 个完成页，或在页完成时距上次强刷已达 400 ms；写入期间新增的 dirty 页保留到下一批，终态、停止和错误强刷。崩溃最多重放已落盘页，复合键去重不会重复追加。旧文件末尾若缺换行，会先持久补齐分隔。这些运行目录均被 Git 忽略。
+桌面数据保存在 Electron `appData/hushed-refrain`；v1.3.0 首次启动会把旧 `appData/ncm-comment-finder` 在同一父目录中原子改名，若旧客户端占用目录则本次继续使用完整旧目录并在下次启动重试。源码运行使用项目内 `data/` 与 `.ncm/`。项目不使用数据库：扫描状态是 JSON，结果和日志是追加式 JSONL。网易云结果 writer 使用长连接私有权限文件；一个楼中楼页的全部命中以一次批量 write + fsync 先落 JSONL，再推进 cursor/状态。楼层强刷检查点是 single-flight：最多累计 4 个完成页，或在页完成时距上次强刷已达 400 ms；写入期间新增的 dirty 页保留到下一批，终态、停止和错误强刷。崩溃最多重放已落盘页，复合键去重不会重复追加。旧文件末尾若缺换行，会先持久补齐分隔。这些运行目录均被 Git 忽略。
 
 停止任务、退出客户端或安装 Windows 更新前，应用会请求真实活跃任务停止并等待终态检查点。恢复描述符只回填表单，不会自动开始扫描。
 
@@ -141,6 +143,7 @@ npm run check
 npm test
 npm run build
 npm run bench:qq
+npm run icons:check
 node --check web/app.js
 node --check web/platform-wave.js
 node --check web/pointer-silk-trail.js
@@ -148,7 +151,7 @@ npm run desktop:smoke:mac
 git diff --check
 ```
 
-`v1.2.1` 的交付基线为 592/592 项测试（0 fail / 0 cancelled），并通过类型检查、构建、QQ benchmark、三个 renderer 语法检查、macOS 桌面冒烟和 diff-check；真实浏览器验收覆盖楼中楼范围切换、提示与独立结果边界，console warning/error 为零。Windows 安装器由 GitHub Actions 在与 Release 相同的精确提交上执行完整测试、打包应用启动/PDF 冒烟与 NSIS 资产验证；自动化测试默认使用内存桩和回环代理，不会向音乐平台发起真实批量扫描。
+`v1.3.0` 的交付基线为 601/601 项测试（0 fail / 0 cancelled），并通过类型检查、构建、QQ benchmark、图标确定性复验、三个 renderer 语法检查、macOS 桌面冒烟和 diff-check；真实浏览器验收覆盖 390–1481px 的全部品牌布局断点、Windows 150% 缩放对应视口与网易云/QQ 快速切换，console warning/error 为零。Windows 安装器由 GitHub Actions 在与 Release 相同的精确提交上执行完整测试、打包应用启动/PDF 冒烟与 NSIS 资产验证；自动化测试默认使用内存桩和回环代理，不会向音乐平台发起真实批量扫描。
 
 ## License
 

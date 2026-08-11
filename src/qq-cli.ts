@@ -17,7 +17,7 @@ import {
 import type { QQCommentLane, QQMusicScanOptions } from "./qq-music/types";
 
 const help = `
-qq-music-comments - 乐评寻踪·QQ 音乐评论检索 CLI
+qq-music-comments - Hushed Refrain · QQ 音乐评论检索 CLI
 
 Commands:
   resolve-user --user VALUE          resolve a QQ number/profile URL to EncryptUin

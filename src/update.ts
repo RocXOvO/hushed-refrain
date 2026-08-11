@@ -1,4 +1,4 @@
-export const DEFAULT_UPDATE_REPOSITORY = "RocXOvO/ncm-comment-finder";
+export const DEFAULT_UPDATE_REPOSITORY = "RocXOvO/hushed-refrain";
 
 export interface GitHubReleaseAsset {
   name: string;

@@ -17,7 +17,7 @@ for (const architecture of architectures) {
 }
 
 async function run() {
-  const temporaryOutput = await mkdtemp(join(tmpdir(), "ncm-comment-finder-build-"));
+  const temporaryOutput = await mkdtemp(join(tmpdir(), "hushed-refrain-build-"));
   try {
     const executable = join(projectRoot, "node_modules", ".bin", "electron-builder");
     const builderArgs = [

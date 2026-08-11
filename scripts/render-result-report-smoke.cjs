@@ -49,7 +49,7 @@ async function render() {
       pageSize: "A4",
       displayHeaderFooter: true,
       headerTemplate: "<span></span>",
-      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>乐评寻踪</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
+      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>Hushed Refrain</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
       margins: { top: 0.4, bottom: 0.55, left: 0.35, right: 0.35 },
     });
     await writeFile(output, pdf);

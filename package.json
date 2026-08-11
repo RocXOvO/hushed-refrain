@@ -1,12 +1,13 @@
 {
-  "name": "ncm-comment-finder",
-  "version": "1.2.1",
+  "name": "hushed-refrain",
+  "version": "1.3.0",
   "private": true,
   "main": "dist/electron-main.js",
-  "description": "Checkpointed NetEase Cloud Music and QQ Music comment finder",
-  "author": "Music Comment Trace Contributors",
+  "description": "Cross-platform music comment tracing for NetEase Cloud Music and QQ Music",
+  "author": "Hushed Refrain Contributors",
   "license": "MIT",
   "bin": {
+    "hushed-refrain": "dist/cli.js",
     "ncm-comments": "dist/cli.js"
   },
   "scripts": {
@@ -19,6 +20,8 @@
     "desktop:smoke": "npm run build && set NCM_DESKTOP_SMOKE=1&& electron .",
     "desktop:smoke:mac": "npm run build && NCM_DESKTOP_SMOKE=1 electron .",
     "bench:qq": "tsx scripts/benchmark-qq-music.ts",
+    "icons:build": "node scripts/build-icons.cjs",
+    "icons:check": "node scripts/build-icons.cjs --check",
     "dist:win": "npm run build && electron-builder --win nsis --x64",
     "dist:mac": "npm run build && node scripts/build-mac.cjs arm64",
     "dist:mac:all": "npm run build && node scripts/build-mac.cjs arm64 x64"
@@ -31,6 +34,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "^2.6.2",
     "@types/node": "^24.10.0",
     "@types/proper-lockfile": "^4.1.4",
     "electron": "^43.3.0",
@@ -42,8 +46,8 @@
     "node": ">=20"
   },
   "build": {
-    "appId": "cn.local.ncm.commentfinder",
-    "productName": "乐评寻踪",
+    "appId": "cn.local.hushedrefrain",
+    "productName": "Hushed Refrain",
     "afterPack": "build/after-pack.cjs",
     "asar": true,
     "directories": {
@@ -53,7 +57,7 @@
       {
         "provider": "github",
         "owner": "RocXOvO",
-        "repo": "ncm-comment-finder",
+        "repo": "hushed-refrain",
         "releaseType": "release"
       }
     ],
@@ -74,7 +78,7 @@
           ]
         }
       ],
-      "artifactName": "NCM-Comment-Finder-Setup-${version}.${ext}"
+      "artifactName": "Hushed-Refrain-Setup-${version}.${ext}"
     },
     "mac": {
       "icon": "build/icon.icns",
@@ -91,10 +95,10 @@
           ]
         }
       ],
-      "artifactName": "NCM-Comment-Finder-${version}-${arch}.${ext}"
+      "artifactName": "Hushed-Refrain-${version}-${arch}.${ext}"
     },
     "dmg": {
-      "title": "乐评寻踪 ${version}",
+      "title": "Hushed Refrain ${version}",
       "iconSize": 112,
       "window": {
         "width": 540,
@@ -115,6 +119,7 @@
       ]
     },
     "nsis": {
+      "guid": "3777d05b-f162-546a-af88-e2bc45e86bda",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "runAfterFinish": true,
@@ -127,7 +132,7 @@
       "installerIcon": "build/icon.ico",
       "uninstallerIcon": "build/icon.ico",
       "installerHeaderIcon": "build/icon.ico",
-      "shortcutName": "乐评寻踪"
+      "shortcutName": "Hushed Refrain"
     }
   }
 }

@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           $env:NCM_DESKTOP_SMOKE = "1"
-          $appPath = Join-Path $PWD "release\win-unpacked\乐评寻踪.exe"
+          $appPath = Join-Path $PWD "release\win-unpacked\Hushed Refrain.exe"
           $stdoutPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stdout.log"
           $stderrPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-stderr.log"
           $resultPath = Join-Path $env:RUNNER_TEMP "ncm-smoke-result.log"
@@ -65,7 +65,7 @@ jobs:
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
-          $installer = "release\NCM-Comment-Finder-Setup-$version.exe"
+          $installer = "release\Hushed-Refrain-Setup-$version.exe"
           $blockmap = "$installer.blockmap"
           foreach ($path in @($installer, $blockmap, "release\latest.yml")) {
             if (-not (Test-Path $path)) { throw "Missing release asset: $path" }
@@ -78,6 +78,6 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           path: |
-            release/NCM-Comment-Finder-Setup-*.exe
-            release/NCM-Comment-Finder-Setup-*.exe.blockmap
+            release/Hushed-Refrain-Setup-*.exe
+            release/Hushed-Refrain-Setup-*.exe.blockmap
             release/latest.yml

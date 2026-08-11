@@ -1,13 +1,13 @@
 # Project memory for AI agents
 
-This is the compact, durable map for `ncm-comment-finder`. It records current contracts, not development history. Read it before editing and replace stale facts instead of appending a changelog.
+This is the compact, durable map for Hushed Refrain. It records current contracts, not development history. Read it before editing and replace stale facts instead of appending a changelog.
 
 ## Current baseline and authorities
 
-- Current release line: `v1.2.1`. A release is valid only when local `main`, `origin/main`, the annotated tag, package/lock, GitHub Release target, exact-SHA Windows workflow, and all five Release assets agree.
-- Display brand: `乐评寻踪 / MUSIC COMMENT TRACE`; `productName=乐评寻踪`.
-- Stable technical identity: package `ncm-comment-finder`, appId `cn.local.ncm.commentfinder`, repository `RocXOvO/ncm-comment-finder`, artifact stem `NCM-Comment-Finder`, Electron data directory `appData/ncm-comment-finder`. Do not change these as part of a visual rename.
-- Current web cache-busters are `styles.css?v=67`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=6`, and `app.js?v=80`; keep them synchronized with `web/index.html`.
+- Current release line: `v1.3.0`. A release is valid only when local `main`, `origin/main`, the annotated tag, package/lock, GitHub Release target, exact-SHA Windows workflow, and all five Release assets agree.
+- Display brand: `Hushed Refrain`; fixed subtitle `THE WORDS LEFT BETWEEN SONGS`; Chinese campaign line `写不出的喜欢，藏在听过的歌里。`; `productName=Hushed Refrain`.
+- Technical identity is also branded: package `hushed-refrain`, appId/AUMID/bundle ID `cn.local.hushedrefrain`, repository `RocXOvO/hushed-refrain`, artifact stem `Hushed-Refrain`, Electron data directory `appData/hushed-refrain`. The legacy `ncm-comments` bin remains as an alias, and NSIS keeps the prior deterministic GUID `3777d05b-f162-546a-af88-e2bc45e86bda` so Windows upgrades keep installer ownership. First launch atomically renames a complete legacy `appData/ncm-comment-finder`; a locked directory stays authoritative for that launch and is retried later, never recursively half-copied.
+- Current web cache-busters are `app-icon.png?v=2`, `styles.css?v=68`, `platform-wave.js?v=15`, `pointer-silk-trail.js?v=6`, and `app.js?v=81`; keep them synchronized with `web/index.html`.
 - Current unresolved findings and acceptance boundaries live in `docs/code-audit.md`. Detailed QQ truth lives in `docs/qq-music-architecture.md`; QQ performance in `docs/qq-music-performance-review.md`; GUI/search/transition truth in `docs/platform-gui-architecture.md`. `docs/qq-music-integration-design.md` is historical only.
 
 ## Product and runtime shapes
@@ -137,6 +137,7 @@ npm run check
 npm test
 npm run build
 npm run bench:qq
+npm run icons:check
 node --check web/app.js
 node --check web/platform-wave.js
 node --check web/pointer-silk-trail.js
@@ -146,7 +147,7 @@ git diff --check
 
 - Before handoff, run at least check, test, build, and diff-check; add the focused tests for changed behavior. Desktop/preload/updater/build changes also require the relevant desktop smoke/package path. Tests currently lack a strict `check:test` TypeScript gate; do not treat transpile-only execution as type coverage.
 - Routine tests use stubs and loopback services. Real NetEase/QQ/proxy traffic must be explicit, bounded, and never a default gate.
-- The `v1.2.1` delivery baseline is 592/592 tests with zero failures/cancellations, plus check, build, QQ benchmark, three renderer syntax checks, macOS desktop smoke, and diff-check. Release validity still requires the exact-SHA Windows workflow/package gate and all five GitHub Release assets.
+- The `v1.3.0` delivery baseline is 601/601 tests with zero failures/cancellations, plus check, build, QQ benchmark, deterministic icon regeneration, three renderer syntax checks, macOS desktop smoke, browser layout QA at every required breakpoint, and diff-check. Release validity still requires the exact-SHA Windows workflow/package gate and all five GitHub Release assets.
 - Windows packaging is a manual `workflow_dispatch`: it checks/tests, builds unpacked and NSIS forms, runs packaged startup/PDF smoke, and uploads a seven-day Actions artifact. It does not publish a GitHub Release.
 - Release from one exact final commit/version. Verify tag, `origin/main`, workflow `headSha`, manifests, and assets all agree. Validate `latest.yml` version/path/size/SHA-512 against the installer; build both macOS architectures from the same commit.
 - Publish only exact current-version files from a clean staging set. Local `release/` is non-authoritative and may contain historical files.

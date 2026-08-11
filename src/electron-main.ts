@@ -37,10 +37,19 @@ import {
   type WindowsUpdateState,
   type WindowsUpdaterBackend,
 } from "./windows-updater";
+import { resolveBrandedUserDataDirectory, type UserDataDirectoryResolution } from "./user-data-migration";
 
-// The visible product name may change, but checkpoints, logs and updater
-// handoff must continue using the established v0.x data directory.
-app.setPath("userData", join(app.getPath("appData"), "ncm-comment-finder"));
+const desktopSmokeTest = process.env.NCM_DESKTOP_SMOKE === "1";
+const userDataResolution: UserDataDirectoryResolution = desktopSmokeTest
+  ? {
+      path: join(app.getPath("temp"), `hushed-refrain-smoke-${process.pid}`),
+      migrated: false,
+      usingLegacyPath: false,
+    }
+  : resolveBrandedUserDataDirectory(app.getPath("appData"));
+if (desktopSmokeTest) mkdirSync(userDataResolution.path, { recursive: true });
+app.setPath("userData", userDataResolution.path);
+if (process.platform === "win32") app.setAppUserModelId("cn.local.hushedrefrain");
 const primaryInstance = app.requestSingleInstanceLock();
 if (!primaryInstance) app.quit();
 
@@ -85,6 +94,15 @@ function writeDesktopLog(scope: string, detail: unknown): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+if (userDataResolution.migrated) {
+  writeDesktopLog("user-data-migration", "legacy-directory-renamed");
+} else if (userDataResolution.migrationError) {
+  // Do not put the user's absolute appData path into diagnostics. The stable
+  // event is sufficient: the complete legacy directory remains authoritative
+  // for this launch and the atomic rename will be retried next time.
+  writeDesktopLog("user-data-migration", "legacy-directory-retained");
 }
 
 function initializeWindowsUpdater(window: BrowserWindow): void {
@@ -255,7 +273,7 @@ function createDesktopReportSession(parent: BrowserWindow, reportUrl: string): D
       pageSize: "A4",
       displayHeaderFooter: true,
       headerTemplate: "<span></span>",
-      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>乐评寻踪</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
+      footerTemplate: '<div style="width:100%;padding:0 10mm;display:flex;justify-content:space-between;color:#7b888d;font:8px sans-serif"><span>Hushed Refrain</span><span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>',
       margins: { top: 0.4, bottom: 0.55, left: 0.35, right: 0.35 },
     })),
     close: () => {
@@ -291,7 +309,7 @@ function desktopPdfSmokeConfig(request: ReturnType<typeof desktopPdfSmokeRequest
     targetKind: request.target.kind,
     target: request.target.value,
   }, expected)) return undefined;
-  const html = `<!doctype html><meta name="result-report-platform" content="netease"><meta name="result-report-mode" content="source"><meta name="result-report-job" content="${request.jobId}"><meta name="result-report-target-kind" content="uid"><meta name="result-report-target" content="9000000001"><style>@page{size:A4;margin:15mm}body{font:16px sans-serif}</style><h1>乐评寻踪 PDF smoke</h1><p>Chromium hidden report print pipeline.</p>`;
+  const html = `<!doctype html><meta name="result-report-platform" content="netease"><meta name="result-report-mode" content="source"><meta name="result-report-job" content="${request.jobId}"><meta name="result-report-target-kind" content="uid"><meta name="result-report-target" content="9000000001"><style>@page{size:A4;margin:15mm}body{font:16px sans-serif}</style><h1>Hushed Refrain PDF smoke</h1><p>Chromium hidden report print pipeline.</p>`;
   return { destination, reportUrl: `data:text/html;charset=UTF-8,${encodeURIComponent(html)}` };
 }
 
@@ -335,7 +353,7 @@ async function createWindow(): Promise<void> {
   const address = dashboard.address() as AddressInfo;
   const url = desktopDashboardUrl(`http://127.0.0.1:${address.port}/`, process.platform);
   dashboardUrl = url;
-  const smokeTest = process.env.NCM_DESKTOP_SMOKE === "1";
+  const smokeTest = desktopSmokeTest;
   const window = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -344,7 +362,7 @@ async function createWindow(): Promise<void> {
     show: !smokeTest,
     backgroundColor: "#f3f5f6",
     autoHideMenuBar: true,
-    title: "乐评寻踪",
+    title: "Hushed Refrain",
     ...desktopWindowChrome(process.platform),
     webPreferences: {
       contextIsolation: true,
@@ -448,7 +466,7 @@ function ensureTray(): Tray {
   if (icon.isEmpty()) throw new Error("tray-icon-empty");
   const nextTray = new Tray(icon);
   try {
-    nextTray.setToolTip("乐评寻踪");
+    nextTray.setToolTip("Hushed Refrain");
     nextTray.setContextMenu(Menu.buildFromTemplate([
       { label: "显示主界面", click: showMainWindow },
       { type: "separator" },
@@ -607,7 +625,7 @@ if (primaryInstance) app.on("second-instance", showMainWindow);
   const detail = logPath
     ? `启动日志已保存到：\n${logPath}`
     : "启动日志写入失败，请截图此提示并反馈。";
-  dialog.showErrorBox("乐评寻踪启动失败", `${errorText(error)}\n\n${detail}`);
+  dialog.showErrorBox("Hushed Refrain 启动失败", `${errorText(error)}\n\n${detail}`);
   process.stderr.write(`${errorText(error)}\n`);
   app.exit(1);
 });

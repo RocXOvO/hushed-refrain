@@ -157,6 +157,7 @@ button:disabled,
 }
 .splash-visual img { width: 56px; height: 56px; border-radius: 13px; }
 .app-splash > strong { margin-top: 18px; font-size: 1.12rem; letter-spacing: .08em; }
+.splash-story { margin-top: 7px; color: #b9b2c4; font-size: .7rem; letter-spacing: .04em; }
 .splash-caption { margin-top: 7px; color: #999aa0; font-size: .76rem; }
 .splash-progress { width: 172px; height: 2px; margin-top: 22px; overflow: hidden; background: #35363a; }
 .splash-progress i { width: 38%; height: 100%; display: block; background: var(--accent); animation: splash-progress 1s ease-in-out infinite; }
@@ -238,7 +239,7 @@ body[data-platform="qq"] .platform-portal-tab.is-active { background: #2a312d; b
 .brand-mark img { width: 29px; height: 29px; border-radius: 7px; }
 .brand-copy { min-width: 0; align-items: flex-start; flex-direction: column; gap: 1px; }
 .brand-copy strong { overflow: hidden; font-size: .92rem; text-overflow: ellipsis; white-space: nowrap; }
-.brand-copy small { color: #8e8f94; font-size: .56rem; letter-spacing: .1em; }
+.brand-copy small { overflow: hidden; color: #8e8f94; font-size: .49rem; letter-spacing: .075em; text-overflow: ellipsis; white-space: nowrap; }
 .ui-version-badge {
   margin-left: 4px;
   padding: 3px 6px;

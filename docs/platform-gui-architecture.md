@@ -9,6 +9,12 @@
 
 ## 界面层
 
+### Hushed Refrain 品牌与图标
+
+唯一产品名是 `Hushed Refrain`，副标题固定为 `THE WORDS LEFT BETWEEN SONGS`，中文传播语固定为“写不出的喜欢，藏在听过的歌里。”，不派生中文别名。`build/icon.svg` 是 Veiled Echo 唯一主源：黑曜石 `#17171B` 背景、月白 `#F4F0E8` 主体与灰紫 `#8C829C` 三道被遮断并逐渐消失的回声弧。图形不得出现唱片、放大镜、平台字母、红绿平台色、爱心、眼睛或文字；`build/icon.png`、`build/icon.ico`、`build/icon.icns` 与 `web/app-icon.png` 必须由主源确定性导出。ICO 固定覆盖 16/18/24/32/48/64/128/256 px；PNG 是 1024×1024 RGBA，透明边角和小尺寸轮廓都必须保留。
+
+顶部品牌文字保持单行并允许在既有紧凑断点整体隐藏，不得侵占中央 `.platform-portal`。1238–1480 px、Windows 150% 约 1293 px、821–1237 px、820 px 和 390 px 都沿用对称外列；平台切换前后 portal 的 x/width 不因品牌长度或网易云登录按钮显隐而变化。favicon、启动页、顶部、窗口、托盘、安装器、快捷方式、更新/关闭弹窗、CLI 标题和 PDF 都消费同一品牌合同。
+
 ### 主题，不复制业务 DOM
 
 `body[data-platform="netease"|"qq"]` 只切换视觉 token、平台标识、提示文案和相关表单。任务栏、结果表、日志、估算、右侧节点详情和导出保持单实例，避免两套 GUI 的事件、任务代际和缓存状态漂移。
