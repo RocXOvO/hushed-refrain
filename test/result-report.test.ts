@@ -119,6 +119,24 @@ test("lets Chromium paginate one continuous result table from measured row heigh
   assert.match(html, /footer \{ display: none; \}/);
 });
 
+test("lays out the long coverage summary in a wide top-aligned card", () => {
+  const value = report();
+  value.status = "complete";
+  value.elapsedMs = 2_770_000;
+  value.commentsInspected = 43_517_145;
+  value.pagesProcessed = 44_824;
+  value.requestsTotal = 45_026;
+  value.coverageLabel = "1,850 / 1,850 首歌曲；目录 1,850，历史完成 913，复用 0，新增待扫 0；仅扫描顶层评论，未读取楼中楼";
+  const html = renderResultReportHtml(value);
+
+  assert.match(html, /class="summary-coverage"[^>]*><span>覆盖进度<\/span>/);
+  assert.match(html, /class="summary-comments"[^>]*><span>已读评论 · 顶层\/楼中楼页<\/span><strong>43,517,145 · 44,824 \/ 2 页<\/strong>/);
+  assert.match(html, /grid-template-columns: repeat\(12, minmax\(0, 1fr\)\)/);
+  assert.match(html, /grid-template-areas: "mode mode mode target target target status status elapsed elapsed result result" "coverage coverage coverage coverage coverage coverage comments comments comments comments requests requests"/);
+  assert.match(html, /justify-content: flex-start/);
+  assert.doesNotMatch(html, /align-content: space-between/);
+});
+
 test("renders QQ reports with generation metadata and rebuilds only trusted QQ Music links", () => {
   const html = renderResultReportHtml(qqReport());
   assert.match(html, /QQ 音乐评论检索报告/);

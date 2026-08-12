@@ -94,14 +94,14 @@ export function renderResultReportHtml(report: ResultReport): string {
     </header>
 
     <section class="summary" aria-label="任务摘要">
-      <div><span>检索模式</span><strong>${modeLabel}</strong></div>
-      <div><span>目标范围</span><strong>${escapeHtml(targetLabel)}</strong></div>
-      <div><span>任务状态</span><strong>${escapeHtml(statusLabel(report.status))}</strong></div>
-      <div><span>覆盖进度</span><strong>${escapeHtml(report.coverageLabel)}</strong></div>
-      <div><span>已读评论 · 顶层/楼中楼页</span><strong>${formatNumber(report.commentsInspected)} · ${formatNumber(report.pagesProcessed)} / ${formatNumber(report.floorPagesProcessed ?? 0)} 页</strong></div>
-      <div><span>累计请求</span><strong>${formatNumber(report.requestsTotal)}</strong></div>
-      <div><span>任务耗时</span><strong>${formatDuration(report.elapsedMs)}</strong></div>
-      <div class="accent"><span>文件累计结果</span><strong>${formatNumber(report.comments.length)} 条</strong></div>
+      <div class="summary-mode"><span>检索模式</span><strong>${modeLabel}</strong></div>
+      <div class="summary-target"><span>目标范围</span><strong>${escapeHtml(targetLabel)}</strong></div>
+      <div class="summary-status"><span>任务状态</span><strong>${escapeHtml(statusLabel(report.status))}</strong></div>
+      <div class="summary-elapsed"><span>任务耗时</span><strong>${formatDuration(report.elapsedMs)}</strong></div>
+      <div class="summary-result accent"><span>文件累计结果</span><strong>${formatNumber(report.comments.length)} 条</strong></div>
+      <div class="summary-coverage"><span>覆盖进度</span><strong>${escapeHtml(report.coverageLabel)}</strong></div>
+      <div class="summary-comments"><span>已读评论 · 顶层/楼中楼页</span><strong>${formatNumber(report.commentsInspected)} · ${formatNumber(report.pagesProcessed)} / ${formatNumber(report.floorPagesProcessed ?? 0)} 页</strong></div>
+      <div class="summary-requests"><span>累计请求</span><strong>${formatNumber(report.requestsTotal)}</strong></div>
     </section>
 
     <section class="metadata">
@@ -281,12 +281,18 @@ main { width: min(1100px, calc(100% - 32px)); margin: 24px auto; padding: 34px 3
 .eyebrow { margin: 18px 0 4px; color: #078999; font-size: 9px; font-weight: 800; letter-spacing: .12em; }
 h1 { margin: 0; font-size: 27px; line-height: 1.25; letter-spacing: -.02em; }
 .subtitle { margin: 7px 0 0; color: #6d7a7f; }
-.summary { margin: 18px 0 12px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border: 1px solid #d8e0e2; border-radius: 10px; overflow: hidden; }
-.summary > div { min-height: 65px; padding: 11px 13px; display: grid; align-content: space-between; border-right: 1px solid #d8e0e2; border-bottom: 1px solid #d8e0e2; }
-.summary > div:nth-child(4n) { border-right: 0; }
-.summary > div:nth-last-child(-n + 4) { border-bottom: 0; }
+.summary { margin: 18px 0 12px; display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); grid-template-areas: "mode mode mode target target target status status elapsed elapsed result result" "coverage coverage coverage coverage coverage coverage comments comments comments comments requests requests"; gap: 8px; }
+.summary > div { min-height: 61px; padding: 10px 12px; display: flex; flex-direction: column; justify-content: flex-start; gap: 7px; border: 1px solid #d8e0e2; border-radius: 8px; background: #fff; }
+.summary-mode { grid-area: mode; }
+.summary-target { grid-area: target; }
+.summary-status { grid-area: status; }
+.summary-elapsed { grid-area: elapsed; }
+.summary-result { grid-area: result; }
+.summary-coverage { grid-area: coverage; }
+.summary-comments { grid-area: comments; }
+.summary-requests { grid-area: requests; }
 .summary span { color: #748187; font-size: 9px; }
-.summary strong { font-size: 13px; overflow-wrap: anywhere; }
+.summary strong { font-size: 13px; line-height: 1.4; overflow-wrap: anywhere; }
 .summary .accent { color: #078999; background: #edf8f9; }
 .metadata { margin: 0 0 21px; padding: 8px 11px; display: flex; flex-wrap: wrap; gap: 7px 20px; color: #68757a; background: #f5f7f7; border-left: 3px solid #078999; }
 .section-title { margin-bottom: 9px; display: flex; align-items: flex-end; justify-content: space-between; }
@@ -312,6 +318,9 @@ td p { margin: 0; white-space: pre-wrap; }
 a { color: #078999; font-weight: 700; text-decoration: none; }
 .empty td { padding: 28px; color: #778489; text-align: center; }
 footer { margin-top: 18px; padding-top: 10px; color: #829095; border-top: 1px solid #dbe3e4; font-size: 8.5px; text-align: center; }
+@media screen and (max-width: 720px) {
+  .summary { grid-template-columns: repeat(2, minmax(0, 1fr)); grid-template-areas: "mode status" "target target" "coverage coverage" "comments comments" "requests elapsed" "result result"; }
+}
 @page { size: A4; margin: 14mm 10mm 17mm; }
 @media print {
   :root { background: #fff; }

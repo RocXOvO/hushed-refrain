@@ -812,6 +812,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="runtimeInspectorBody"/);
   assert.match(pageText, /PDF 将包含截至导出时已经保存的全部结果/);
   assert.match(pageText, /评论读取进度/);
+  assert.match(pageText, /正常完成的歌曲会自动移出列表/);
   assert.match(pageText, /总工作线程上限限制任务整体调度/);
   assert.match(pageText, /任务出口上限/);
   assert.match(pageText, /每出口请求启动间隔/);
@@ -820,7 +821,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /styles\.css\?v=72/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=7/);
-  assert.match(pageText, /app\.js\?v=83/);
+  assert.match(pageText, /app\.js\?v=84/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);

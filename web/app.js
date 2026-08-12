@@ -1427,6 +1427,10 @@ function sourceErrorNotices(job) {
   return [...notices, ...errors];
 }
 
+function shouldDisplayActiveSong(song) {
+  return !song.done || song.truncated;
+}
+
 function renderActiveSongs(songs, summary, configuredWorkers = 0) {
   const normalized = songs.map((song) => ({
     id: String(song.id || ""),
@@ -1444,7 +1448,7 @@ function renderActiveSongs(songs, summary, configuredWorkers = 0) {
     progressBasis: "comments",
     done: Boolean(song.done),
     truncated: Boolean(song.truncated),
-  }));
+  })).filter(shouldDisplayActiveSong);
   const activeWorkers = normalized.reduce((total, song) => total + song.workers, 0);
   const workerCapacity = Math.max(0, Number(configuredWorkers || 0));
   const signature = JSON.stringify([normalized, summary, workerCapacity]);
@@ -1506,11 +1510,7 @@ function createActiveSongRow() {
 
 function updateActiveSongRow(entry, song) {
   entry.song = song;
-  const rootOnly = song.commentScope === "root-only-v1";
-  const hasUnreadDeclaredComments = !rootOnly && song.done && song.totalComments !== undefined
-    && song.commentsProcessed !== undefined && song.commentsProcessed < song.totalComments;
-  entry.badge.textContent = song.truncated ? "达到页数上限" : hasUnreadDeclaredComments
-    ? "已完成可读范围" : song.done ? "已完成" : song.workers > 0 ? "扫描中" : "等待调度";
+  entry.badge.textContent = song.truncated ? "达到页数上限" : song.workers > 0 ? "扫描中" : "等待调度";
   entry.badge.classList.toggle("is-waiting", !song.done && song.workers === 0);
   entry.badge.classList.toggle("is-complete", song.done && !song.truncated);
   entry.badge.classList.toggle("is-truncated", song.truncated);

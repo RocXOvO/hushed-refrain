@@ -736,44 +736,19 @@ test("task startup capsule advances phases and settles without an elapsed-time s
   assert.equal(appSource.includes("taskStartupElapsed"), false);
 });
 
-test("completed songs distinguish the accessible range when the upstream total remains larger", () => {
-  const classes = new Set<string>();
-  const entry = {
-    badge: {
-      textContent: "",
-      classList: { toggle(name: string, enabled: boolean) { enabled ? classes.add(name) : classes.delete(name); } },
-    },
-    name: { textContent: "" },
-    id: { textContent: "" },
-    workers: { textContent: "" },
-  };
-  let rendered: unknown;
-  const context: Record<string, unknown> = {
-    fmt(value: number) { return String(value); },
-    renderSongReadProgress(song: unknown) { rendered = song; },
-  };
+test("active-song table removes completed accessible ranges but keeps unfinished and capped rows", () => {
+  const context: Record<string, unknown> = {};
   context.globalThis = context;
   vm.runInNewContext(`
-    ${extractFunction("updateActiveSongRow")}
-    globalThis.api = { updateActiveSongRow };
+    ${extractFunction("shouldDisplayActiveSong")}
+    globalThis.shouldDisplay = shouldDisplayActiveSong;
   `, context);
-  const api = context.api as { updateActiveSongRow(entry: unknown, song: unknown): void };
-  const song = {
-    id: "65800",
-    name: "小幸运",
-    workers: 0,
-    done: true,
-    commentsProcessed: 9_000,
-    totalComments: 10_000,
-    progressPercent: 100,
-    progressBasis: "comments",
-  };
+  const shouldDisplay = context.shouldDisplay as (song: Record<string, unknown>) => boolean;
 
-  api.updateActiveSongRow(entry, song);
-  assert.equal(entry.badge.textContent, "已完成可读范围");
-  assert.equal(classes.has("is-complete"), true);
-  assert.equal(classes.has("is-waiting"), false);
-  assert.equal(rendered, song);
+  assert.equal(shouldDisplay({ done: false, truncated: false }), true);
+  assert.equal(shouldDisplay({ done: true, truncated: false, commentsProcessed: 9_000, totalComments: 10_000 }), false);
+  assert.equal(shouldDisplay({ done: true, truncated: false, commentsProcessed: 10_000, totalComments: 10_000 }), false);
+  assert.equal(shouldDisplay({ done: true, truncated: true }), true);
 });
 
 test("page-capped songs are labelled truncated instead of falsely complete", () => {
