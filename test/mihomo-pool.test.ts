@@ -467,7 +467,7 @@ test("does not kill a reused PID whose process identity is not Mihomo", async ()
     };
     await writeFile(poolPath, JSON.stringify(pool));
 
-    assert.equal(await stopMihomoPool(poolPath), true);
+    assert.equal(await stopMihomoPool(poolPath, async () => "mismatch"), true);
     assert.doesNotThrow(() => process.kill(child.pid!, 0));
     assert.equal((await readProxyPool(poolPath))?.active, false);
   } finally {

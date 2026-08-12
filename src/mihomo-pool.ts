@@ -344,14 +344,18 @@ async function startMihomoPoolGeneration(
 
 export async function stopMihomoPool(
   poolPath: string,
+  processIdentity: (pool: ProxyPoolFile) => Promise<ManagedMihomoProcessIdentity> = managedMihomoProcessIdentityAsync,
 ): Promise<boolean> {
-  return withPoolBuildLock(poolPath, () => stopMihomoPoolUnlocked(poolPath));
+  return withPoolBuildLock(poolPath, () => stopMihomoPoolUnlocked(poolPath, processIdentity));
 }
 
-async function stopMihomoPoolUnlocked(poolPath: string): Promise<boolean> {
+async function stopMihomoPoolUnlocked(
+  poolPath: string,
+  processIdentity: (pool: ProxyPoolFile) => Promise<ManagedMihomoProcessIdentity>,
+): Promise<boolean> {
   const pool = await readProxyPool(poolPath);
   if (!pool || !pool.active) return false;
-  const identity = await managedMihomoProcessIdentityAsync(pool);
+  const identity = await processIdentity(pool);
   if (identity === "verified" && pool.pid) {
     process.kill(pool.pid);
     if (!await waitForProcessExit(pool.pid, 5_000)) {

@@ -787,8 +787,11 @@ test("an external stop signal wakes lane backoff without waiting for its retry d
   const directory = await mkdtemp(join(tmpdir(), "ncm-parallel-stop-backoff-"));
   const client = new ParallelFakeClient();
   let calls = 0;
+  let markRequestStarted!: () => void;
+  const requestStarted = new Promise<void>((resolve) => { markRequestStarted = resolve; });
   client.getSongCommentsByCursor = async () => {
     calls += 1;
+    markRequestStarted();
     throw { status: 502, body: { code: 502 } };
   };
   const controller = new AbortController();
@@ -796,14 +799,16 @@ test("an external stop signal wakes lane backoff without waiting for its retry d
   config.shardCount = 1;
   config.workersPerLane = 1;
   config.signal = controller.signal;
-  setTimeout(() => controller.abort(), 25);
   const startedAt = Date.now();
 
-  const report = await runParallelSongScan([{
+  const run = runParallelSongScan([{
     name: "failed",
     client,
     governor: governor(),
   }], config);
+  await requestStarted;
+  controller.abort();
+  const report = await run;
 
   assert.equal(report.status, "stopped");
   assert.equal(calls, 1);
