@@ -95,6 +95,10 @@ let resultsRenderPending = false;
 let resultsNeedRefresh = false;
 let nativeUpdateState;
 let availableWebUpdate;
+const UPDATE_POLL_INTERVAL_MS = 30 * 60_000;
+let updatePollTimer;
+let updateCheckInFlight;
+let lastUpdateCheckAt = 0;
 let activeTaskMode;
 let activeTaskViewKey;
 let startSubmissionBusy = false;
@@ -2539,34 +2543,63 @@ function syncAuthPresentation() {
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
 
-async function checkUpdates(notifyWhenCurrent = false) {
-  try {
-    const desktop = window.ncmDesktop;
-    if (desktop?.platform === "win32" && typeof desktop.checkForUpdates === "function") {
-      const state = await desktop.checkForUpdates();
-      if (state?.supported) {
-        renderWindowsUpdate(state);
-        if (state.phase === "up-to-date" && notifyWhenCurrent) toast(`当前 v${state.currentVersion} 已是最新版本`);
-        if (state.phase === "error" && notifyWhenCurrent) toast(`检查更新失败：${state.error || "未知错误"}`);
-        return;
+function checkUpdates(notifyWhenCurrent = false) {
+  if (updateCheckInFlight) return updateCheckInFlight;
+  const request = (async () => {
+    try {
+      const desktop = window.ncmDesktop;
+      if (desktop?.platform === "win32" && typeof desktop.checkForUpdates === "function") {
+        const state = await desktop.checkForUpdates();
+        if (state?.supported) {
+          renderWindowsUpdate(state);
+          if (state.phase === "up-to-date" && notifyWhenCurrent) toast(`当前 v${state.currentVersion} 已是最新版本`);
+          if (state.phase === "error" && notifyWhenCurrent) toast(`检查更新失败：${state.error || "未知错误"}`);
+          return;
+        }
       }
+      const update = await api("/api/update");
+      nativeUpdateState = undefined;
+      availableWebUpdate = update.updateAvailable ? update : undefined;
+      el.updateButton.hidden = !availableWebUpdate;
+      el.updateButton.disabled = false;
+      el.updateButton.classList.toggle("available", Boolean(availableWebUpdate));
+      el.updateButton.classList.remove("checking");
+      el.updateIndicator.hidden = !availableWebUpdate;
+      if (update.updateAvailable) {
+        renderUpdate(update);
+      } else if (notifyWhenCurrent) {
+        toast(`当前 v${update.currentVersion} 已是最新版本`);
+      }
+    } catch (error) {
+      if (notifyWhenCurrent) toast(`检查更新失败：${error.message}`);
     }
-    const update = await api("/api/update");
-    nativeUpdateState = undefined;
-    availableWebUpdate = update.updateAvailable ? update : undefined;
-    el.updateButton.hidden = !availableWebUpdate;
-    el.updateButton.disabled = false;
-    el.updateButton.classList.toggle("available", Boolean(availableWebUpdate));
-    el.updateButton.classList.remove("checking");
-    el.updateIndicator.hidden = !availableWebUpdate;
-    if (update.updateAvailable) {
-      renderUpdate(update);
-    } else if (notifyWhenCurrent) {
-      toast(`当前 v${update.currentVersion} 已是最新版本`);
-    }
-  } catch (error) {
-    if (notifyWhenCurrent) toast(`检查更新失败：${error.message}`);
-  }
+  })();
+  const pending = request.finally(() => {
+    lastUpdateCheckAt = Date.now();
+    if (updateCheckInFlight === pending) updateCheckInFlight = undefined;
+  });
+  updateCheckInFlight = pending;
+  return pending;
+}
+
+function stopUpdatePolling() {
+  clearTimeout(updatePollTimer);
+  updatePollTimer = undefined;
+}
+
+function scheduleUpdatePolling(delay = UPDATE_POLL_INTERVAL_MS) {
+  stopUpdatePolling();
+  if (pageLifecycleSuspended || document.hidden) return;
+  updatePollTimer = setTimeout(async () => {
+    updatePollTimer = undefined;
+    if (!pageLifecycleSuspended && !document.hidden) await checkUpdates(false);
+    scheduleUpdatePolling();
+  }, Math.max(0, delay));
+}
+
+function resumeUpdatePolling() {
+  const elapsed = lastUpdateCheckAt > 0 ? Math.max(0, Date.now() - lastUpdateCheckAt) : UPDATE_POLL_INTERVAL_MS;
+  scheduleUpdatePolling(Math.max(0, UPDATE_POLL_INTERVAL_MS - elapsed));
 }
 
 function renderUpdate(update) {
@@ -3725,7 +3758,7 @@ async function boot() {
   await Promise.allSettled([refresh(), refreshResults(), refreshAuth()]);
   dismissSplash();
   if (restored) toast(typeof restored === "string" ? restored : "已恢复上次任务参数；保持“新建状态”关闭即可从检查点继续。");
-  void checkUpdates(false);
+  void checkUpdates(false).finally(() => scheduleUpdatePolling());
 }
 
 el.parallelForm.addEventListener("submit", (event) => { event.preventDefault(); void startParallel(); });
@@ -3910,6 +3943,8 @@ document.addEventListener("visibilitychange", () => {
   else pointerSilkTrail?.resume("hidden");
   scheduleRefreshLoop();
   scheduleAuthRefreshLoop();
+  if (document.hidden) stopUpdatePolling();
+  else resumeUpdatePolling();
   if (!document.hidden) {
     void refresh();
     void refreshAuth();
@@ -3932,6 +3967,7 @@ addEventListener("pagehide", () => {
   clearTimeout(resultRenderTimer);
   clearTimeout(refreshTimer);
   clearTimeout(authRefreshTimer);
+  stopUpdatePolling();
   clearInterval(runtimeTimerInterval);
   clearTaskStartupTimers();
   pendingStartupSettlement = undefined;
@@ -3965,6 +4001,7 @@ addEventListener("pageshow", (event) => {
   startRuntimeTimer();
   scheduleRefreshLoop(0);
   scheduleAuthRefreshLoop(0);
+  resumeUpdatePolling();
   if (!streamConnected) connectResultStream();
   if (resultsRenderPending) scheduleResultsRender();
 });

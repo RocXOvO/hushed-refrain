@@ -206,6 +206,9 @@
     let targetY = 0;
     let previousPointerX = 0;
     let previousPointerY = 0;
+    let observedClientX = 0;
+    let observedClientY = 0;
+    let hasObservedPointer = false;
     let pointerMoveX = 0;
     let pointerMoveY = 0;
     let lastMoveAt = 0;
@@ -213,6 +216,7 @@
     let mouseSpeed = 0;
     let lineWidthPx = 1;
     let contextLost = false;
+    let geometryDirty = true;
 
     function eligible() {
       return active && !destroyed && !faulted && suspensions.size === 0
@@ -315,6 +319,7 @@
       gl.useProgram(program);
       gl.uniform2f(uniforms.resolution, cssWidth, cssHeight);
       gl.clear(gl.COLOR_BUFFER_BIT);
+      geometryDirty = false;
     }
 
     function setupSurface() {
@@ -519,11 +524,39 @@
       }
     }
 
+    function observePointerPosition(event, requirePhysicalMovement = false) {
+      const clientX = Number(event?.clientX);
+      const clientY = Number(event?.clientY);
+      if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return false;
+      const hadObservedPointer = hasObservedPointer;
+      const coordinateChanged = hadObservedPointer && (clientX !== observedClientX
+        || clientY !== observedClientY);
+      const movementX = Number(event?.movementX);
+      const movementY = Number(event?.movementY);
+      const hasMovementDelta = Number.isFinite(movementX) && Number.isFinite(movementY);
+      const physicallyMoved = coordinateChanged
+        || (hasMovementDelta && (movementX !== 0 || movementY !== 0));
+      observedClientX = clientX;
+      observedClientY = clientY;
+      hasObservedPointer = true;
+      if (!hadObservedPointer) return false;
+      return requirePhysicalMovement ? physicallyMoved : coordinateChanged;
+    }
+
     function onPointerMove(event) {
       if (event.pointerType && event.pointerType !== "mouse") return;
+      if (!observePointerPosition(event, true)) return;
       if (!eligible() || !setupSurface()) return;
-      const x = event.clientX - hostLeft;
-      const y = event.clientY - hostTop;
+      if (geometryDirty) {
+        try {
+          refreshGeometry();
+        } catch {
+          failSurface();
+          return;
+        }
+      }
+      const x = observedClientX - hostLeft;
+      const y = observedClientY - hostTop;
       if (x < 0 || y < 0 || x > cssWidth || y > cssHeight) return;
       const now = performance.now();
       pointerMoveX = seeded ? x - previousPointerX : 0;
@@ -535,6 +568,22 @@
       lastMoveAt = now;
       if (!seeded) seedLines();
       schedule();
+    }
+
+    function onPointerEnter(event) {
+      if (event.pointerType && event.pointerType !== "mouse") return;
+      observePointerPosition(event);
+      geometryDirty = true;
+    }
+
+    function onWheel(event) {
+      observePointerPosition(event);
+      clearSurface();
+    }
+
+    function onViewportScroll() {
+      clearSurface();
+      geometryDirty = true;
     }
 
     function onHostGeometryChange() {
@@ -584,16 +633,18 @@
       destroyed = true;
       releaseSurface();
       host.removeEventListener("pointermove", onPointerMove);
-      host.removeEventListener("pointerenter", onHostGeometryChange);
-      window.removeEventListener("scroll", onHostGeometryChange, true);
+      host.removeEventListener("pointerenter", onPointerEnter);
+      host.removeEventListener("wheel", onWheel);
+      window.removeEventListener("scroll", onViewportScroll, true);
       mediaUnlisten(reducedMotion, onCapabilityChange);
       mediaUnlisten(finePointer, onCapabilityChange);
       suspensions.clear();
     }
 
     host.addEventListener("pointermove", onPointerMove, { passive: true });
-    host.addEventListener("pointerenter", onHostGeometryChange, { passive: true });
-    window.addEventListener("scroll", onHostGeometryChange, { passive: true, capture: true });
+    host.addEventListener("pointerenter", onPointerEnter, { passive: true });
+    host.addEventListener("wheel", onWheel, { passive: true });
+    window.addEventListener("scroll", onViewportScroll, { passive: true, capture: true });
     mediaListen(reducedMotion, onCapabilityChange);
     mediaListen(finePointer, onCapabilityChange);
 

@@ -144,12 +144,17 @@ function runtime(options: {
   const canvases: any[] = [];
   const contextRequests: Array<{ name: string; options: Record<string, unknown> }> = [];
   let contextAttempts = 0;
+  let geometryReads = 0;
+  let hostLeft = 40;
+  let hostTop = 60;
+  let pointerInside = false;
   const gl = fakeGl(options.failure);
 
   const host = {
     children: [] as any[],
     getBoundingClientRect() {
-      return { left: 40, top: 60, width: options.width ?? 1_200, height: options.height ?? 800 };
+      geometryReads += 1;
+      return { left: hostLeft, top: hostTop, width: options.width ?? 1_200, height: options.height ?? 800 };
     },
     appendChild(node: any) { this.children.push(node); node.parent = this; node.removed = false; },
     addEventListener(type: string, listener: Listener) {
@@ -157,7 +162,19 @@ function runtime(options: {
       hostListeners.get(type)?.add(listener);
     },
     removeEventListener(type: string, listener: Listener) { hostListeners.get(type)?.delete(listener); },
-    dispatch(type: string, event: Record<string, unknown>) {
+    dispatch(type: string, event: Record<string, unknown> = {}) {
+      if (type === "pointerenter") pointerInside = true;
+      if (type === "pointermove" && !pointerInside) {
+        pointerInside = true;
+        const movementX = Number(event.movementX);
+        const movementY = Number(event.movementY);
+        const enterEvent = {
+          ...event,
+          clientX: Number(event.clientX) - (Number.isFinite(movementX) ? movementX : 1),
+          clientY: Number(event.clientY) - (Number.isFinite(movementY) ? movementY : 0),
+        };
+        for (const listener of [...(hostListeners.get("pointerenter") ?? [])]) listener(enterEvent);
+      }
       for (const listener of [...(hostListeners.get(type) ?? [])]) listener(event);
     },
   };
@@ -205,8 +222,8 @@ function runtime(options: {
       windowListeners.get(type)?.add(listener);
     },
     removeEventListener(type: string, listener: Listener) { windowListeners.get(type)?.delete(listener); },
-    dispatch(type: string) {
-      for (const listener of [...(windowListeners.get(type) ?? [])]) listener({});
+    dispatch(type: string, event: Record<string, unknown> = {}) {
+      for (const listener of [...(windowListeners.get(type) ?? [])]) listener(event);
     },
   };
 
@@ -258,11 +275,13 @@ function runtime(options: {
   return {
     context,
     host,
+    window: windowObject,
     canvases,
     gl,
     frames,
     contextRequests,
     get contextAttempts() { return contextAttempts; },
+    get geometryReads() { return geometryReads; },
     listenerCount() {
       return [...hostListeners.values()].reduce((sum, listeners) => sum + listeners.size, 0)
         + [...windowListeners.values()].reduce((sum, listeners) => sum + listeners.size, 0)
@@ -270,6 +289,7 @@ function runtime(options: {
         + resizeObservers.size;
     },
     setNow(value: number) { now = value; },
+    setHostPosition(left: number, top: number) { hostLeft = left; hostTop = top; },
     runFrame(value: number) {
       now = value;
       const pending = [...frames.values()];
@@ -443,6 +463,73 @@ test("pointer MeshLine trail follows reduced-motion, fine-pointer, and pointer-t
   app.host.dispatch("pointermove", { pointerType: "pen", clientX: 180, clientY: 210 });
   assert.equal(app.host.children.length, 0);
   assert.equal(app.frames.size, 0);
+});
+
+test("wheel and scroll never create or restart a stationary pointer trail", () => {
+  const cold = runtime();
+  cold.context.PointerSilkTrail.create({ host: cold.host, enabled: true });
+  cold.window.dispatch("scroll");
+  cold.host.dispatch("pointermove", {
+    pointerType: "mouse", clientX: 180, clientY: 210, movementX: 0, movementY: 0,
+  });
+  assert.equal(cold.contextAttempts, 0, "a zero-delta pointermove synthesized after scrolling stays cold");
+  cold.host.dispatch("pointermove", {
+    pointerType: "mouse", clientX: 181, clientY: 210, movementX: 1, movementY: 0,
+  });
+  assert.equal(cold.contextAttempts, 1);
+
+  const idle = runtime();
+  const idleTrail = idle.context.PointerSilkTrail.create({ host: idle.host, enabled: true });
+  idle.host.dispatch("pointerenter", { pointerType: "mouse", clientX: 180, clientY: 210 });
+  idle.host.dispatch("wheel", { clientX: 180, clientY: 210, deltaY: 120 });
+  idle.window.dispatch("scroll");
+  idle.host.dispatch("pointermove", { pointerType: "mouse", clientX: 180, clientY: 210 });
+  assert.equal(idle.contextAttempts, 0);
+  assert.equal(idle.host.children.length, 0);
+  assert.equal(idle.frames.size, 0);
+
+  idle.host.dispatch("pointermove", { pointerType: "mouse", clientX: 181, clientY: 210 });
+  assert.equal(idle.contextAttempts, 1);
+  assert.equal(idle.frames.size, 1);
+  idleTrail.destroy();
+
+  const active = runtime();
+  const activeTrail = active.context.PointerSilkTrail.create({ host: active.host, enabled: true });
+  active.host.dispatch("pointermove", { pointerType: "mouse", clientX: 240, clientY: 260 });
+  active.runFrame(16);
+  const uploadsBeforeScroll = active.gl.uploads;
+  const geometryReadsBeforeScroll = active.geometryReads;
+  const canvasWidthBeforeScroll = active.host.children[0].width;
+  active.setHostPosition(40, 120);
+  active.host.dispatch("wheel", { clientX: 240, clientY: 260, deltaY: 120 });
+  active.window.dispatch("scroll");
+  active.window.dispatch("scroll");
+  active.window.dispatch("scroll");
+  assert.equal(active.frames.size, 0, "scroll clears an active tail immediately");
+  assert.equal(active.geometryReads, geometryReadsBeforeScroll,
+    "scroll bursts defer geometry reads and backing updates until real movement");
+  assert.equal(active.host.children[0].width, canvasWidthBeforeScroll);
+
+  active.host.dispatch("pointermove", {
+    pointerType: "mouse", clientX: 240, clientY: 260, movementX: 0, movementY: 0,
+  });
+  assert.equal(active.frames.size, 0, "stationary pointermove synthesized by scrolling stays ignored");
+  assert.equal(active.gl.uploads, uploadsBeforeScroll);
+  active.host.dispatch("pointermove", {
+    pointerType: "mouse", clientX: 241, clientY: 260, movementX: 1, movementY: 0,
+  });
+  assert.equal(active.frames.size, 1, "a later physical coordinate change may start a fresh tail");
+  assert.equal(active.geometryReads, geometryReadsBeforeScroll + 1,
+    "the first real movement refreshes the shifted host geometry exactly once");
+  const attemptsBeforeDestroy = active.contextAttempts;
+  activeTrail.destroy();
+  active.host.dispatch("wheel", { clientX: 241, clientY: 260, deltaY: 120 });
+  active.window.dispatch("scroll");
+  active.host.dispatch("pointermove", {
+    pointerType: "mouse", clientX: 250, clientY: 260, movementX: 9, movementY: 0,
+  });
+  assert.equal(active.contextAttempts, attemptsBeforeDestroy);
+  assert.equal(active.frames.size, 0);
 });
 
 test("pointer MeshLine trail keeps suspension reasons isolated and switches all four colors", () => {

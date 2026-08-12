@@ -819,8 +819,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /app-icon\.png\?v=2/);
   assert.match(pageText, /styles\.css\?v=72/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=82/);
+  assert.match(pageText, /pointer-silk-trail\.js\?v=7/);
+  assert.match(pageText, /app\.js\?v=83/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);

@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。`v1.3.3` 已复验 `npm run check`、`npm test`（608/608，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、`npm run icons:check`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖 390–1481px 全部品牌布局断点、Windows 150% 缩放对应视口及双平台快速切换，console warning/error 为零；2048×1220 高纵向桌面下四个表格型面板占满主区余高，900×640 与 390×844 保持纵向滚动且无横向溢出。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。`v1.3.4` 已复验 `npm run check`、`npm test`（610/610，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、`npm run icons:check`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖 390–1481px 全部品牌布局断点、Windows 150% 缩放对应视口及双平台快速切换，console warning/error 为零；2048×1220 高纵向桌面下四个表格型面板占满主区余高，900×640 与 390×844 保持纵向滚动且无横向溢出。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
 
 ## 未修复的 P1
 

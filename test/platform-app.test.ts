@@ -65,13 +65,18 @@ test("background update discovery reveals the trigger without opening the dialog
   vm.runInNewContext(`
     var nativeUpdateState;
     var availableWebUpdate;
+    var updateCheckInFlight;
+    var lastUpdateCheckAt = 0;
     ${extractFunction("checkUpdates")}
     ${extractFunction("openAvailableUpdate")}
     globalThis.apiUnderTest = { checkUpdates, openAvailableUpdate };
   `, context);
   const api = context.apiUnderTest as { checkUpdates(notify?: boolean): Promise<void>; openAvailableUpdate(): void };
 
-  await api.checkUpdates(false);
+  const firstCheck = api.checkUpdates(false);
+  const overlappingCheck = api.checkUpdates(false);
+  assert.equal(overlappingCheck, firstCheck, "overlapping background checks must share one request");
+  await Promise.all([firstCheck, overlappingCheck]);
   assert.equal(apiCalls, 1);
   assert.equal((context.el as { updateButton: { hidden: boolean } }).updateButton.hidden, false);
   assert.equal(classes.has("available"), true);
@@ -82,6 +87,68 @@ test("background update discovery reveals the trigger without opening the dialog
   assert.equal(apiCalls, 1, "opening a discovered update reuses the cached snapshot");
   assert.equal(renders, 2);
   assert.equal(dialogOpens, 1);
+});
+
+test("update polling checks every 30 minutes only while the page is active", async () => {
+  let timerId = 0;
+  let now = 10_000;
+  const timers = new Map<number, { callback: () => Promise<void>; delay: number }>();
+  const context: Record<string, unknown> = {
+    document: { hidden: false },
+    Date: { now: () => now },
+    Math,
+    clearTimeout(id: number | undefined) { if (id !== undefined) timers.delete(id); },
+    setTimeout(callback: () => Promise<void>, delay: number) {
+      const id = ++timerId;
+      timers.set(id, { callback, delay });
+      return id;
+    },
+    async checkUpdates(notify: boolean) {
+      assert.equal(notify, false, "polling must remain silent");
+      context.checkCalls = Number(context.checkCalls || 0) + 1;
+    },
+    checkCalls: 0,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    var UPDATE_POLL_INTERVAL_MS = 30 * 60_000;
+    var updatePollTimer;
+    var lastUpdateCheckAt = 0;
+    var pageLifecycleSuspended = false;
+    ${extractFunction("stopUpdatePolling")}
+    ${extractFunction("scheduleUpdatePolling")}
+    ${extractFunction("resumeUpdatePolling")}
+    globalThis.pollingUnderTest = { scheduleUpdatePolling, resumeUpdatePolling, stopUpdatePolling };
+  `, context);
+  const polling = context.pollingUnderTest as {
+    scheduleUpdatePolling(delay?: number): void;
+    resumeUpdatePolling(): void;
+    stopUpdatePolling(): void;
+  };
+
+  polling.scheduleUpdatePolling();
+  assert.equal(timers.size, 1);
+  let scheduled = [...timers.values()][0];
+  assert.equal(scheduled.delay, 30 * 60_000);
+  timers.clear();
+  await scheduled.callback();
+  assert.equal(context.checkCalls, 1);
+  assert.equal(timers.size, 1, "a completed poll schedules the next interval");
+
+  (context.document as { hidden: boolean }).hidden = true;
+  polling.resumeUpdatePolling();
+  assert.equal(timers.size, 0, "hidden pages do not retain an update timer");
+
+  (context.document as { hidden: boolean }).hidden = false;
+  context.lastUpdateCheckAt = now - 30 * 60_000;
+  polling.resumeUpdatePolling();
+  scheduled = [...timers.values()][0];
+  assert.equal(scheduled.delay, 0, "returning after an elapsed interval checks immediately");
+
+  now += 1;
+  context.pageLifecycleSuspended = true;
+  polling.scheduleUpdatePolling();
+  assert.equal(timers.size, 0, "pagehide suspension cancels polling");
 });
 
 test("native updater keeps the trigger hidden until a newer version is known", () => {
