@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   AuthenticationRequired,
   CooldownRequired,
+  PartialSongCatalogError,
   RequestBudgetExhausted,
   RequestExecutionError,
   RunCancelled,
@@ -110,6 +111,27 @@ test("turns 403 into a persistent cooldown signal without retry", async () => {
     CooldownRequired,
   );
   assert.equal(calls, 1);
+});
+
+test("does not retry a deterministic partial song catalog", async () => {
+  const fake = fakeRuntime();
+  const governor = new RequestGovernor({
+    minDelayMs: 0,
+    jitterMs: 0,
+    maxRetries: 9,
+    forbiddenCooldownMs: 60_000,
+    requestBudget: 20,
+  }, fake.runtime);
+  let calls = 0;
+  await assert.rejects(
+    governor.execute("target_likes_tracks", async () => {
+      calls += 1;
+      throw new PartialSongCatalogError([{ id: "1" }], 2, 1, "partial catalog");
+    }),
+    PartialSongCatalogError,
+  );
+  assert.equal(calls, 1);
+  assert.deepEqual(fake.sleeps, []);
 });
 
 test("preserves a terminal upstream status for higher-level error handling", async () => {

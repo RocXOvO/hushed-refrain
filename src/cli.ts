@@ -50,8 +50,8 @@ Scan options:
   --max-comment-pages-per-song N     default: 0 (all top-level pages; floor replies use request budget)
   --max-songs N                      default: 0 (all source songs)
   --request-budget N                 default: 250 per run
-  --min-delay-ms N                   default: 2500
-  --jitter-ms N                      default: 800
+  --min-delay-ms N                   default: 300 between starts on one exit
+  --jitter-ms N                      default: 100 (actual range 300-399 ms)
   --max-retries N                    default: 3 (network/5xx only)
   --forbidden-cooldown-ms N          default: 900000
   --no-comment-floors                scan top-level comments only
@@ -72,8 +72,8 @@ Parallel song options:
   --end-time TIME                   epoch milliseconds or ISO date
   --request-budget N                default: 5000
   --max-pages N                     default: 0 (all top-level pages; floor replies use request budget)
-  --min-delay-ms N                  default: 111 between starts on one exit
-  --jitter-ms N                     default: 34 added to that start interval
+  --min-delay-ms N                  default: 300 between starts on one exit
+  --jitter-ms N                     default: 100 (actual range 300-399 ms)
   --no-comment-floors               scan top-level comments only
   --stop-after-first
   --fresh
@@ -210,8 +210,8 @@ async function scanSongCommand(args: string[]): Promise<void> {
       "end-time": { type: "string" },
       "request-budget": { type: "string", default: "5000" },
       "max-pages": { type: "string", default: "0" },
-      "min-delay-ms": { type: "string", default: "111" },
-      "jitter-ms": { type: "string", default: "34" },
+      "min-delay-ms": { type: "string", default: "300" },
+      "jitter-ms": { type: "string", default: "100" },
       "max-retries": { type: "string", default: "2" },
       "forbidden-cooldown-ms": { type: "string", default: "900000" },
       output: { type: "string" },
@@ -371,8 +371,8 @@ async function scanCommand(args: string[]): Promise<void> {
       "max-comment-pages-per-song": { type: "string", default: "0" },
       "max-songs": { type: "string", default: "0" },
       "request-budget": { type: "string", default: "250" },
-      "min-delay-ms": { type: "string", default: "2500" },
-      "jitter-ms": { type: "string", default: "800" },
+      "min-delay-ms": { type: "string", default: "300" },
+      "jitter-ms": { type: "string", default: "100" },
       "max-retries": { type: "string", default: "3" },
       "forbidden-cooldown-ms": { type: "string", default: "900000" },
       proxy: { type: "string" },

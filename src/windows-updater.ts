@@ -78,7 +78,16 @@ export class WindowsUpdateController {
 
   async check(): Promise<WindowsUpdateState> {
     if (["checking", "downloading", "downloaded"].includes(this.state.phase)) return this.getState();
-    this.setState({ supported: true, phase: "checking", currentVersion: this.state.currentVersion });
+    this.setState({
+      ...this.state,
+      supported: true,
+      phase: "checking",
+      error: undefined,
+      percent: undefined,
+      transferred: undefined,
+      total: undefined,
+      bytesPerSecond: undefined,
+    });
     try {
       await this.updater.checkForUpdates();
     } catch (error) {
@@ -106,7 +115,16 @@ export class WindowsUpdateController {
 
   private bindEvents(): void {
     this.updater.on("checking-for-update", () => {
-      this.setState({ supported: true, phase: "checking", currentVersion: this.state.currentVersion });
+      this.setState({
+        ...this.state,
+        supported: true,
+        phase: "checking",
+        error: undefined,
+        percent: undefined,
+        transferred: undefined,
+        total: undefined,
+        bytesPerSecond: undefined,
+      });
     });
     this.updater.on("update-available", (info: UpdateInfoLike) => {
       this.setState({
@@ -116,12 +134,11 @@ export class WindowsUpdateController {
         ...releaseFields(info),
       });
     });
-    this.updater.on("update-not-available", (info: UpdateInfoLike) => {
+    this.updater.on("update-not-available", () => {
       this.setState({
         supported: true,
         phase: "up-to-date",
         currentVersion: this.state.currentVersion,
-        ...releaseFields(info),
       });
     });
     this.updater.on("download-progress", (progress: ProgressInfoLike) => {

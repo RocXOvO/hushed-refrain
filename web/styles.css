@@ -1398,8 +1398,8 @@ summary:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 76%,
   .top-actions .button { width: 34px; padding: 0; }
   .topbar-end { width: 75px; justify-content: flex-end; }
   .app-shell { min-height: calc(100vh - 56px); display: block; }
-  .navigation-rail { min-height: auto; height: 50px; position: sticky; z-index: 80; top: 56px; padding: 6px 8px; flex-direction: row; border-right: 0; border-bottom: 1px solid #343539; }
-  .navigation-list { width: 100%; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; }
+  .navigation-rail { min-height: auto; height: 50px; position: sticky; z-index: 80; top: 56px; padding: 6px 8px; flex-direction: row; justify-content: space-between; border-right: 0; border-bottom: 1px solid #343539; }
+  .navigation-list { width: 40px; flex: 0 0 40px; display: grid; grid-template-columns: 40px; gap: 4px; }
   .navigation-footer { width: 40px; flex: 0 0 40px; margin-top: 0; }
   .navigation-item { width: 100%; min-height: 37px; height: 37px; }
   .navigation-item.active::before { width: 20px; height: 3px; inset: auto auto -7px 50%; transform: translateX(-50%); border-radius: 3px 3px 0 0; }

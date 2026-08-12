@@ -2,6 +2,7 @@ import {
   AuthenticationRequired,
   CooldownRequired,
   isSourcePrivacyRestricted,
+  PartialSongCatalogError,
   RequestBudgetExhausted,
   RunCancelled,
 } from "./errors";
@@ -1493,6 +1494,7 @@ async function collectSongs(
   const notices: string[] = [];
   let availableSources = 0;
   if (options.source === "record" || options.source === "both" || options.source === "all") {
+    publishCatalogActivity(options, "正在读取目标用户的听歌排行…", governor.requestsUsed);
     try {
       const record = await collectRecordSongs(options, (label, scope) =>
         governor.execute(label, () => client.getUserRecord(options.uid, scope, options.cookie))
@@ -1509,6 +1511,7 @@ async function collectSongs(
     }
   }
   if (options.source === "likes" || options.source === "both" || options.source === "all") {
+    publishCatalogActivity(options, "正在读取目标用户的喜欢歌曲目录…", governor.requestsUsed);
     try {
       batches.push(await collectTargetLikedSongs(client, options, (label, request) =>
         governor.execute(label, request)
@@ -1516,12 +1519,17 @@ async function collectSongs(
       availableSources += 1;
     } catch (error) {
       if (isPauseSignal(error)) throw error;
-      if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("likes"));
+      if (error instanceof PartialSongCatalogError) {
+        batches.push(error.songs as SongCandidate[]);
+        notices.push(error.message);
+        availableSources += 1;
+      } else if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("likes"));
       else if (options.source === "likes") throw error;
       else failures.push(`likes: ${errorMessage(error)}`);
     }
   }
   if (options.source === "playlists" || options.source === "all") {
+    publishCatalogActivity(options, "正在读取目标用户的公开自建歌单…", governor.requestsUsed);
     try {
       const playlists = await collectTargetUserPlaylistSongs(client, options, (label, request) =>
         governor.execute(label, request)
@@ -1538,6 +1546,7 @@ async function collectSongs(
   if (availableSources === 0 && failures.length > 0) {
     throw new Error(`All selected song sources failed: ${failures.join("; ")}`);
   }
+  publishCatalogActivity(options, "歌曲目录读取完成，正在准备评论扫描…", governor.requestsUsed);
   return { songs: mergeSongs(batches.flat()), failures, notices, available: availableSources > 0 };
 }
 
@@ -1550,6 +1559,7 @@ async function collectSongsPooled(
   const notices: string[] = [];
   let availableSources = 0;
   if (options.source === "record" || options.source === "both" || options.source === "all") {
+    publishCatalogActivity(options, "正在读取目标用户的听歌排行…", pooledRequestsUsed(lanes));
     try {
       const record = await collectRecordSongs(options, (label, scope) =>
         requestFromPool(lanes, label, (client) => client.getUserRecord(options.uid, scope, options.cookie))
@@ -1566,17 +1576,23 @@ async function collectSongsPooled(
     }
   }
   if (options.source === "likes" || options.source === "both" || options.source === "all") {
+    publishCatalogActivity(options, "正在读取目标用户的喜欢歌曲目录…", pooledRequestsUsed(lanes));
     try {
       batches.push(await collectTargetLikedSongsPooled(lanes, options));
       availableSources += 1;
     } catch (error) {
       if (isPauseSignal(error)) throw error;
-      if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("likes"));
+      if (error instanceof PartialSongCatalogError) {
+        batches.push(error.songs as SongCandidate[]);
+        notices.push(error.message);
+        availableSources += 1;
+      } else if (isSourcePrivacyRestricted(error)) notices.push(sourcePrivacyNotice("likes"));
       else if (options.source === "likes") throw error;
       else failures.push(`likes: ${errorMessage(error)}`);
     }
   }
   if (options.source === "playlists" || options.source === "all") {
+    publishCatalogActivity(options, "正在读取目标用户的公开自建歌单…", pooledRequestsUsed(lanes));
     try {
       const playlists = await collectTargetUserPlaylistSongsPooled(lanes, options);
       batches.push(playlists.songs);
@@ -1591,6 +1607,7 @@ async function collectSongsPooled(
   if (availableSources === 0 && failures.length > 0) {
     throw new Error(`All selected song sources failed: ${failures.join("; ")}`);
   }
+  publishCatalogActivity(options, "歌曲目录读取完成，正在准备评论扫描…", pooledRequestsUsed(lanes));
   return { songs: mergeSongs(batches.flat()), failures, notices, available: availableSources > 0 };
 }
 
@@ -1637,6 +1654,7 @@ async function requestFromPool<T>(
         error instanceof AuthenticationRequired ||
         error instanceof RequestBudgetExhausted ||
         error instanceof RunCancelled ||
+        error instanceof PartialSongCatalogError ||
         isSourcePrivacyRestricted(error)
       ) throw error;
       lastError = error;
@@ -2336,6 +2354,14 @@ function publishSongCatalog(options: ScanOptions, songs: readonly SongCandidate[
     options.onSongCatalog?.(songs);
   } catch {
     // Optional UI metadata must never interrupt scanning.
+  }
+}
+
+function publishCatalogActivity(options: ScanOptions, message: string, requestsUsed: number): void {
+  try {
+    options.onCatalogActivity?.({ message, requestsUsed });
+  } catch {
+    // Presentation callbacks are best-effort and must not interrupt discovery.
   }
 }
 

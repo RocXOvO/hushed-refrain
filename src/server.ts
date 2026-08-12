@@ -10,6 +10,7 @@ import { CommentRateTracker } from "./comment-rate";
 import {
   AuthenticationRequired,
   CooldownRequired,
+  PartialSongCatalogError,
   RunCancelled,
   SourcePrivacyRestricted,
   errorStatus,
@@ -655,8 +656,8 @@ class JobManager {
     const recordScope = selection(input.recordScope ?? "all", ["all", "week", "both"] as const, "recordScope");
     const commentScope = requestedCommentScope(input.includeCommentFloors);
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
-    const minDelayMs = integer(input.minDelayMs ?? 2_500, "minDelayMs", 0, 600_000);
-    const jitterMs = integer(input.jitterMs ?? 800, "jitterMs", 0, 600_000);
+    const minDelayMs = integer(input.minDelayMs ?? 300, "minDelayMs", 0, 600_000);
+    const jitterMs = integer(input.jitterMs ?? 100, "jitterMs", 0, 600_000);
     const commentPageSize = integer(input.pageSize ?? 1_000, "pageSize", 1, 2_000);
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const maxCommentPagesPerSong = integer(input.maxCommentPagesPerSong ?? 0, "maxCommentPagesPerSong", 0, 1_000_000);
@@ -766,7 +767,18 @@ class JobManager {
           if (song.name) this.songNameById.set(song.id, song.name);
         }
       },
+      onCatalogActivity: (activity) => {
+        if (this.snapshotValue.id !== activeId || this.snapshotValue.status !== "running") return;
+        this.snapshotValue = {
+          ...this.snapshotValue,
+          note: activity.message,
+          requestsTotal: Math.max(this.snapshotValue.requestsTotal, activity.requestsUsed),
+        };
+      },
       onRequestActivity: (activity) => {
+        if (activity.phase === "start" && this.snapshotValue.id === activeId) {
+          this.snapshotValue = { ...this.snapshotValue, note: undefined };
+        }
         this.pagePerformance.record(activity);
         if (activity.phase === "success") this.commentRate.record(activity.comments ?? 0);
         logger.request(activity);
@@ -1219,8 +1231,8 @@ class ParallelJobManager {
     const pageSize = integer(input.pageSize ?? 1_000, "pageSize", 1, 2_000);
     const requestBudget = integer(input.requestBudget ?? 0, "requestBudget", 0, 100_000);
     const maxPages = integer(input.maxPages ?? 0, "maxPages", 0, 1_000_000);
-    const minDelayMs = integer(input.minDelayMs ?? 111, "minDelayMs", 0, 600_000);
-    const jitterMs = integer(input.jitterMs ?? 34, "jitterMs", 0, 600_000);
+    const minDelayMs = integer(input.minDelayMs ?? 300, "minDelayMs", 0, 600_000);
+    const jitterMs = integer(input.jitterMs ?? 100, "jitterMs", 0, 600_000);
     const forbiddenCooldownMs = integer(input.forbiddenCooldownMs ?? 900_000, "forbiddenCooldownMs", 1_000, 86_400_000);
     const pool = await readProxyPool(this.paths.pool);
     if (!pool || !proxyPoolStatusRunning(pool)) throw new HttpError(409, "代理池尚未运行。");
@@ -1992,11 +2004,7 @@ async function route(
         serialRequestChain ? 1 : Math.min(estimateLanes * estimateWorkersPerLane, hostConcurrency),
       )
       : undefined;
-    const defaultEstimateSpacing = estimatePlatform === "qq"
-      ? { minDelayMs: 300, jitterMs: 100 }
-      : estimateMode === "parallel"
-        ? { minDelayMs: 111, jitterMs: 34 }
-        : { minDelayMs: 2_500, jitterMs: 800 };
+    const defaultEstimateSpacing = { minDelayMs: 300, jitterMs: 100 };
     return json(response, 200, estimateCommentScan({
       platform: estimatePlatform,
       comments: integer(url.searchParams.get("comments") ?? 100_000, "comments", 0, 100_000_000),
@@ -2395,6 +2403,14 @@ export async function probeUser(uid: string, proxy: string | undefined, cookiePa
         })();
       return { status: "available", songs: songs.length };
     } catch (error) {
+      if (error instanceof PartialSongCatalogError) {
+        return {
+          status: "available",
+          songs: error.songs.length,
+          complete: false,
+          error: error.message,
+        };
+      }
       return {
         status: isSourcePrivacyRestricted(error)
           ? "private"

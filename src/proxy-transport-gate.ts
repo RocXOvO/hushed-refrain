@@ -1,4 +1,4 @@
-import { errorStatus, RunCancelled } from "./errors";
+import { errorStatus, PartialSongCatalogError, RunCancelled } from "./errors";
 import type { RequestGovernor } from "./governor";
 
 export const DEFAULT_PROXY_TRANSPORT_MAX_CONCURRENT = 8;
@@ -248,7 +248,7 @@ export class ProxyTransportGate {
 }
 
 function isTransientTransportFailure(error: unknown): boolean {
-  if (error instanceof RunCancelled) return false;
+  if (error instanceof RunCancelled || error instanceof PartialSongCatalogError) return false;
   const status = errorStatus(error);
   return status === undefined || status === 408 || status === 425 || (status >= 500 && status <= 599);
 }

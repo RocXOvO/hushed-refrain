@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import upstream = require("@neteasecloudmusicapienhanced/api");
 import { EnhancedNcmClient } from "../src/api";
-import { ApiResponseError, AuthenticationRequired, SourcePrivacyRestricted } from "../src/errors";
+import {
+  ApiResponseError,
+  AuthenticationRequired,
+  PartialSongCatalogError,
+  SourcePrivacyRestricted,
+} from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 
 test("searches NetEase songs through cloudsearch and normalizes lookup metadata", async () => {
@@ -389,7 +394,7 @@ test("accepts disagreeing liked-song declarations when the unique ID vector sati
   }
 });
 
-test("rejects a liked-song ID vector that is shorter than either declared count", async () => {
+test("returns a deterministic partial catalog when valid liked-song IDs are fewer than declared", async () => {
   const mutable = upstream as unknown as {
     user_playlist: (params: Record<string, unknown>) => Promise<unknown>;
     playlist_detail: (params: Record<string, unknown>) => Promise<unknown>;
@@ -413,11 +418,12 @@ test("rejects a liked-song ID vector that is shorter than either declared count"
   try {
     await assert.rejects(
       new EnhancedNcmClient().getLikedSongs("42"),
-      (error: unknown) => error instanceof ApiResponseError
-        && error.status === 502
-        && /列表声明 3 首/.test(error.message)
-        && /详情声明 2 首/.test(error.message)
-        && /2 个有效唯一 ID/.test(error.message),
+      (error: unknown) => error instanceof PartialSongCatalogError
+        && error.declaredCount === 3
+        && error.missingCount === 1
+        && error.songs.length === 2
+        && (error.songs[0] as { id?: string }).id === "101"
+        && /2 \/ 3 首可访问歌曲/.test(error.message),
     );
   } finally {
     mutable.user_playlist = originalListing;
@@ -596,7 +602,6 @@ test("requires explicit trackIds even when a liked-playlist detail declares zero
 
 for (const [label, playlist] of [
   ["missing trackIds", { creator: { userId: 42 }, trackCount: 2 }],
-  ["truncated trackIds", { creator: { userId: 42 }, trackCount: 2, trackIds: [{ id: 1 }] }],
   ["malformed trackIds", { creator: { userId: 42 }, trackCount: 1, trackIds: [{}] }],
 ] as const) {
   test(`rejects ${label} instead of checkpointing a partial liked-song catalog`, async () => {

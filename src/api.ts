@@ -1,5 +1,10 @@
 import api = require("@neteasecloudmusicapienhanced/api");
-import { ApiResponseError, AuthenticationRequired, SourcePrivacyRestricted } from "./errors";
+import {
+  ApiResponseError,
+  AuthenticationRequired,
+  PartialSongCatalogError,
+  SourcePrivacyRestricted,
+} from "./errors";
 import type {
   CommentPage,
   CommentFloorPage,
@@ -198,12 +203,21 @@ export class EnhancedNcmClient implements NcmClient {
     if (ownerId !== uid) {
       throw new ApiResponseError("喜欢歌单所属用户与目标 UID 不一致，已阻止使用错误的登录账号数据", 409, body);
     }
-    const uniqueIds = validatedPlaylistSongIds(target.trackCount, playlist, body, "目标用户喜欢歌单");
-    return uniqueIds.map((id, index) => ({
+    const catalog = validatedPlaylistSongIds(target.trackCount, playlist, body, "目标用户喜欢歌单", true);
+    const songs = catalog.ids.map((id, index) => ({
       id,
       sources: ["likes" as const],
       sourceRank: index + 1,
     }));
+    if (catalog.missingCount > 0) {
+      throw new PartialSongCatalogError<SongCandidate>(
+        songs,
+        catalog.declaredCount!,
+        catalog.missingCount,
+        `喜欢歌曲目录仅返回 ${songs.length} / ${catalog.declaredCount} 首可访问歌曲；缺少的 ${catalog.missingCount} 首可能已下架或当前不可见，本次将继续扫描可访问歌曲，完整覆盖保持为否。`,
+      );
+    }
+    return songs;
   }
 
   async getTargetUserPlaylistPage(
@@ -261,7 +275,7 @@ export class EnhancedNcmClient implements NcmClient {
     if (stringId(object(playlist.creator).userId) !== uid) {
       throw new ApiResponseError("用户歌单所属用户与目标 UID 不一致", 409, body);
     }
-    return validatedPlaylistSongIds(target.trackCount, playlist, body, `用户歌单「${target.name ?? target.id}」`)
+    return validatedPlaylistSongIds(target.trackCount, playlist, body, `用户歌单「${target.name ?? target.id}」`).ids
       .map((id, index) => ({ id, sources: ["playlists" as const], sourceRank: index + 1 }));
   }
 
@@ -618,7 +632,8 @@ function validatedPlaylistSongIds(
   playlist: JsonObject,
   response: unknown,
   label: string,
-): string[] {
+  allowAccessibleSubset = false,
+): { ids: string[]; declaredCount?: number; missingCount: number } {
   const listingCount = playlistTrackCount(listingTrackCount, "列表", response);
   const detailCount = playlistTrackCount(playlist.trackCount, "详情", response);
   if (!Array.isArray(playlist.trackIds)) {
@@ -639,6 +654,13 @@ function validatedPlaylistSongIds(
     detailCount === undefined ? undefined : `详情声明 ${detailCount} 首`,
   ].filter((value): value is string => Boolean(value));
   if (minimumCompleteCount !== undefined && uniqueIds.length < minimumCompleteCount) {
+    if (allowAccessibleSubset && uniqueIds.length > 0) {
+      return {
+        ids: uniqueIds,
+        declaredCount: minimumCompleteCount,
+        missingCount: minimumCompleteCount - uniqueIds.length,
+      };
+    }
     throw new ApiResponseError(
       `${label}响应不完整：${declarations.join("，")}，实际返回 ${uniqueIds.length} 个有效唯一 ID`,
       502,
@@ -652,7 +674,7 @@ function validatedPlaylistSongIds(
       response,
     );
   }
-  return uniqueIds;
+  return { ids: uniqueIds, declaredCount: minimumCompleteCount, missingCount: 0 };
 }
 
 function positiveDecimalId(value: unknown): string | undefined {

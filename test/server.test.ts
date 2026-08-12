@@ -800,7 +800,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="taskPanelOpenButton"/);
   assert.match(pageText, /id="taskExitLimit"[^>]*min="0"[^>]*max="32"/);
   assert.match(pageText, /id="taskHostConcurrency"[^>]*min="1"[^>]*max="32"[^>]*value="8"/);
-  assert.match(pageText, /data-nav-view="activity"/);
+  const primaryNavigation = pageText.match(/<aside id="primaryNavigation"[\s\S]*?<\/aside>/)?.[0] ?? "";
+  assert.equal((primaryNavigation.match(/data-nav-view=/g) ?? []).length, 1);
+  assert.match(primaryNavigation, /data-nav-view="search"/);
+  assert.doesNotMatch(primaryNavigation, /data-nav-view="(?:results|activity|pool|logs)"/);
   assert.match(pageText, /id="activityPanel"/);
   assert.match(pageText, /id="activeSongCount"/);
   assert.match(pageText, /id="activeWorkerCount"/);
@@ -814,10 +817,10 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /每出口请求启动间隔/);
   assert.match(pageText, /请求上限（0不限）/);
   assert.match(pageText, /app-icon\.png\?v=2/);
-  assert.match(pageText, /styles\.css\?v=71/);
+  assert.match(pageText, /styles\.css\?v=72/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
   assert.match(pageText, /pointer-silk-trail\.js\?v=6/);
-  assert.match(pageText, /app\.js\?v=81/);
+  assert.match(pageText, /app\.js\?v=82/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
   assert.match(pageText, /id="recordScopeRegion"[^>]*class="source-scope-region"/);
@@ -828,6 +831,15 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /id="cancelPdfExportButton"/);
   assert.doesNotMatch(pageText, /transitionModeButton|对角积木波|中心涟漪/);
   assert.match(pageText, /id="loginButton"[^>]+aria-label="二维码登录"/);
+  assert.match(pageText, /id="updateButton"[^>]*hidden/);
+  assert.equal((pageText.match(/name="minDelayMs"[^>]*value="300"/g) ?? []).length, 4);
+  assert.equal((pageText.match(/name="jitterMs"[^>]*value="100"/g) ?? []).length, 4);
+  const uidHelpMarkup = pageText.match(/<dialog id="uidHelpDialog"[\s\S]*?<\/dialog>/)?.[0] ?? "";
+  assert.match(uidHelpMarkup, /在浏览器打开网易云音乐网页版/);
+  assert.match(uidHelpMarkup, /进入要查找的用户主页/);
+  assert.match(uidHelpMarkup, /浏览器地址栏/);
+  assert.match(uidHelpMarkup, /<code>id=<\/code>/);
+  assert.doesNotMatch(uidHelpMarkup, /客户端|分享/);
   assert.match(pageText, /id="globalPlatformSwitch"[^>]*role="tablist"/);
   assert.match(pageText, /data-platform-target="netease"[^>]*aria-controls="neteaseWorkbench"/);
   assert.match(pageText, /data-platform-target="qq"[^>]*aria-controls="qqWorkbench"/);
@@ -904,6 +916,15 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(app.status, 200);
   const appText = await app.text();
   const serverSource = await readFile(resolve("src/server.ts"), "utf8");
+  const cliSource = await readFile(resolve("src/cli.ts"), "utf8");
+  const qqManagerSource = await readFile(resolve("src/qq-job-manager.ts"), "utf8");
+  assert.equal((serverSource.match(/input\.minDelayMs \?\? 300/g) ?? []).length, 2);
+  assert.equal((serverSource.match(/input\.jitterMs \?\? 100/g) ?? []).length, 2);
+  assert.match(serverSource, /defaultEstimateSpacing = \{ minDelayMs: 300, jitterMs: 100 \}/);
+  assert.equal((cliSource.match(/"min-delay-ms": \{ type: "string", default: "300" \}/g) ?? []).length, 2);
+  assert.equal((cliSource.match(/"jitter-ms": \{ type: "string", default: "100" \}/g) ?? []).length, 2);
+  assert.match(qqManagerSource, /input\.minDelayMs \?\? 300/);
+  assert.match(qqManagerSource, /input\.jitterMs \?\? 100/);
   assert.match(appText, /year:\s*"numeric"/);
   assert.match(appText, /clockDuration/);
   assert.match(appText, /renderRuntimeTimer/);
@@ -1233,6 +1254,8 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(appText, /async function animateDisclosure[\s\S]{0,900}classList\.contains\("platform-switching"\)/);
   assert.match(styleText, /\.navigation-rail\s*\{[^}]*overflow-y:\s*auto/s);
   assert.match(styleText, /@media \(max-width:\s*820px\)[\s\S]*?height:\s*calc\(100dvh - 126px\)/s);
+  assert.match(styleText, /@media \(max-width:\s*820px\)[\s\S]*?\.navigation-rail\s*\{[^}]*justify-content:\s*space-between/s);
+  assert.match(styleText, /@media \(max-width:\s*820px\)[\s\S]*?\.navigation-list\s*\{[^}]*width:\s*40px[^}]*grid-template-columns:\s*40px/s);
   assert.match(styleText, /\.task-command-bar > \*\s*\{[^}]*min-width:\s*0/s);
   assert.match(styleText, /@container \(max-width:\s*560px\)[\s\S]*?\.toolbar-context > \.toolbar-topology\s*\{[^}]*flex-basis:\s*100%/s);
   assert.match(appText, /!collapsed && inspectorOverlayQuery\.matches && !document\.body\.classList\.contains\("inspector-collapsed"\)/);
@@ -1298,12 +1321,12 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(estimate.status, 200);
   const value = await estimate.json() as { pages: number; expectedSeconds: number };
   assert.equal(value.pages, 500);
-  assert.equal(value.expectedSeconds, 1_450);
+  assert.equal(value.expectedSeconds, 200);
 
   const parallelDefaults = await fetch(`${base}/api/estimate?mode=parallel&comments=100000&pageSize=1000&lanes=4&workersPerLane=3&proxyTransport=1`);
   assert.equal(parallelDefaults.status, 200);
   const parallelDefaultValue = await parallelDefaults.json() as { expectedSeconds: number; proxyTransportStartDelayMs: number };
-  assert.equal(parallelDefaultValue.expectedSeconds, 5);
+  assert.equal(parallelDefaultValue.expectedSeconds, 9);
   assert.equal(parallelDefaultValue.proxyTransportStartDelayMs, 50);
 
   const qqDefaults = await fetch(`${base}/api/estimate?platform=qq&mode=likes&comments=100000&pageSize=25&partitions=10&lanes=8&workersPerLane=1&proxyTransport=1&hostConcurrency=8`);
@@ -1617,6 +1640,58 @@ test("reports liked songs available when explicit IDs are newer than declared co
   try {
     const result = await probeUser("42", undefined, join(tmpdir(), "missing-stale-count-cookie"));
     assert.deepEqual(result.likes, { status: "available", songs: 1106 });
+  } finally {
+    mutable.user_detail = originals.user_detail;
+    mutable.user_record = originals.user_record;
+    mutable.user_playlist = originals.user_playlist;
+    mutable.playlist_detail = originals.playlist_detail;
+  }
+});
+
+test("reports a valid shorter liked-song vector as partially available", async () => {
+  const mutable = upstream as unknown as {
+    user_detail: () => Promise<unknown>;
+    user_record: () => Promise<unknown>;
+    user_playlist: () => Promise<unknown>;
+    playlist_detail: () => Promise<unknown>;
+  };
+  const originals = {
+    user_detail: mutable.user_detail,
+    user_record: mutable.user_record,
+    user_playlist: mutable.user_playlist,
+    playlist_detail: mutable.playlist_detail,
+  };
+  mutable.user_detail = async () => ({
+    status: 200,
+    body: { code: 200, profile: { userId: 42, nickname: "user" } },
+  });
+  mutable.user_record = async () => ({ status: 200, body: { code: 200, allData: [] } });
+  mutable.user_playlist = async () => ({
+    status: 200,
+    body: {
+      code: 200,
+      more: false,
+      playlist: [{ id: 9, specialType: 5, trackCount: 3, creator: { userId: 42 } }],
+    },
+  });
+  mutable.playlist_detail = async () => ({
+    status: 200,
+    body: {
+      code: 200,
+      playlist: {
+        creator: { userId: 42 },
+        trackCount: 3,
+        trackIds: [{ id: 101 }, { id: 102 }],
+      },
+    },
+  });
+
+  try {
+    const result = await probeUser("42", undefined, join(tmpdir(), "missing-partial-liked-cookie"));
+    assert.equal(result.likes.status, "available");
+    assert.equal(result.likes.songs, 2);
+    assert.equal(result.likes.complete, false);
+    assert.match(result.likes.error ?? "", /2 \/ 3 首可访问歌曲/);
   } finally {
     mutable.user_detail = originals.user_detail;
     mutable.user_record = originals.user_record;

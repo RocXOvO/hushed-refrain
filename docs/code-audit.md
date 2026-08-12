@@ -1,6 +1,6 @@
 # 全局代码审计
 
-本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。`v1.3.2` 已复验 `npm run check`、`npm test`（601/601，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、`npm run icons:check`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖 390–1481px 全部品牌布局断点、Windows 150% 缩放对应视口及双平台快速切换，console warning/error 为零；2048×1220 高纵向桌面下四个表格型面板占满主区余高，900×640 与 390×844 保持纵向滚动且无横向溢出。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
+本文只记录当前主线仍成立的审计结论与修复验收边界，不把“已发现”写成“已修复”。`v1.3.3` 已复验 `npm run check`、`npm test`（608/608，0 fail / 0 cancelled）、`npm run build`、`npm run bench:qq`、`npm run icons:check`、三个 renderer 语法检查、`npm run desktop:smoke:mac` 和 `git diff --check` 全绿。真实本地浏览器验收覆盖 390–1481px 全部品牌布局断点、Windows 150% 缩放对应视口及双平台快速切换，console warning/error 为零；2048×1220 高纵向桌面下四个表格型面板占满主区余高，900×640 与 390×844 保持纵向滚动且无横向溢出。发布仍必须由同一精确提交的 Windows workflow/package、tag、Release target 和五项资产闭合；未发现新的 P0。
 
 ## 未修复的 P1
 
@@ -21,7 +21,7 @@
 
 - **覆盖账本逐歌全量重写。** 每首歌自然完成后，`persistSongCoverageIfEligible()` 都以单个 songId 调用 `mergeSongCoverage()`；后者加锁、读取完整 ledger，再原子重写完整 JSON。大量歌曲顺序完成时累计 I/O 接近平方级字节量。应批量/节流新增 ID，保持同一跨进程锁域、UID/schema 验证和最终强制 flush。
 - **任务日志逐事件 `appendFile()`。** `TaskLogger` 虽串行化写入且失败不影响扫描，但每个 page start/success/failure/split 都执行一次 `appendFile()`，形成反复 open/write/close。应评估长生命周期 FileHandle、有界批量与轮转，同时保留事件顺序、最佳努力和隐私字段过滤。
-- **50 ms 是真实聚合发车硬上限。** NetEase 与 QQ 都先取得 Gate 容量和至少 50 ms 聚合启动槽，再在 HTTP 边界预约 Lane Governor；重试不绕过。用户设为 300 ms + 0–100 ms 时，全局仍至少 50 ms、同出口仍至少 300 ms，聚合最多约 20 次新启动/秒。这是可选调优而非默认改动：NetEase 用户来源 UI 仍为 2500/800 ms。NetEase AIMD 在故障时还会降低有效并发。
+- **50 ms 是真实聚合发车硬上限。** NetEase 与 QQ 都先取得 Gate 容量和至少 50 ms 聚合启动槽，再在 HTTP 边界预约 Lane Governor；重试不绕过。四种 GUI 扫描视图以及 NetEase source/parallel 的新 Server/CLI 任务默认每 Lane 为 300 ms + 0–100 ms 抖动，因此全局仍至少 50 ms、同出口仍至少 300 ms，聚合最多约 20 次新启动/秒；历史恢复值与显式配置保持原值。NetEase AIMD 在故障时还会降低有效并发。
 - **checkpoint 全量克隆/写入存在病理成本。** `CheckpointCoordinator` 每次 durable opportunity 都 `structuredClone()` 完整状态，随后原子序列化/重写完整 JSON。大量 songs、shards、seen IDs 或长时间任务会让单次 checkpoint 成本随状态体积线性增长，并形成显著累计 GC/I/O。优化必须保留不可变 capture、capture-order 串行、强制终态写、失败传播和精确恢复；不能用共享可变对象换速度。
 - 上述热点是可扩展性优化，不改变 50 ms Gate、每 Lane Governor、host cap、代理 fail-closed、JSONL 去重或检查点完成语义。
 
@@ -32,7 +32,7 @@
 - 使用代理池或显式代理的正式扫描保持 fail-closed；普通用户/歌曲/身份辅助查询固定走有界本机直连。
 - 原子 JSON 使用唯一临时名、`fsync`、Windows rename 有界退避和完整临时文件恢复；coverage、resume、代理池和 PDF 目标各自已有跨进程锁。
 - NetEase 多来源会按 songId 合并并保留 `memberships`；普通歌单只接受显式匹配目标 UID 的创建者证据。旧 weekly 路径迁移在共享锁内建立并验证 scoped 状态后才删除冲突旧文件，身份冲突时不删除。
-- NetEase 将未公开听歌排行/喜欢的音乐持久为 `sourceNotices`：跳过对应来源、继续可用来源且不提交完整覆盖，单一私密来源也不产生任务错误；真实传输/数据失败继续保留在 `sourceErrors`。前端还会把旧检查点的隐私 422 文案映射成友好提示。
+- NetEase 将未公开听歌排行/喜欢的音乐持久为 `sourceNotices`：跳过对应来源、继续可用来源且不提交完整覆盖，单一私密来源也不产生任务错误。喜欢歌单的显式、非空、合法唯一 `trackIds` 少于声明时同样保留可访问子集并产生缺失提示，覆盖保持不完整；这是确定性控制信号，不经 Governor 重试或代理 Lane 轮转，也不计入 TransportGate 的自适应失败。缺失目录、正数声明配空向量、非法/重复 ID 和真实传输/数据失败继续保留在 `sourceErrors`。前端还会把旧检查点的隐私 422 文案映射成友好提示，并在目录读取期间展示阶段和物理请求数。
 - NetEase `CommentScope` 是 `root-only-v1 | root-and-floor-v1`，两个 GUI 视图的新任务默认 root-only，并常驻开启楼中楼会极大降速的警告。Root-only 零 floor I/O，使用独立 `-root-only` state/result/coverage 路径；source state/coverage v4、parallel state v2 都校验 scope，resume v4 保存开关且旧 resume 默认 full，跨 scope 不复用完成、覆盖或结果。Canonical result 仍为 target-v3，现有 route/parent 字段足够。
 - `comment_new` 只交付顶层行，但组合 total 含回复。Full scope 的 `comment_floor` 每页 40，从 `time=-1` 开始严格递增，只有 `hasMore=false` 完成。每个 `(song,parent)` 是一页一个的持久工作：同 parent 单飞，不同 parent/歌曲可多 Lane 并行，成功续页可转 Lane，失败接管不重复扣预算。Full scope 只有 root 时间覆盖与全部 floor 完成才提交歌曲/coverage；root-only 仅依 root。
 - NetEase 结果 writer 使用长生命周期 `0600` append handle、完整 write loop 与 `sync`；损坏尾片段保留原文并持久补换行，错误关闭/锁存。一个 floor 页的新命中用一次 `appendBatch` write + fsync 落盘，sync 成功后才发布并推进 cursor/计数/checkpoint。Pooled/parallel 在最多 4 个完成页，或页完成时距上次强刷已达 400 ms 时强刷；终态/停止/错误也强刷。JSONL 先于状态，崩溃最多重放已落盘结果并去重；`close()` 排空已接受 append，所有退出都等待关闭。

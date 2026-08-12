@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { RequestGovernor } from "../src/governor";
-import { CooldownRequired, SourcePrivacyRestricted } from "../src/errors";
+import { CooldownRequired, PartialSongCatalogError, SourcePrivacyRestricted } from "../src/errors";
 import { createFloorCheckpointBatcher } from "../src/comment-floor";
 import { ProxyTransportGate } from "../src/proxy-transport-gate";
 import { runCommentFinder, runPooledCommentFinder } from "../src/scanner";
@@ -1937,6 +1937,54 @@ test("governs target liked-playlist discovery and track loading as separate requ
   assert.equal(report.status, "dry-run");
   assert.equal(report.requestsThisRun, 2);
   assert.deepEqual(calls, ["playlist:42", "tracks:42:9"]);
+});
+
+test("pooled discovery scans an accessible partial liked catalog without retrying other lanes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "ncm-finder-partial-likes-"));
+  const config = await options(directory);
+  config.source = "likes";
+  config.dryRun = true;
+  const catalogActivity: Array<{ message: string; requestsUsed: number }> = [];
+  config.onCatalogActivity = (activity) => catalogActivity.push(activity);
+  let playlistCalls = 0;
+  let trackCalls = 0;
+  const client = new FakeClient();
+  client.getTargetLikedPlaylist = async () => {
+    playlistCalls += 1;
+    return { id: "9", trackCount: 3 };
+  };
+  client.getTargetLikedPlaylistSongs = async () => {
+    trackCalls += 1;
+    throw new PartialSongCatalogError<SongCandidate>([
+      { id: "101", sources: ["likes"], sourceRank: 1 },
+      { id: "102", sources: ["likes"], sourceRank: 2 },
+    ], 3, 1, "喜欢歌曲目录仅返回 2 / 3 首可访问歌曲；缺少的 1 首当前不可见。");
+  };
+  const lanes = Array.from({ length: 8 }, (_, index) => ({
+    name: `lane-${index + 1}`,
+    client,
+    governor: governor(20),
+  }));
+
+  const report = await runPooledCommentFinder(lanes, {
+    ...config,
+    workersPerLane: 1,
+    maxWorkers: 8,
+    requestBudget: 20,
+  });
+
+  assert.equal(report.status, "dry-run");
+  assert.equal(report.songs, 2);
+  assert.equal(report.requestsThisRun, 2);
+  assert.equal(report.coverageComplete, false);
+  assert.deepEqual(report.sourceErrors, []);
+  assert.deepEqual(report.sourceNotices, ["喜欢歌曲目录仅返回 2 / 3 首可访问歌曲；缺少的 1 首当前不可见。"]);
+  assert.equal(playlistCalls, 1);
+  assert.equal(trackCalls, 1, "deterministic partial catalogs must not retry or rotate lanes");
+  assert.deepEqual(catalogActivity, [
+    { message: "正在读取目标用户的喜欢歌曲目录…", requestsUsed: 0 },
+    { message: "歌曲目录读取完成，正在准备评论扫描…", requestsUsed: 2 },
+  ]);
 });
 
 test("pre-shards twelve songs across all eighteen workers and every selected exit", async () => {

@@ -44,6 +44,23 @@ export class ApiResponseError extends Error {
   }
 }
 
+/**
+ * The upstream playlist exposes a valid, unique set of accessible song IDs,
+ * but its declared track count is larger. This is deterministic catalog
+ * metadata (commonly removed or unavailable tracks), not a transport failure.
+ */
+export class PartialSongCatalogError<TSong = unknown> extends Error {
+  constructor(
+    public readonly songs: readonly TSong[],
+    public readonly declaredCount: number,
+    public readonly missingCount: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "PartialSongCatalogError";
+  }
+}
+
 export class AuthenticationRequired extends Error {
   readonly status = 301;
 

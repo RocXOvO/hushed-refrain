@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { RunCancelled } from "../src/errors";
+import { PartialSongCatalogError, RunCancelled } from "../src/errors";
 import { RequestGovernor } from "../src/governor";
 import {
   executeProxyRequest,
@@ -195,6 +195,22 @@ test("automatically reduces aggregate concurrency and start rate after clustered
 
   assert.equal(gate.currentMaxConcurrent, 9);
   assert.equal(gate.currentMinStartDelayMs, 160);
+});
+
+test("does not reduce transport capacity for deterministic partial catalogs", async () => {
+  const gate = new ProxyTransportGate({
+    maxConcurrent: 8,
+    minStartDelayMs: 0,
+    adaptiveFailureThreshold: 3,
+    minimumAdaptiveConcurrent: 2,
+  });
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(
+      gate.run(async () => { throw new PartialSongCatalogError([{ id: "1" }], 2, 1, "partial"); }),
+      PartialSongCatalogError,
+    );
+  }
+  assert.equal(gate.currentMaxConcurrent, 8);
 });
 
 test("slowly restores adaptive concurrency after a stable success streak", async () => {

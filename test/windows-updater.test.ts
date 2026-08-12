@@ -84,6 +84,46 @@ test("returns a safe error state when checking fails", async () => {
   assert.equal(state.error, "network failed secret detail");
 });
 
+test("keeps a previously discovered release available when a retry fails", async () => {
+  const updater = new FakeUpdater();
+  const controller = new WindowsUpdateController(updater, "0.3.0", () => {});
+
+  assert.equal((await controller.check()).latestVersion, "0.4.0");
+  updater.checkForUpdates = async () => { throw new Error("retry failed"); };
+
+  const state = await controller.check();
+  assert.equal(state.phase, "error");
+  assert.equal(state.latestVersion, "0.4.0");
+  assert.equal(state.releaseName, "Hushed Refrain v0.4.0");
+  assert.equal(state.error, "retry failed");
+});
+
+test("clears a previously discovered release when a retry confirms the current version", async () => {
+  const updater = new FakeUpdater();
+  const controller = new WindowsUpdateController(updater, "0.3.0", () => {});
+
+  assert.equal((await controller.check()).latestVersion, "0.4.0");
+  updater.checkForUpdates = async () => {
+    updater.emit("update-not-available", { version: "0.3.0" });
+  };
+
+  const state = await controller.check();
+  assert.equal(state.phase, "up-to-date");
+  assert.equal(state.latestVersion, undefined);
+  assert.equal(state.releaseName, undefined);
+  assert.equal(state.releaseNotes, undefined);
+  assert.equal(state.error, undefined);
+  assert.equal(state.percent, undefined);
+
+  updater.checkForUpdates = async () => {
+    updater.emit("checking-for-update");
+    updater.emit("update-not-available", { version: "0.3.0" });
+  };
+  const checkedAgain = await controller.check();
+  assert.equal(checkedAgain.phase, "up-to-date");
+  assert.equal(checkedAgain.latestVersion, undefined);
+});
+
 test("converts HTML release notes into readable safe text", async () => {
   const updater = new FakeUpdater();
   updater.checkForUpdates = async () => {

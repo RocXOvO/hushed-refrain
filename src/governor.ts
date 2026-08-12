@@ -1,6 +1,7 @@
 import {
   AuthenticationRequired,
   CooldownRequired,
+  PartialSongCatalogError,
   RequestBudgetExhausted,
   RequestExecutionError,
   RunCancelled,
@@ -98,6 +99,7 @@ export class RequestGovernor {
         // control-flow signals for the scanner, not failed remote requests.
         if (error instanceof RequestBudgetExhausted) throw error;
         if (error instanceof CooldownRequired) throw error;
+        if (error instanceof PartialSongCatalogError) throw error;
         const status = errorStatus(error);
         if (status === 301 && (this.options.platformPolicy ?? "netease") === "netease") {
           throw new AuthenticationRequired();

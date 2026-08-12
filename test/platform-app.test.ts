@@ -23,6 +23,152 @@ function extractFunction(name: string): string {
   throw new Error(`unterminated ${name}`);
 }
 
+test("background update discovery reveals the trigger without opening the dialog", async () => {
+  const classes = new Set<string>();
+  const responses = [{
+    updateAvailable: true,
+    currentVersion: "1.3.2",
+    latestVersion: "1.3.3",
+    releaseName: "Hushed Refrain v1.3.3",
+  }];
+  let dialogOpens = 0;
+  let renders = 0;
+  let apiCalls = 0;
+  const context: Record<string, unknown> = {
+    window: {},
+    el: {
+      updateButton: {
+        hidden: true,
+        disabled: false,
+        classList: {
+          add(value: string) { classes.add(value); },
+          remove(value: string) { classes.delete(value); },
+          toggle(value: string, enabled: boolean) {
+            if (enabled) classes.add(value);
+            else classes.delete(value);
+          },
+        },
+      },
+      updateIndicator: { hidden: true },
+      updateDialog: {
+        open: false,
+        showModal() { this.open = true; dialogOpens += 1; },
+        close() { this.open = false; },
+      },
+    },
+    async api() { apiCalls += 1; return responses.shift(); },
+    renderUpdate() { renders += 1; },
+    renderWindowsUpdate() { throw new Error("native renderer must not run in browser mode"); },
+    toast() {},
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    var nativeUpdateState;
+    var availableWebUpdate;
+    ${extractFunction("checkUpdates")}
+    ${extractFunction("openAvailableUpdate")}
+    globalThis.apiUnderTest = { checkUpdates, openAvailableUpdate };
+  `, context);
+  const api = context.apiUnderTest as { checkUpdates(notify?: boolean): Promise<void>; openAvailableUpdate(): void };
+
+  await api.checkUpdates(false);
+  assert.equal(apiCalls, 1);
+  assert.equal((context.el as { updateButton: { hidden: boolean } }).updateButton.hidden, false);
+  assert.equal(classes.has("available"), true);
+  assert.equal(renders, 1);
+  assert.equal(dialogOpens, 0, "background discovery must remain silent");
+
+  api.openAvailableUpdate();
+  assert.equal(apiCalls, 1, "opening a discovered update reuses the cached snapshot");
+  assert.equal(renders, 2);
+  assert.equal(dialogOpens, 1);
+});
+
+test("native updater keeps the trigger hidden until a newer version is known", () => {
+  const classes = new Set<string>();
+  let dialogOpens = 0;
+  const textNode = () => ({ textContent: "" });
+  const context: Record<string, unknown> = {
+    nativeUpdateState: undefined,
+    availableWebUpdate: undefined,
+    activeTaskMode: undefined,
+    startSubmissionBusy: false,
+    qqLookupBusy: false,
+    el: {
+      updateButton: {
+        hidden: true,
+        disabled: false,
+        classList: {
+          toggle(value: string, enabled: boolean) {
+            if (enabled) classes.add(value);
+            else classes.delete(value);
+          },
+        },
+      },
+      updateButtonLabel: textNode(),
+      updateIndicator: { hidden: true },
+      updateReleaseName: textNode(),
+      updatePublishedAt: textNode(),
+      currentVersion: textNode(),
+      latestVersion: textNode(),
+      updateNotes: textNode(),
+      updateAsset: textNode(),
+      updateDialog: {
+        open: false,
+        showModal() { this.open = true; dialogOpens += 1; },
+        close() { this.open = false; },
+      },
+    },
+    dateOnly(value: string) { return value; },
+    fileSize(value: number) { return String(value); },
+    renderUpdateProgress() {},
+    setNativeUpdateAction() {},
+    renderUpdate() {},
+  };
+  context.globalThis = context;
+  vm.runInNewContext(`
+    ${extractFunction("renderWindowsUpdate")}
+    ${extractFunction("openAvailableUpdate")}
+    globalThis.apiUnderTest = { renderWindowsUpdate, openAvailableUpdate };
+  `, context);
+  const api = context.apiUnderTest as {
+    renderWindowsUpdate(state: Record<string, unknown>): void;
+    openAvailableUpdate(): void;
+  };
+  const trigger = (context.el as { updateButton: { hidden: boolean } }).updateButton;
+
+  api.renderWindowsUpdate({ supported: true, phase: "up-to-date", currentVersion: "1.3.2" });
+  assert.equal(trigger.hidden, true);
+  assert.equal(dialogOpens, 0);
+
+  api.renderWindowsUpdate({ supported: true, phase: "checking", currentVersion: "1.3.2" });
+  assert.equal(trigger.hidden, true, "checking from an up-to-date state must not invent an available release");
+
+  api.renderWindowsUpdate({
+    supported: true,
+    phase: "available",
+    currentVersion: "1.3.2",
+    latestVersion: "1.3.3",
+    releaseName: "Hushed Refrain v1.3.3",
+  });
+  assert.equal(trigger.hidden, false);
+  assert.equal(classes.has("available"), true);
+  assert.equal(dialogOpens, 0, "native background discovery must remain silent");
+
+  api.openAvailableUpdate();
+  assert.equal(dialogOpens, 1);
+
+  api.renderWindowsUpdate({ supported: true, phase: "checking", currentVersion: "1.3.2", latestVersion: "1.3.3" });
+  assert.equal(trigger.hidden, false, "a known newer version stays visible while a retry is checking");
+
+  api.renderWindowsUpdate({ supported: true, phase: "error", currentVersion: "1.3.2", latestVersion: "1.3.3", error: "network" });
+  assert.equal(trigger.hidden, false, "a known newer version remains discoverable after a download error");
+
+  api.renderWindowsUpdate({ supported: true, phase: "up-to-date", currentVersion: "1.3.2" });
+  assert.equal(trigger.hidden, true);
+  assert.equal((context.el as { updateDialog: { open: boolean } }).updateDialog.open, false, "an up-to-date retry closes the stale update dialog");
+});
+
 test("deferred results scroll restoration is scoped, cancellable, and generation safe", () => {
   let nextTimer = 0;
   const timers = new Map<number, () => void>();
@@ -836,6 +982,8 @@ test("source preview distinguishes privacy from cooldown and inconclusive prefli
   assert.equal(target.textContent, "喜欢歌曲 已开启隐私");
   render(target, "喜欢歌曲", { status: "restricted" });
   assert.equal(target.textContent, "喜欢歌曲 暂时无法确认");
+  render(target, "喜欢歌曲", { status: "available", songs: 1850, complete: false });
+  assert.equal(target.textContent, "喜欢歌曲 1850+（部分可访问）");
 });
 
 test("pool rebuild notice appears only for a collapsed inspector and does not replay unchanged live text", () => {

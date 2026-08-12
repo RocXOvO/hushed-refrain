@@ -279,6 +279,12 @@ export interface ScanCheckpointActivity {
   blockedUntil?: string;
 }
 
+export interface SongCatalogActivity {
+  message: string;
+  /** Physical catalog requests started in this run so the UI never appears idle. */
+  requestsUsed: number;
+}
+
 export interface ParallelSongScanReport {
   status: "complete" | "matched" | "paused" | "cooldown" | "stopped";
   uid: string;
@@ -396,6 +402,7 @@ export interface ScanOptions {
   onMatch?: (comment: FoundComment) => void;
   onCheckpoint?: (activity: ScanCheckpointActivity) => void;
   onSongCatalog?: (songs: readonly SongCandidate[]) => void;
+  onCatalogActivity?: (activity: SongCatalogActivity) => void;
   onSongProgress?: (activity: SongScanActivity) => void;
   onRequestActivity?: (activity: ScanRequestActivity) => void;
   onSchedulerActivity?: (activity: ScanSchedulerActivity) => void;

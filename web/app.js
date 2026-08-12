@@ -94,6 +94,7 @@ let pendingLiveCommentId;
 let resultsRenderPending = false;
 let resultsNeedRefresh = false;
 let nativeUpdateState;
+let availableWebUpdate;
 let activeTaskMode;
 let activeTaskViewKey;
 let startSubmissionBusy = false;
@@ -928,7 +929,7 @@ function loadNeteaseUserProbe(uid) {
 function probe(target, label, value, playlistCount = false) {
   target.className = value.status;
   target.textContent = value.status === "available"
-    ? playlistCount ? `${label} ${fmt(value.playlists)}${value.complete === false ? "+" : ""} 个 · ${fmt(value.songs)}${value.complete === false ? "+" : ""} 首` : `${label} ${fmt(value.songs)}`
+    ? playlistCount ? `${label} ${fmt(value.playlists)}${value.complete === false ? "+" : ""} 个 · ${fmt(value.songs)}${value.complete === false ? "+" : ""} 首` : `${label} ${fmt(value.songs)}${value.complete === false ? "+（部分可访问）" : ""}`
     : `${label} ${value.status === "private" ? "已开启隐私" : value.status === "cooldown" ? "冷却" : "暂时无法确认"}`;
 }
 
@@ -2538,9 +2539,7 @@ function syncAuthPresentation() {
 async function startAuth() { el.qrDialog.showModal(); el.qrStatus.textContent = "正在生成"; el.qrImage.removeAttribute("src"); try { renderAuth(await api("/api/auth/qr", { method: "POST", body: "{}" })); } catch (error) { el.qrStatus.textContent = error.message; } }
 function renderAuth(auth) { const labels = { idle: "等待开始", creating: "正在生成", waiting: "等待扫码", scanned: "等待手机确认", authorized: "登录完成", expired: "二维码已过期", error: auth.error || "登录出错" }; el.qrStatus.textContent = labels[auth.status] || auth.status; if (auth.qrImageUrl) el.qrImage.src = auth.qrImageUrl; if (auth.status === "authorized") setTimeout(() => el.qrDialog.close(), 700); }
 
-async function checkUpdates(notifyWhenCurrent) {
-  el.updateButton.disabled = true;
-  el.updateButton.classList.add("checking");
+async function checkUpdates(notifyWhenCurrent = false) {
   try {
     const desktop = window.ncmDesktop;
     if (desktop?.platform === "win32" && typeof desktop.checkForUpdates === "function") {
@@ -2554,25 +2553,24 @@ async function checkUpdates(notifyWhenCurrent) {
     }
     const update = await api("/api/update");
     nativeUpdateState = undefined;
-    el.updateButtonLabel.textContent = `v${update.currentVersion}`;
-    el.updateButton.classList.toggle("available", update.updateAvailable);
-    el.updateIndicator.hidden = !update.updateAvailable;
+    availableWebUpdate = update.updateAvailable ? update : undefined;
+    el.updateButton.hidden = !availableWebUpdate;
+    el.updateButton.disabled = false;
+    el.updateButton.classList.toggle("available", Boolean(availableWebUpdate));
+    el.updateButton.classList.remove("checking");
+    el.updateIndicator.hidden = !availableWebUpdate;
     if (update.updateAvailable) {
       renderUpdate(update);
-      if (!el.updateDialog.open) el.updateDialog.showModal();
     } else if (notifyWhenCurrent) {
       toast(`当前 v${update.currentVersion} 已是最新版本`);
     }
   } catch (error) {
     if (notifyWhenCurrent) toast(`检查更新失败：${error.message}`);
-  } finally {
-    const busy = nativeUpdateState?.phase === "checking" || nativeUpdateState?.phase === "downloading";
-    el.updateButton.disabled = busy;
-    el.updateButton.classList.toggle("checking", busy);
   }
 }
 
 function renderUpdate(update) {
+  el.updateButtonLabel.textContent = `更新 v${update.latestVersion}`;
   el.updateReleaseName.textContent = update.releaseName || `Hushed Refrain v${update.latestVersion}`;
   el.updatePublishedAt.textContent = update.publishedAt ? `发布于 ${dateOnly(update.publishedAt)}` : "已有新版本可下载";
   el.currentVersion.textContent = `v${update.currentVersion}`;
@@ -2591,12 +2589,14 @@ function renderUpdate(update) {
 function renderWindowsUpdate(state) {
   nativeUpdateState = state;
   const hasUpdate = ["available", "downloading", "downloaded"].includes(state.phase);
+  const hasKnownUpdate = hasUpdate || (["checking", "error"].includes(state.phase) && Boolean(state.latestVersion));
   const busy = state.phase === "checking" || state.phase === "downloading";
-  el.updateButtonLabel.textContent = `v${state.currentVersion}`;
-  el.updateButton.classList.toggle("available", hasUpdate);
+  el.updateButton.hidden = !hasKnownUpdate;
+  el.updateButtonLabel.textContent = state.latestVersion ? `更新 v${state.latestVersion}` : `v${state.currentVersion}`;
+  el.updateButton.classList.toggle("available", hasKnownUpdate);
   el.updateButton.classList.toggle("checking", busy);
   el.updateButton.disabled = busy;
-  el.updateIndicator.hidden = !hasUpdate;
+  el.updateIndicator.hidden = !hasKnownUpdate;
 
   if (state.latestVersion) {
     el.updateReleaseName.textContent = state.releaseName || `Hushed Refrain v${state.latestVersion}`;
@@ -2610,7 +2610,6 @@ function renderWindowsUpdate(state) {
     el.updateAsset.textContent = "Windows 安装包可在应用内下载，下载完成后将验证完整性。";
     renderUpdateProgress();
     setNativeUpdateAction("下载并更新");
-    if (!el.updateDialog.open) el.updateDialog.showModal();
   } else if (state.phase === "downloading") {
     const detail = [
       state.transferred !== undefined && state.total ? `${fileSize(state.transferred)} / ${fileSize(state.total)}` : null,
@@ -2619,12 +2618,10 @@ function renderWindowsUpdate(state) {
     el.updateAsset.textContent = detail || "正在安全下载 Windows 安装包…";
     renderUpdateProgress(state);
     setNativeUpdateAction("正在下载…", true);
-    if (!el.updateDialog.open) el.updateDialog.showModal();
   } else if (state.phase === "downloaded") {
     el.updateAsset.textContent = "安装包下载并校验完成。重启客户端后将静默安装并自动打开新版。";
     renderUpdateProgress(state);
     setNativeUpdateAction(activeTaskMode || startSubmissionBusy || qqLookupBusy ? "保存进度并重启" : "重启并安装");
-    if (!el.updateDialog.open) el.updateDialog.showModal();
   } else if (state.phase === "error") {
     el.updateAsset.textContent = `更新失败：${state.error || "未知错误"}`;
     renderUpdateProgress();
@@ -2633,7 +2630,20 @@ function renderWindowsUpdate(state) {
     el.updateAsset.textContent = "正在检查 GitHub Release…";
     renderUpdateProgress();
     setNativeUpdateAction("正在检查…", true);
+  } else if (state.phase === "up-to-date") {
+    el.updateAsset.textContent = `当前 v${state.currentVersion} 已是最新版本。`;
+    renderUpdateProgress();
+    setNativeUpdateAction("已是最新版本", true);
+    if (el.updateDialog.open) el.updateDialog.close();
   }
+}
+
+function openAvailableUpdate() {
+  if (el.updateButton.hidden) return;
+  if (nativeUpdateState?.supported) renderWindowsUpdate(nativeUpdateState);
+  else if (availableWebUpdate) renderUpdate(availableWebUpdate);
+  else return;
+  if (!el.updateDialog.open) el.updateDialog.showModal();
 }
 
 function renderUpdateProgress(state) {
@@ -2930,14 +2940,6 @@ function applyPlatformPresentation({ announce = false } = {}) {
     const active = workbench.dataset.workbench === platform;
     workbench.hidden = !active;
     workbench.inert = !active;
-  }
-  const activityLabel = platform === "qq" ? "活动歌曲" : "并行歌曲";
-  const activityNavigation = $('[data-nav-view="activity"]');
-  if (activityNavigation) {
-    activityNavigation.ariaLabel = activityLabel;
-    activityNavigation.title = activityLabel;
-    const label = activityNavigation.querySelector(".navigation-label");
-    if (label) label.textContent = activityLabel;
   }
   configureModeSwitch();
   syncModeVisibility();
@@ -3822,7 +3824,7 @@ el.login.addEventListener("click", () => void startAuth()); $("#closeQrButton").
 $("#closeSettlementButton").addEventListener("click", () => el.settlementDialog.close());
 $("#viewSettlementLogsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("logs")) void refreshLogs(); });
 $("#viewSettlementResultsButton").addEventListener("click", async () => { const view = el.settlementDialog.dataset.view; el.settlementDialog.close(); await switchToView(view); if (openTaskTab("results")) void refreshResults(); });
-el.updateButton.addEventListener("click", () => void checkUpdates(true));
+el.updateButton.addEventListener("click", openAvailableUpdate);
 $("#closeUpdateButton").addEventListener("click", () => el.updateDialog.close());
 $("#laterUpdateButton").addEventListener("click", () => el.updateDialog.close());
 el.updateDownload.addEventListener("click", (event) => void activateUpdate(event));
