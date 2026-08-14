@@ -19,6 +19,16 @@ Hushed Refrain 是一款本地运行的音乐评论检索工具。输入网易�
 > [!WARNING]
 > Web 控制台按本机可信环境设计。请保持默认 `127.0.0.1`，不要暴露到局域网或公网。同一数据目录不要同时运行多个桌面、Web 或 CLI 扫描进程；当前任务互斥只覆盖单个进程。
 
+## 界面预览
+
+![Hushed Refrain 网易云用户来源任务界面](docs/images/dashboard-netease.jpg)
+
+<details>
+  <summary><strong>查看 QQ 音乐公开喜欢任务界面</strong></summary>
+  <br>
+  <img src="docs/images/dashboard-qq.jpg" alt="Hushed Refrain QQ 音乐公开喜欢任务界面">
+</details>
+
 ## Highlights
 
 - **双平台、四种任务视图**：网易云用户来源、网易云单曲并行、QQ 单曲顺序、QQ 公开喜欢彼此隔离。
@@ -48,11 +58,11 @@ Windows 当前未配置 Authenticode，首次运行可能出现 SmartScreen 提�
 
 ## 快速开始
 
+![填写目标、选择任务、受控扫描并查看结果的四步工作流](docs/images/scan-workflow.svg)
+
 1. 安装并启动 Hushed Refrain，在顶部选择网易云音乐或 QQ 音乐。
-2. 填写目标：网易云请在浏览器打开网页版和目标用户主页，复制地址栏 `id=` 后连续的数字；QQ 可使用数字 QQ、官方个人主页 URL 或 EncryptUin。
-3. 选择任务视图和歌曲来源。网易云“喜欢歌曲”需要有效登录会话；QQ 公开喜欢不要求 QQ Cookie。
-4. 高并发扫描建议先在“多 IP 池”中导入或自动优选代理；普通用户资料、歌曲搜索和身份解析始终使用有界本机直连。
-5. 启动任务，在“实时结果”查看命中，或导出当前任务的完整 PDF 报告。
+2. 填写目标并选择任务。网易云 UID 来自网页版用户主页地址栏中 `id=` 后的连续数字；QQ 可使用数字 QQ、官方个人主页 URL 或 EncryptUin。
+3. 启动扫描，在“实时结果”查看命中、恢复中断任务或导出 PDF。高并发扫描可在“多 IP 池”中配置代理；普通资料与搜索始终使用有界本机直连。
 
 UID 示例：
 
@@ -63,12 +73,7 @@ https://music.163.com/#/user/home?id=123456789
 
 ## 任务视图
 
-| 视图 | 适用场景 | 特点 |
-| --- | --- | --- |
-| 网易云 · 用户来源 | 不知道具体歌曲 | 从排行、喜欢和自建公开歌单中发现歌曲 |
-| 网易云 · 单曲并行 | 已知歌曲且评论区较大 | 搜索选曲后并行扫描评论时间范围 |
-| QQ · 单曲顺序 | 已知 QQ 音乐歌曲 | 按评论顺序稳定读取，失败时可切换出口 |
-| QQ · 公开喜欢 | 目标公开了“我喜欢” | 先发现喜欢歌曲，再跨歌曲并行扫描 |
+![网易云用户来源、网易云单曲并行、QQ 单曲顺序和 QQ 公开喜欢四种任务视图](docs/images/task-views.svg)
 
 网易云用户来源可以组合全部时间排行、最近一周排行、喜欢歌曲和目标用户自建的公开歌单。订阅歌单和无法确认归属的歌单不会被当作目标来源。
 
@@ -151,4 +156,4 @@ git diff --check
 
 ## License
 
-本项目采用 [MIT License](LICENSE)。鼠标尾迹的 Follow 动力学参考 David Ronai 的 MIT 许可 [Makio MeshLine](https://github.com/Makio64/makio-meshline)。
+本项目采用 [MIT License](LICENSE)。

@@ -1,6 +1,6 @@
 # QQ 音乐专项记忆
 
-这是 QQ 领域的精简维护清单，不复制完整架构。现行详细真值以 [`qq-music-architecture.md`](qq-music-architecture.md)、`src/qq-music/**`、`src/qq-job-manager.ts` 和测试为准；[`qq-music-integration-design.md`](qq-music-integration-design.md) 仅是 v0.19/v0.20 历史迁移记录，不能反向覆盖当前实现。全局发布、安全与未修问题见根目录 `AGENTS.md` 和 [`code-audit.md`](code-audit.md)。
+这是 QQ 领域的精简维护清单，不复制完整架构。现行详细真值以 [`qq-music-architecture.md`](qq-music-architecture.md)、`src/qq-music/**`、`src/qq-job-manager.ts` 和测试为准。全局发布、安全与未修问题见根目录 `AGENTS.md` 和 [`code-audit.md`](code-audit.md)。
 
 ## 领域边界
 

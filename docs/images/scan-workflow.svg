@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="360" viewBox="0 0 1440 360" role="img" aria-labelledby="title desc">
+  <title id="title">Hushed Refrain 四步工作流</title>
+  <desc id="desc">填写目标、选择任务、受控扫描、查看并导出结果</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#17171b"/>
+      <stop offset="1" stop-color="#242129"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#000" flood-opacity=".18"/>
+    </filter>
+  </defs>
+  <rect width="1440" height="360" rx="28" fill="url(#bg)"/>
+  <text x="64" y="62" fill="#f4f0e8" font-family="Inter, system-ui, sans-serif" font-size="30" font-weight="700">从目标到结果，只需四步</text>
+  <text x="64" y="92" fill="#a8a1af" font-family="Inter, system-ui, sans-serif" font-size="16">普通资料查询走本机直连；正式扫描才使用任务配置的出口与频率限制</text>
+
+  <g filter="url(#shadow)" font-family="Inter, system-ui, sans-serif">
+    <g transform="translate(64 126)">
+      <rect width="286" height="174" rx="20" fill="#f4f0e8"/>
+      <circle cx="38" cy="38" r="20" fill="#8c829c"/>
+      <text x="38" y="45" text-anchor="middle" fill="#fff" font-size="18" font-weight="700">1</text>
+      <text x="72" y="43" fill="#17171b" font-size="21" font-weight="700">填写目标</text>
+      <rect x="24" y="76" width="238" height="44" rx="12" fill="#e8e3db"/>
+      <text x="42" y="104" fill="#595460" font-size="16">UID · QQ 号 · 主页链接</text>
+      <text x="24" y="148" fill="#6f6875" font-size="14">身份精确匹配，昵称不参与判断</text>
+    </g>
+
+    <g transform="translate(406 126)">
+      <rect width="286" height="174" rx="20" fill="#f4f0e8"/>
+      <circle cx="38" cy="38" r="20" fill="#d93a49"/>
+      <text x="38" y="45" text-anchor="middle" fill="#fff" font-size="18" font-weight="700">2</text>
+      <text x="72" y="43" fill="#17171b" font-size="21" font-weight="700">选择任务</text>
+      <rect x="24" y="76" width="112" height="40" rx="12" fill="#f4d9dc"/>
+      <text x="80" y="102" text-anchor="middle" fill="#a92533" font-size="15" font-weight="700">用户来源</text>
+      <rect x="146" y="76" width="116" height="40" rx="12" fill="#dcefe4"/>
+      <text x="204" y="102" text-anchor="middle" fill="#237a51" font-size="15" font-weight="700">已知单曲</text>
+      <text x="24" y="148" fill="#6f6875" font-size="14">按场景选择来源发现或单曲扫描</text>
+    </g>
+
+    <g transform="translate(748 126)">
+      <rect width="286" height="174" rx="20" fill="#f4f0e8"/>
+      <circle cx="38" cy="38" r="20" fill="#2cbf75"/>
+      <text x="38" y="45" text-anchor="middle" fill="#fff" font-size="18" font-weight="700">3</text>
+      <text x="72" y="43" fill="#17171b" font-size="21" font-weight="700">受控扫描</text>
+      <path d="M32 105h36l18-26 24 48 20-34 22 12h94" fill="none" stroke="#2a8b60" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+      <text x="24" y="148" fill="#6f6875" font-size="14">多出口调度、限速、失败切换与断点</text>
+    </g>
+
+    <g transform="translate(1090 126)">
+      <rect width="286" height="174" rx="20" fill="#f4f0e8"/>
+      <circle cx="38" cy="38" r="20" fill="#8c829c"/>
+      <text x="38" y="45" text-anchor="middle" fill="#fff" font-size="18" font-weight="700">4</text>
+      <text x="72" y="43" fill="#17171b" font-size="21" font-weight="700">查看结果</text>
+      <rect x="24" y="76" width="238" height="48" rx="12" fill="#e8e3db"/>
+      <path d="M43 101h72M43 89h116M43 113h150" stroke="#8c829c" stroke-width="5" stroke-linecap="round"/>
+      <text x="24" y="148" fill="#6f6875" font-size="14">实时查看 · 恢复任务 · 导出 PDF</text>
+    </g>
+  </g>
+
+  <g fill="none" stroke="#8c829c" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M358 213h34m-10-10 10 10-10 10"/>
+    <path d="M700 213h34m-10-10 10 10-10 10"/>
+    <path d="M1042 213h34m-10-10 10 10-10 10"/>
+  </g>
+</svg>

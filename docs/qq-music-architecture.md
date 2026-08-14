@@ -1,6 +1,6 @@
 # QQ 音乐评论查询架构
 
-本文只描述当前源码中的 QQ 音乐领域实现。历史迁移基线与设计决策记录见 `qq-music-integration-design.md`，当前实现契约以本文、`qq-music-memory.md` 和测试为准。
+本文只描述当前源码中的 QQ 音乐领域实现。当前实现契约以本文、`qq-music-memory.md` 和测试为准。
 
 桌面与报告品牌统一为 `Hushed Refrain / THE WORDS LEFT BETWEEN SONGS`，不设置中文别名。包名为 `hushed-refrain`，appId/AUMID/bundle ID 为 `cn.local.hushedrefrain`，仓库为 `RocXOvO/hushed-refrain`，安装包文件名前缀为 `Hushed-Refrain`，持久目录为 `appData/hushed-refrain`。旧 `appData/ncm-comment-finder` 只通过同父目录原子改名迁入；NSIS 显式保留旧 GUID，QQ 的 task key、generation、checkpoint、结果路径与身份匹配规则不因品牌迁移改变。
 

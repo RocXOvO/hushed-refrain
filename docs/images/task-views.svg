@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="520" viewBox="0 0 1440 520" role="img" aria-labelledby="title desc">
+  <title id="title">Hushed Refrain 四种独立任务视图</title>
+  <desc id="desc">网易云用户来源、网易云单曲并行、QQ单曲顺序、QQ公开喜欢</desc>
+  <rect width="1440" height="520" rx="28" fill="#f6f4ef"/>
+  <text x="64" y="62" fill="#17171b" font-family="Inter, system-ui, sans-serif" font-size="30" font-weight="700">四种任务视图，按场景选择</text>
+  <text x="64" y="92" fill="#716b76" font-family="Inter, system-ui, sans-serif" font-size="16">每个视图独立保存任务、进度、结果和恢复状态</text>
+
+  <g font-family="Inter, system-ui, sans-serif">
+    <g transform="translate(64 126)">
+      <rect width="638" height="150" rx="20" fill="#fff" stroke="#e2d9d7" stroke-width="2"/>
+      <rect width="10" height="150" rx="5" fill="#d93a49"/>
+      <circle cx="58" cy="48" r="24" fill="#d93a49"/>
+      <text x="58" y="56" text-anchor="middle" fill="#fff" font-size="20" font-weight="800">N</text>
+      <text x="98" y="46" fill="#17171b" font-size="22" font-weight="750">网易云 · 用户来源</text>
+      <text x="98" y="72" fill="#716b76" font-size="15">不知道评论出现在哪首歌</text>
+      <text x="34" y="116" fill="#3f3a43" font-size="16">排行、喜欢、自建公开歌单 → 合并去重 → 跨歌曲扫描</text>
+    </g>
+
+    <g transform="translate(738 126)">
+      <rect width="638" height="150" rx="20" fill="#fff" stroke="#e2d9d7" stroke-width="2"/>
+      <rect width="10" height="150" rx="5" fill="#d93a49"/>
+      <circle cx="58" cy="48" r="24" fill="#d93a49"/>
+      <text x="58" y="56" text-anchor="middle" fill="#fff" font-size="20" font-weight="800">N</text>
+      <text x="98" y="46" fill="#17171b" font-size="22" font-weight="750">网易云 · 单曲并行</text>
+      <text x="98" y="72" fill="#716b76" font-size="15">已经知道目标歌曲</text>
+      <text x="34" y="116" fill="#3f3a43" font-size="16">评论时间范围分片 → 多 Worker 并行 → 覆盖进度可恢复</text>
+    </g>
+
+    <g transform="translate(64 310)">
+      <rect width="638" height="150" rx="20" fill="#fff" stroke="#d9e6df" stroke-width="2"/>
+      <rect width="10" height="150" rx="5" fill="#2cbf75"/>
+      <circle cx="58" cy="48" r="24" fill="#2cbf75"/>
+      <text x="58" y="56" text-anchor="middle" fill="#123d2a" font-size="20" font-weight="800">Q</text>
+      <text x="98" y="46" fill="#17171b" font-size="22" font-weight="750">QQ · 单曲顺序</text>
+      <text x="98" y="72" fill="#716b76" font-size="15">已知 QQ 音乐歌曲</text>
+      <text x="34" y="116" fill="#3f3a43" font-size="16">单条 SeqNo 评论链 → 稳定翻页 → 失败出口接力</text>
+    </g>
+
+    <g transform="translate(738 310)">
+      <rect width="638" height="150" rx="20" fill="#fff" stroke="#d9e6df" stroke-width="2"/>
+      <rect width="10" height="150" rx="5" fill="#2cbf75"/>
+      <circle cx="58" cy="48" r="24" fill="#2cbf75"/>
+      <text x="58" y="56" text-anchor="middle" fill="#123d2a" font-size="20" font-weight="800">Q</text>
+      <text x="98" y="46" fill="#17171b" font-size="22" font-weight="750">QQ · 公开喜欢</text>
+      <text x="98" y="72" fill="#716b76" font-size="15">目标公开了“我喜欢”</text>
+      <text x="34" y="116" fill="#3f3a43" font-size="16">发现公开喜欢歌曲 → 跨歌曲并行 → 每首歌保持顺序链</text>
+    </g>
+  </g>
+</svg>
