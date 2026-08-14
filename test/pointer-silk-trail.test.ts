@@ -355,13 +355,29 @@ test("pointer MeshLine trail uses the low-power bounded WebGL2 pipeline", () => 
       powerPreference: "low-power",
     },
   }]);
-  assert.ok(canvas.width * canvas.height <= 800_000);
+  assert.equal(canvas.width, 3_840,
+    "wide workspaces must never stretch a sub-CSS-resolution framebuffer");
+  assert.equal(canvas.height, 2_160);
   assert.ok(canvas.width / 3_840 <= 1.25);
   assert.equal(app.gl.createdPrograms, 1);
   assert.equal(app.gl.createdVertexArrays, 1);
   assert.equal(app.gl.createdBuffers, 1);
   assert.match(app.gl.shaderSources.join("\n"), /layout\(location = 0\) in vec2 a_previous/);
+  assert.match(app.gl.shaderSources.join("\n"), /incoming = safeDirection\(a_current - a_previous, forward\)/);
   assert.match(app.gl.shaderSources.join("\n"), /miter = clamp/);
+  assert.match(app.gl.shaderSources.join("\n"), /fwidth\(v_side\)/);
+  assert.match(app.gl.shaderSources.join("\n"), /fwidth\(v_progress\)/);
+  assert.match(app.gl.shaderSources.join("\n"), /color = clamp/);
+
+  const supersampled = runtime({ width: 1_440.25, height: 900.25, dpr: 2 });
+  supersampled.context.PointerSilkTrail.create({ host: supersampled.host, enabled: true });
+  supersampled.host.dispatch("pointermove", { pointerType: "mouse", clientX: 180, clientY: 210 });
+  const supersampledCanvas = supersampled.host.children[0];
+  assert.ok(supersampledCanvas.width >= 1_440.25);
+  assert.ok(supersampledCanvas.height >= 900.25);
+  assert.ok(supersampledCanvas.width / 1_440.25 <= 1.251);
+  assert.ok(supersampledCanvas.width * supersampledCanvas.height <= 2_005_000,
+    "the two-million-pixel budget should constrain supersampling without undersampling CSS pixels");
 });
 
 test("pointer MeshLine trail projects reference world width and offsets into a bounded CSS footprint", () => {
@@ -632,7 +648,10 @@ test("pointer MeshLine source preserves Makio follow dynamics without random or 
   assert.match(trailSource, /mouseSpeed \+= .* \* 0\.15/);
   assert.match(trailSource, /gl\.drawArrays\(gl\.TRIANGLE_STRIP/);
   assert.match(trailSource, /IDLE_STOP_MS = HOLD_MS \+ FADE_MS/);
-  assert.match(trailSource, /MAX_COLOR_PIXELS = 800_000/);
+  assert.match(trailSource, /MAX_SUPERSAMPLED_PIXELS = 2_000_000/);
+  assert.match(trailSource, /renderDpr = Math\.max\(1, desiredDpr \* pixelScale\)/);
+  assert.match(trailSource, /sideFeather = min\(1\.0, max\(0\.24, 0\.5 \* fwidth\(v_side\)\)\)/);
+  assert.match(trailSource, /capFeather = min\(0\.5, max\(0\.001, 0\.75 \* fwidth\(v_progress\)\)\)/);
   assert.match(trailSource, /MAX_LINE_WIDTH_PX = 22/);
   assert.match(trailSource, /MAX_OFFSET_RADIUS_PX = 26/);
   assert.match(trailSource, /MAX_HEAD_LAG_PX = 32/);

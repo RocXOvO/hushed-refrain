@@ -820,7 +820,7 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.match(pageText, /app-icon\.png\?v=2/);
   assert.match(pageText, /styles\.css\?v=72/);
   assert.match(pageText, /platform-wave\.js\?v=15/);
-  assert.match(pageText, /pointer-silk-trail\.js\?v=7/);
+  assert.match(pageText, /pointer-silk-trail\.js\?v=8/);
   assert.match(pageText, /app\.js\?v=84/);
   assert.match(pageText, /id="sourceSegmented"[^>]*class="segmented source-segmented"/);
   assert.match(pageText, /id="sourceSelectionIndicator"[^>]*aria-hidden="true"/);
@@ -1117,7 +1117,9 @@ test("dashboard serves UI assets and estimate API", async (context) => {
   assert.equal(pointerTrail.status, 200);
   const pointerTrailText = await pointerTrail.text();
   assert.match(pointerTrailText, /globalThis\.PointerSilkTrail/);
-  assert.match(pointerTrailText, /MAX_COLOR_PIXELS = 800_000/);
+  assert.match(pointerTrailText, /MAX_SUPERSAMPLED_PIXELS = 2_000_000/);
+  assert.match(pointerTrailText, /renderDpr = Math\.max\(1, desiredDpr \* pixelScale\)/);
+  assert.match(pointerTrailText, /fwidth\(v_side\)/);
   assert.match(pointerTrailText, /NUM_POINTS = 20/);
   assert.match(pointerTrailText, /NUM_LINES = 4/);
   assert.match(pointerTrailText, /getContext\("webgl2", CONTEXT_OPTIONS\)/);

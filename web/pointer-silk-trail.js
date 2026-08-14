@@ -14,7 +14,10 @@
   const IDLE_STOP_MS = HOLD_MS + FADE_MS;
   const POINTER_DELTA_RESET_MS = 50;
   const MAX_DPR = 1.25;
-  const MAX_COLOR_PIXELS = 800_000;
+  // The budget limits supersampling only. Never render below one backing
+  // pixel per CSS pixel: stretching an undersized default framebuffer is the
+  // dominant source of stair-stepped edges on wide desktop workspaces.
+  const MAX_SUPERSAMPLED_PIXELS = 2_000_000;
   const MAX_LINE_WIDTH_PX = 22;
   const MAX_OFFSET_RADIUS_PX = 26;
   const MAX_HEAD_LAG_PX = 32;
@@ -75,7 +78,8 @@
     }
 
     void main() {
-      vec2 incoming = safeDirection(a_current - a_previous, vec2(1.0, 0.0));
+      vec2 forward = safeDirection(a_next - a_current, vec2(1.0, 0.0));
+      vec2 incoming = safeDirection(a_current - a_previous, forward);
       vec2 outgoing = safeDirection(a_next - a_current, incoming);
       vec2 tangent = safeDirection(incoming + outgoing, outgoing);
       vec2 normal = vec2(-tangent.y, tangent.x);
@@ -114,9 +118,17 @@
       vec3 color = v_lineIndex == 0 ? u_color0
         : (v_lineIndex == 1 ? u_color1
         : (v_lineIndex == 2 ? u_color2 : u_color3));
-      color += smoothstep(0.5, 1.0, v_progress) * 0.2;
-      float edgeAlpha = 1.0 - smoothstep(0.76, 1.0, abs(v_side));
-      float alpha = edgeAlpha * u_opacity;
+      color = clamp(color + smoothstep(0.5, 1.0, v_progress) * 0.2, 0.0, 1.0);
+
+      // Keep the soft silk body, but make its final edge and end caps cover a
+      // stable number of framebuffer pixels. A proportional-only feather can
+      // be substantially thinner than one pixel on slow/narrow diagonals.
+      float sideFeather = min(1.0, max(0.24, 0.5 * fwidth(v_side)));
+      float sideAlpha = 1.0 - smoothstep(1.0 - sideFeather, 1.0, abs(v_side));
+      float capDistance = min(v_progress, 1.0 - v_progress);
+      float capFeather = min(0.5, max(0.001, 0.75 * fwidth(v_progress)));
+      float capAlpha = smoothstep(0.0, capFeather, capDistance);
+      float alpha = sideAlpha * capAlpha * u_opacity;
       outColor = vec4(color * alpha, alpha);
     }
   `;
@@ -309,12 +321,12 @@
       offsetYs[3] = -Math.min(MAX_OFFSET_RADIUS_PX, OFFSET_WORLD_RADII[3] * worldToCssPixels);
       const desiredDpr = Math.min(MAX_DPR, Math.max(1, devicePixelRatio || 1));
       const rawPixels = cssWidth * cssHeight * desiredDpr * desiredDpr;
-      const pixelScale = rawPixels > MAX_COLOR_PIXELS
-        ? Math.sqrt(MAX_COLOR_PIXELS / rawPixels)
+      const pixelScale = rawPixels > MAX_SUPERSAMPLED_PIXELS
+        ? Math.sqrt(MAX_SUPERSAMPLED_PIXELS / rawPixels)
         : 1;
-      const renderDpr = desiredDpr * pixelScale;
-      canvas.width = Math.max(1, Math.floor(cssWidth * renderDpr));
-      canvas.height = Math.max(1, Math.floor(cssHeight * renderDpr));
+      const renderDpr = Math.max(1, desiredDpr * pixelScale);
+      canvas.width = Math.max(1, Math.ceil(cssWidth * renderDpr));
+      canvas.height = Math.max(1, Math.ceil(cssHeight * renderDpr));
       gl.viewport(0, 0, canvas.width, canvas.height);
       gl.useProgram(program);
       gl.uniform2f(uniforms.resolution, cssWidth, cssHeight);

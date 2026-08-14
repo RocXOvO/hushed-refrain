@@ -24,7 +24,7 @@ test("uses one Hushed Refrain product and repository contract", () => {
     };
   };
   assert.equal(manifest.name, "hushed-refrain");
-  assert.equal(manifest.version, "1.3.5");
+  assert.equal(manifest.version, "1.3.6");
   assert.equal(manifest.build.appId, "cn.local.hushedrefrain");
   assert.equal(manifest.build.productName, "Hushed Refrain");
   assert.deepEqual(manifest.build.publish, [{ provider: "github", owner: "RocXOvO", repo: "hushed-refrain", releaseType: "release" }]);
